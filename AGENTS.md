@@ -23,3 +23,13 @@ Architecture/authority governance is normative in:
 - `docs/adr/decision-register.md`
 
 Accepted, non-superseded ADRs are current architecture authority within the active Durable Plan and scope lock. Superseded or rejected ADRs are provenance only. ADR IDs are stable and MUST NOT be reused or renumbered after allocation.
+
+Engineering/runtime/security standards are normative in:
+
+- `docs/engineering/go-engineering-standard.md`
+- `docs/engineering/security-standard.md`
+- `docs/engineering/executable-runtime-gate.md`
+- `docs/engineering/observability-standard.md`
+- `docs/engineering/quality-enforcement-map.md`
+
+Compilation alone is never completion evidence. Runnable capabilities require the real Executable Runtime Gate, applicable security failures block completion, and concurrency/timeouts/resources must remain bounded.
