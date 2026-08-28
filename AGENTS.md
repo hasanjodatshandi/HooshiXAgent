@@ -16,3 +16,10 @@ The normative scope lock is:
 `docs/governance/plan-roadmap-scope-lock.md`
 
 HooshiXAgent scope is limited to the Go Edge Agent, Go Tunnel Gateway, and the shared/language-neutral integration contracts required by them. The separate HooshiX Control Panel is external and MUST NOT be implemented in this repository.
+
+Architecture/authority governance is normative in:
+
+- `docs/governance/authority-and-adr-governance.md`
+- `docs/adr/decision-register.md`
+
+Accepted, non-superseded ADRs are current architecture authority within the active Durable Plan and scope lock. Superseded or rejected ADRs are provenance only. ADR IDs are stable and MUST NOT be reused or renumbered after allocation.
