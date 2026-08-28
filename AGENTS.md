@@ -39,3 +39,9 @@ Repository delivery workflow is normative in:
 - `docs/engineering/repository-change-workflow.md`
 
 Normal implementation work uses the canonical workspace/remote and one fresh branch + one PR per Durable Plan leaf. Required CI must pass before merge when applicable, and merged `main` plus post-merge verification are required before a leaf may be marked `PASSED`.
+
+Reporting/evidence requirements are normative in:
+
+- `docs/engineering/reporting-and-evidence-contract.md`
+
+Use the exact check-status vocabulary defined there. A leaf may not be reported `completed` with missing required evidence, skipped checks must be explicit, and architecture deviations must be `None` or explicitly approved and traceable.
