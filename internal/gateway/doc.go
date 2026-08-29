@@ -1,5 +1,8 @@
-// Package gateway marks the Tunnel Gateway implementation boundary.
+// Package gateway implements the AG-4 Tunnel Gateway data plane.
 //
-// AG-2 intentionally contains no Gateway runtime behavior. Runnable Gateway
-// capabilities are introduced only by their later approved Durable Plan leaf.
+// It owns only ephemeral authenticated Agent session/stream state, runtime
+// routing from validated external metadata, public ingress, bounded traffic
+// signals, and the protocol-v1 data-plane enforcement needed by the Gateway.
+// It does not implement Control Panel business logic, persistence, or the Edge
+// Agent product.
 package gateway
