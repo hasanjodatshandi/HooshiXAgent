@@ -70,3 +70,7 @@ Later release boundaries add applicable:
 - immutable artifact promotion.
 
 These are not implemented by this governance leaf.
+
+## Agent↔Gateway E2E acceptance
+
+AG-6 adds `scripts/ci/e2e-acceptance.sh` and the blocking `Agent↔Gateway E2E acceptance` CI job. It builds the real Agent and Gateway binaries and executes the deterministic integrated acceptance documented in `docs/runtime/agent-gateway-e2e-acceptance.md`, including validated external metadata injection, the stable `demo.hooshix.test` test route, public tunnel success, Agent/Gateway restart recovery, offline/error behavior, and security-negative cases. This gate supplements rather than replaces the executable runtime, unit/race, architecture, vulnerability, Gitleaks and Semgrep gates.

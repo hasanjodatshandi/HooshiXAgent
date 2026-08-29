@@ -105,9 +105,9 @@ The executable emits versioned JSON-lines `GatewayStatusSignal` records to stdou
 
 - a generated trusted test certificate;
 - a deterministic external metadata snapshot;
-- an authenticated protocol-v1 mock Agent (AG-5 product is intentionally not implemented here);
+- an authenticated protocol-v1 test peer for the Gateway-specific runtime check;
 - a real local HTTP service;
 - a real HTTPS public request through the Gateway/tunnel;
 - TLS/plaintext-startup negative verification.
 
-Agent product implementation remains AG-5. Full Agent↔Gateway product acceptance and process restart/recovery are later plan leaves.
+The Gateway-specific runtime check remains in place. Integrated real Agent↔Gateway acceptance, including restart/reconnect behavior, is defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`.

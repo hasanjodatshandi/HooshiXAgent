@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "required E2E tool not found: go" >&2
+  exit 1
+fi
+
+runtime_dir="$(mktemp -d)"
+trap 'rm -rf "$runtime_dir"' EXIT
+
+gateway_binary="$runtime_dir/hooshix-gateway"
+agent_binary="$runtime_dir/hooshix-agent"
+
+go build -o "$gateway_binary" ./cmd/gateway
+go build -o "$agent_binary" ./cmd/agent
+
+HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
+HOOSHIX_AGENT_BINARY="$agent_binary" \
+  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayEndToEndSecurityNegatives' ./internal/runtimegate
+
+echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, offline/error behavior and security negatives were exercised."
