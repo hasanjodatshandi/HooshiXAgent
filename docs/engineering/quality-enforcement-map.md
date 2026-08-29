@@ -35,7 +35,7 @@ scripts/ci/runtime-gate.sh
 .github/workflows/ci.yml
 ```
 
-The runtime gate is fail-closed. AG-4 extends it with the real approved Gateway runtime procedure: build `cmd/gateway`, launch the executable as a separate TLS process, exercise authenticated WSS/tunnel/public-ingress behavior with deterministic external metadata and a test-only peer, and verify plaintext startup rejection. Any additional runnable capability still fails the gate until its own approved runtime procedure is added.
+The runtime gate is fail-closed. AG-5 extends the approved runtime procedure to build and launch both real product binaries: `cmd/gateway` and `cmd/agent`. It exercises TLS/WSS authentication, a real public request through the Agent to an approved loopback service, Agent state/identity persistence across process restart, reconnect, and plaintext Gateway startup rejection. Any additional runnable capability still fails the gate until its own approved runtime procedure is added. The Go quality gate also cross-builds the Agent for Linux, Windows and macOS; CI separately runs Agent platform-foundation tests on all three OS families.
 ## Gate semantics
 
 Use exact evidence vocabulary:

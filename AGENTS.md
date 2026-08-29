@@ -76,3 +76,6 @@ AG-3 contract authority is implemented in `contracts/v1/` and `internal/contract
 
 
 AG-4 Gateway runtime authority is implemented in `cmd/gateway`, `internal/gateway/`, `docs/runtime/gateway.md`, and ADR-0008. Gateway runtime state is ephemeral/in-memory; external authorization/routing/revocation metadata remains the authority boundary. `scripts/ci/runtime-gate.sh` now executes the real Gateway process. AG-4 does not authorize Edge Agent product implementation or Control Panel persistence/business logic.
+
+
+AG-5 Edge Agent runtime authority is implemented in `cmd/agent`, `internal/agent/`, `docs/runtime/agent.md`, and ADR-0009. The Agent owns its unique Ed25519 private identity, protected local secret state, loopback-only endpoint mappings, WSS/TLS client and local proxy. Public/Gateway input never selects a raw local target. External Control Panel credentials are consumed only as runtime inputs and no Control Panel server/business logic is embedded. `scripts/ci/runtime-gate.sh` executes real Agent+Gateway processes; installer/service installation, signed update delivery, staging acceptance and release hardening remain later leaves.

@@ -8,7 +8,7 @@ The separate **HooshiX Control Panel** is external and is not implemented in thi
 
 ```text
 contracts/v1/           Agent↔Gateway protocol v1 + external Control Panel integration contracts/fixtures
-internal/agent/          Edge Agent implementation boundary; no product runtime behavior yet
+internal/agent/          AG-5 Edge Agent product runtime
 internal/gateway/        AG-4 Tunnel Gateway data-plane runtime
 internal/contractv1/     Go reference codec/strict validation for the language-neutral v1 contracts
 internal/architecture/   repository architecture fitness tests
@@ -25,7 +25,7 @@ Current contract authority is documented in `contracts/v1/`, including:
 - external device/session authorization, endpoint-route assignment, revocation, and bounded Gateway status schemas;
 - strict rules preventing raw remote local-target authority or direct Control Panel database coupling.
 
-AG-3 does not introduce an Edge Agent or Tunnel Gateway executable. Product runtime implementation begins only in the later approved runtime leaves.
+AG-4/AG-5 now provide the runnable Tunnel Gateway and Edge Agent. The external Control Panel remains out of this repository.
 
 ## Local baseline checks
 
@@ -37,10 +37,16 @@ scripts/ci/security.sh
 scripts/ci/runtime-gate.sh
 ```
 
-The runtime gate is fail-closed. AG-4 now exercises the real `cmd/gateway` process over TLS/WSS with authenticated tunnel ingress. Any additional runnable capability must add its own approved runtime procedure instead of treating compilation or tests as runtime evidence.
+The runtime gate is fail-closed. AG-5 now exercises the real `cmd/gateway` and `cmd/agent` processes over TLS/WSS with authenticated public-to-loopback tunnel traffic and Agent identity persistence/reconnect. Any additional runnable capability must add its own approved runtime procedure instead of treating compilation or tests as runtime evidence.
 
 ## Tunnel Gateway runtime
 
 AG-4 introduces the first runnable product capability: `cmd/gateway`. It serves TLS-only HTTPS/WSS, authenticates protocol-v1 Agent sessions against validated external metadata, multiplexes bounded logical streams, routes public HTTP ingress by externally supplied hostname assignments, and emits bounded status/traffic signals.
 
 Operational details and the read-only external metadata snapshot layout are documented in `docs/runtime/gateway.md`. The Edge Agent product remains AG-5 work.
+
+## Edge Agent runtime
+
+AG-5 introduces `cmd/agent` with persistent per-install Ed25519 identity, protected local secret state, WSS/TLS authentication/reconnect, loopback-only local endpoint mappings, bounded stream proxying, and `init/configure/expose/status/doctor/service-spec/update-info` foundations.
+
+Operational and security details are documented in `docs/runtime/agent.md`. Full installer/service installation, signed update delivery and release packaging remain AG-7 work.

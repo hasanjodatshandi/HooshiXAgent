@@ -1,5 +1,7 @@
-// Package agent marks the Edge Agent implementation boundary.
+// Package agent implements the AG-5 Edge Agent product runtime.
 //
-// AG-2 intentionally contains no Agent runtime behavior. Runnable Agent
-// capabilities are introduced only by their later approved Durable Plan leaf.
+// It owns per-install device identity, local state/secret storage, explicit
+// loopback-only endpoint mappings, the outbound WSS/TLS tunnel client,
+// reconnect/session/stream behavior, local proxying, and Agent-local UX
+// foundations. It does not implement Control Panel server/business logic.
 package agent
