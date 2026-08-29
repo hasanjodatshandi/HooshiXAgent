@@ -1,0 +1,11 @@
+{
+  "contract_version": 1,
+  "event_id": "status-001",
+  "observed_at": "2026-08-29T12:05:00Z",
+  "kind": "traffic_delta",
+  "device_id": "device-001",
+  "session_id": "session-001",
+  "endpoint_id": "endpoint-001",
+  "bytes_from_public": 1024,
+  "bytes_to_public": 2048
+}

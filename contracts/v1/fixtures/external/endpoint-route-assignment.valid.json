@@ -1,0 +1,11 @@
+{
+  "contract_version": 1,
+  "assignment_id": "assign-001",
+  "endpoint_id": "endpoint-001",
+  "public_hostname": "demo.hooshix.example",
+  "device_id": "device-001",
+  "local_endpoint_id": "local-http-001",
+  "enabled": true,
+  "not_before": "2026-08-29T06:00:00Z",
+  "expires_at": "2026-08-30T06:00:00Z"
+}

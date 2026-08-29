@@ -71,3 +71,5 @@ Repository/CI foundation is implemented by AG-2 in:
 - `.github/workflows/ci.yml` — required CI workflow.
 
 Once AG-2 is merged, applicable changes must keep these required CI gates passing. A later leaf that introduces a runnable product capability must extend/replace the AG-2 runtime guard with the real Executable Runtime Gate for that capability; it may not weaken or bypass the guard.
+
+AG-3 contract authority is implemented in `contracts/v1/` and `internal/contractv1/`, with ADR-0007 defining protocol-v1 framing/control encoding. Concrete contract changes must preserve the external Control Panel boundary, strict validation, no raw remote local-target authority, and versioned compatibility rules. AG-3 does not authorize Gateway/Agent executables or Control Panel business logic.

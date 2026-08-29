@@ -1,0 +1,14 @@
+title = "HooshiXAgent Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Allow only the deterministic SHA-256 digest of the documented synthetic AG-3 session-token fixture."
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''^contracts/v1/fixtures/(external|invalid)/device-session-authorization\..*\.json$''']
+  regexes = ['''"token_sha256"\s*:\s*"fceb6a20fda55e114a7a11d0ee3ad98191d517c27f42591f2b16421f57a063f8"''']

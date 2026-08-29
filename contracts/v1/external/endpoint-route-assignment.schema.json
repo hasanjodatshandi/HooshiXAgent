@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.hooshix.local/agent/v1/external/endpoint-route-assignment.schema.json",
+  "title": "HooshiXAgent External Endpoint Route Assignment v1",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "assignment_id",
+    "endpoint_id",
+    "public_hostname",
+    "device_id",
+    "local_endpoint_id",
+    "enabled",
+    "not_before",
+    "expires_at"
+  ],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "assignment_id": { "$ref": "#/$defs/id" },
+    "endpoint_id": { "$ref": "#/$defs/id" },
+    "public_hostname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$"
+    },
+    "device_id": { "$ref": "#/$defs/id" },
+    "local_endpoint_id": {
+      "$ref": "#/$defs/id",
+      "description": "Opaque Agent-local mapping identifier. Never a raw address, URL, path, socket, or scheme."
+    },
+    "enabled": { "type": "boolean" },
+    "not_before": { "$ref": "#/$defs/timestamp" },
+    "expires_at": { "$ref": "#/$defs/timestamp" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 35
+    }
+  }
+}

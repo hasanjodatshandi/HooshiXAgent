@@ -12,4 +12,4 @@ if ((${#runnable_files[@]} != 0)); then
   exit 1
 fi
 
-echo "Executable Runtime Gate: Not applicable — AG-2 introduces no runnable product capability."
+echo "Executable Runtime Gate: Not applicable — current repository state introduces no runnable product capability."

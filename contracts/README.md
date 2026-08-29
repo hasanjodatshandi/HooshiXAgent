@@ -1,16 +1,22 @@
 # Shared / Integration Contract Boundary
 
-This directory reserves the language-neutral contract boundary required by the approved HooshiXAgent architecture.
+This directory contains the language-neutral contracts required by the approved HooshiXAgent architecture.
 
-AG-2 intentionally contains **no concrete protocol schema, field layout, message encoding, API model, mock fixture, or Control Panel business contract**.
+Current contract authority is versioned under:
 
-Concrete Agent↔Gateway protocol definitions and the minimum external HooshiX Control Panel integration contract belong to the later approved **AG-3 — Shared Tunnel Protocol and External Control Panel Integration Contract** leaf.
+```text
+contracts/v1/
+```
 
-Allowed future ownership remains limited to:
+AG-3 defines:
 
-- Agent↔Gateway tunnel/session protocol definitions;
-- endpoint/session/routing identifiers required at runtime;
-- external metadata interfaces or language-neutral schemas needed to decouple Gateway from Control Panel implementation;
-- shared security/version/error semantics required by Agent and Gateway.
+- Agent↔Gateway protocol-v1 framing and control-message contracts;
+- device/session authorization metadata consumed from the external HooshiX Control Panel boundary;
+- endpoint assignment/routing metadata;
+- revocation signals;
+- bounded Gateway status/traffic signals;
+- deterministic valid/invalid fixtures for independent development and security validation.
 
-Users, tenants, quotas, billing, Control Panel persistence, Control Panel APIs, and UI models remain out of scope for this repository.
+The contracts remain limited to runtime integration. They do **not** implement or model Control Panel business features such as users, tenants, plans, billing, quotas, dashboards, CRUD APIs, database schemas, or migrations.
+
+The Gateway must not use a Control Panel database as direct authority. A public caller or Gateway message must not provide an arbitrary Agent-local target; route contracts contain only an opaque `local_endpoint_id`, which the Agent resolves against its own approved local mapping and security policy.
