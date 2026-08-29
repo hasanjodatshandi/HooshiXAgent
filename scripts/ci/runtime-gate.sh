@@ -18,7 +18,7 @@ fi
 unexpected=()
 for file in "${runnable_files[@]}"; do
   case "$file" in
-    ./cmd/gateway/*.go) ;;
+    ./cmd/gateway/*.go|./cmd/agent/*.go) ;;
     *) unexpected+=("$file") ;;
   esac
 done
@@ -32,9 +32,15 @@ runtime_dir="$(mktemp -d)"
 trap 'rm -rf "$runtime_dir"' EXIT
 
 gateway_binary="$runtime_dir/hooshix-gateway"
+agent_binary="$runtime_dir/hooshix-agent"
 go build -o "$gateway_binary" ./cmd/gateway
+go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
   go test -count=1 -run 'TestExternalProcessRuntimeGate|TestExecutableRefusesPlaintextStartup' ./internal/gateway
 
-echo "Executable Runtime Gate: PASSED — real Gateway process exercised over TLS/WSS with authenticated tunnel ingress and plaintext-startup rejection."
+HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
+HOOSHIX_AGENT_BINARY="$agent_binary" \
+  go test -count=1 -run TestRealAgentGatewayRuntime ./internal/runtimegate
+
+echo "Executable Runtime Gate: PASSED — real Gateway and Edge Agent processes exercised over TLS/WSS with authenticated tunnel ingress, Agent state persistence/reconnect, and plaintext-startup rejection."

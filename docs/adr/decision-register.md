@@ -16,5 +16,6 @@ Normative lifecycle and stable-ID rules are defined in `docs/governance/authorit
 | ADR-0006 | Routing Ownership Across Control Panel, Gateway, and Agent | Accepted | 2026-08-29 | Yes | — | — | `docs/adr/ADR-0006-routing-ownership.md` |
 | ADR-0007 | Protocol v1 Framing and JSON Control Encoding | Accepted | 2026-08-29 | Yes | — | — | `docs/adr/ADR-0007-protocol-v1-framing-and-json-control.md` |
 | ADR-0008 | Gateway Runtime State and Ingress Model | Accepted | 2026-08-29 | Yes | — | — | `docs/adr/ADR-0008-gateway-runtime-state-and-ingress.md` |
+| ADR-0009 | Edge Agent Local State, Secret Storage and Runtime Model | Accepted | 2026-08-29 | Yes | — | — | `docs/adr/ADR-0009-agent-local-state-and-runtime.md` |
 
-ADR IDs are stable and monotonic. The next unused ID is `ADR-0009`; allocated IDs must never be reused or renumbered.
+ADR IDs are stable and monotonic. The next unused ID is `ADR-0010`; allocated IDs must never be reused or renumbered.
