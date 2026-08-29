@@ -1,0 +1,16 @@
+rules:
+  - id: hooshix-go-insecure-tls-skip-verify
+    message: Production TLS verification must not be disabled.
+    severity: ERROR
+    languages: [go]
+    pattern-either:
+      - pattern: |
+          tls.Config{..., InsecureSkipVerify: true, ...}
+      - pattern: |
+          &tls.Config{..., InsecureSkipVerify: true, ...}
+
+  - id: hooshix-go-unbounded-net-dial
+    message: Use net.Dialer with DialContext and an explicit finite deadline/timeout instead of net.Dial.
+    severity: ERROR
+    languages: [go]
+    pattern: net.Dial(...)
