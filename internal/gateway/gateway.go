@@ -221,6 +221,10 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 	if err := contractv1.VerifyClientAuthSignature(record.DevicePublicKey, hello, challenge, auth); err != nil {
 		return nil, err
 	}
+	authorizationExpiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse authorization expiry: %w", err)
+	}
 
 	ready := contractv1.SessionReady{
 		ContractVersion:          contractv1.ProtocolVersion,
@@ -233,7 +237,7 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 		return nil, err
 	}
 
-	return newSession(gateway, conn, record.DeviceID, challenge.SessionID, record.AuthorizationID, inbound, 2), nil
+	return newSession(gateway, conn, record.DeviceID, challenge.SessionID, record.AuthorizationID, record.TokenID, authorizationExpiresAt, inbound, 2), nil
 }
 
 func (gateway *Gateway) registerSession(sess *session) error {
@@ -260,8 +264,15 @@ func (gateway *Gateway) unregisterSession(sess *session) {
 
 func (gateway *Gateway) sessionForDevice(deviceID string) *session {
 	gateway.mu.RLock()
-	defer gateway.mu.RUnlock()
-	return gateway.sessions[deviceID]
+	sess := gateway.sessions[deviceID]
+	gateway.mu.RUnlock()
+	if sess == nil || !sess.authorized.Load() {
+		return nil
+	}
+	if !sess.authorizationExpiresAt.IsZero() && !time.Now().UTC().Before(sess.authorizationExpiresAt) {
+		return nil
+	}
+	return sess
 }
 
 func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Request) {

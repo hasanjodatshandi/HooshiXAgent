@@ -126,6 +126,55 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 	}
 }
 
+func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("E2E process orchestration uses POSIX interrupt semantics in CI")
+	}
+	agentBinary, gatewayBinary := requiredBinaries(t)
+
+	stateDir := t.TempDir()
+	metadataDir := t.TempDir()
+	certPath, keyPath, roots := writeCertificate(t)
+	gatewayAddress := reserveAddress(t)
+	gatewayBaseURL := "https://" + gatewayAddress
+	gatewayWSS := "wss://" + gatewayAddress + "/agent/v1/connect"
+	localAddress, stopLocal := startLocalHTTPService(t)
+	defer stopLocal()
+
+	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
+	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{authorizationTTL: 8 * time.Second})
+
+	gateway := startProcess(t, gatewayBinary,
+		"-listen", gatewayAddress,
+		"-tls-cert", certPath,
+		"-tls-key", keyPath,
+		"-metadata-dir", metadataDir,
+	)
+	defer gateway.stop(t)
+	client := trustedClient(roots)
+	waitGatewayHealth(t, client, gatewayBaseURL)
+
+	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
+	if body := waitTunnel(t, client, gatewayBaseURL, "/before-authorization-expiry", "one"); body != "e2e-local:/before-authorization-expiry:one" {
+		t.Fatalf("unexpected pre-expiry response: %q", body)
+	}
+
+	waitFor(t, 25*time.Second, func() bool {
+		response, err := publicRequest(client, gatewayBaseURL, "/after-authorization-expiry", "")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		return response.StatusCode == http.StatusServiceUnavailable
+	})
+	// Give the real Agent a bounded opportunity to consume session_revoked before collecting its process output.
+	time.Sleep(500 * time.Millisecond)
+	agent.stop(t)
+	if !strings.Contains(agent.stderr.String(), "agent session revoked") {
+		t.Fatalf("real Agent did not observe explicit session revocation after authorization expiry; stderr=%q", agent.stderr.String())
+	}
+}
+
 func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("E2E process orchestration uses POSIX interrupt semantics in CI")
@@ -257,7 +306,8 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 }
 
 type metadataOptions struct {
-	localEndpointID string
+	localEndpointID  string
+	authorizationTTL time.Duration
 }
 
 func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options metadataOptions) {
@@ -267,6 +317,10 @@ func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options
 		localEndpointID = "local-http-001"
 	}
 	now := time.Now().UTC()
+	authorizationTTL := options.authorizationTTL
+	if authorizationTTL <= 0 {
+		authorizationTTL = time.Hour
+	}
 	digest := sha256.Sum256([]byte(token))
 	authorization := contractv1.DeviceSessionAuthorization{
 		ContractVersion: contractv1.ProtocolVersion,
@@ -277,7 +331,7 @@ func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options
 		TokenSHA256:     hex.EncodeToString(digest[:]),
 		IssuedAt:        now.Add(-time.Minute).Format(time.RFC3339),
 		NotBefore:       now.Add(-time.Minute).Format(time.RFC3339),
-		ExpiresAt:       now.Add(time.Hour).Format(time.RFC3339),
+		ExpiresAt:       now.Add(authorizationTTL).Format(time.RFC3339),
 		Disabled:        false,
 	}
 	route := contractv1.EndpointRouteAssignment{

@@ -83,9 +83,10 @@ The Gateway:
 5. verifies the Ed25519 challenge signature with the externally supplied device public key;
 6. registers one current in-memory session per device;
 7. replaces stale session state on a successfully authenticated reconnect;
-8. enforces protocol sequence replay/order checks, heartbeat, revocation and resource bounds.
+8. arms a local deadline for the establishing authorization `expires_at`, immediately removes an expired/invalid session from routing, and independently revalidates authorization freshness/revocation on each bounded heartbeat;
+9. enforces protocol sequence replay/order checks, heartbeat and resource bounds.
 
-Invalid TLS, token, signature, protocol framing, replay/order, stream state or resource usage fails closed.
+Invalid TLS, token, signature, authorization freshness, protocol framing, replay/order, stream state or resource usage fails closed. Expired or effectively revoked session authorization is signaled with `session_revoked` before closure when the reason is authoritative; transient/unclassified metadata failures close the session without falsely asserting permanent revocation, allowing the Agent reconnect policy to retry safely.
 
 ## Public ingress and multiplexing
 
