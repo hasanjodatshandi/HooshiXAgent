@@ -1,0 +1,31 @@
+{
+  "client_hello": {
+    "contract_version": 1,
+    "message_type": "client_hello",
+    "device_id": "device-001",
+    "authorization_id": "auth-001",
+    "token_id": "token-001",
+    "session_token": "test_session_token_0123456789ABCDEF",
+    "client_nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "server_challenge": {
+    "contract_version": 1,
+    "message_type": "server_challenge",
+    "session_id": "session-001",
+    "server_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+    "expires_at": "2026-08-29T12:10:00Z"
+  },
+  "client_auth": {
+    "contract_version": 1,
+    "message_type": "client_auth",
+    "session_id": "session-001",
+    "signature": "fuMjPox73FsqoKRbSw_a_F_kd4XICV2No4Ee6NWlEYMLJ-inSvRPh7aGoAoL7tHsfBR4WJFd6pMd7m3YUETNAw"
+  },
+  "session_ready": {
+    "contract_version": 1,
+    "message_type": "session_ready",
+    "session_id": "session-001",
+    "heartbeat_interval_seconds": 15,
+    "idle_timeout_seconds": 45
+  }
+}

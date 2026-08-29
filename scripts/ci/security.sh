@@ -11,8 +11,13 @@ for tool in gitleaks semgrep; do
   fi
 done
 
-gitleaks git --redact --no-banner .
-gitleaks dir --redact --no-banner .
+if [[ ! -f .gitleaks.toml ]]; then
+  echo "required Gitleaks configuration missing: .gitleaks.toml" >&2
+  exit 1
+fi
+
+gitleaks git --config .gitleaks.toml --redact --no-banner .
+gitleaks dir --config .gitleaks.toml --redact --no-banner .
 semgrep scan --config .semgrep.yml --error --metrics=off .
 
 echo "Secret/static security baseline: PASSED"

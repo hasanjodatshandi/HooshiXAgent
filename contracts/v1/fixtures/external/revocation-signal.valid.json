@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "event_id": "revoke-001",
+  "subject_kind": "device_session_authorization",
+  "subject_id": "auth-001",
+  "effective_at": "2026-08-29T12:00:00Z",
+  "reason_code": "credential_revoked"
+}

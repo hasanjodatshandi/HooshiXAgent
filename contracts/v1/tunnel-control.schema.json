@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.hooshix.local/agent/v1/tunnel-control.schema.json",
+  "title": "HooshiXAgent Tunnel Control v1",
+  "oneOf": [
+    { "$ref": "#/$defs/client_hello" },
+    { "$ref": "#/$defs/server_challenge" },
+    { "$ref": "#/$defs/client_auth" },
+    { "$ref": "#/$defs/session_ready" },
+    { "$ref": "#/$defs/ping" },
+    { "$ref": "#/$defs/pong" },
+    { "$ref": "#/$defs/stream_open" },
+    { "$ref": "#/$defs/stream_close" },
+    { "$ref": "#/$defs/stream_error" },
+    { "$ref": "#/$defs/session_revoked" }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "nonce32": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "signature64": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    },
+    "base": {
+      "type": "object",
+      "required": ["contract_version", "message_type"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "type": "string" }
+      }
+    },
+    "client_hello": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_token", "client_nonce"],
+          "properties": {
+            "contract_version": { "const": 1 },
+            "message_type": { "const": "client_hello" },
+            "device_id": { "$ref": "#/$defs/id" },
+            "authorization_id": { "$ref": "#/$defs/id" },
+            "token_id": { "$ref": "#/$defs/id" },
+            "session_token": { "type": "string", "minLength": 32, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" },
+            "client_nonce": { "$ref": "#/$defs/nonce32" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "server_challenge": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "session_id", "server_nonce", "expires_at"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "server_challenge" },
+        "session_id": { "$ref": "#/$defs/id" },
+        "server_nonce": { "$ref": "#/$defs/nonce32" },
+        "expires_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+      },
+      "additionalProperties": false
+    },
+    "client_auth": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "session_id", "signature"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "client_auth" },
+        "session_id": { "$ref": "#/$defs/id" },
+        "signature": { "$ref": "#/$defs/signature64" }
+      },
+      "additionalProperties": false
+    },
+    "session_ready": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "session_id", "heartbeat_interval_seconds", "idle_timeout_seconds"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "session_ready" },
+        "session_id": { "$ref": "#/$defs/id" },
+        "heartbeat_interval_seconds": { "type": "integer", "minimum": 5, "maximum": 60 },
+        "idle_timeout_seconds": { "type": "integer", "minimum": 15, "maximum": 300 }
+      },
+      "additionalProperties": false
+    },
+    "ping": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "ping_id", "sent_at"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "ping" },
+        "ping_id": { "$ref": "#/$defs/id" },
+        "sent_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+      },
+      "additionalProperties": false
+    },
+    "pong": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "ping_id", "received_at"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "pong" },
+        "ping_id": { "$ref": "#/$defs/id" },
+        "received_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+      },
+      "additionalProperties": false
+    },
+    "stream_open": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "endpoint_id", "assignment_id", "local_endpoint_id", "request_id"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "stream_open" },
+        "endpoint_id": { "$ref": "#/$defs/id" },
+        "assignment_id": { "$ref": "#/$defs/id" },
+        "local_endpoint_id": { "$ref": "#/$defs/id" },
+        "request_id": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "stream_close": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "reason_code"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "stream_close" },
+        "reason_code": { "enum": ["completed", "peer_closed", "cancelled"] }
+      },
+      "additionalProperties": false
+    },
+    "stream_error": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "code", "message", "retryable"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "stream_error" },
+        "code": { "enum": ["local_target_unavailable", "route_revoked", "protocol_error", "resource_limit", "internal_error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "session_revoked": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "authorization_id", "reason_code"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "session_revoked" },
+        "authorization_id": { "$ref": "#/$defs/id" },
+        "reason_code": { "enum": ["disabled", "credential_revoked", "security_hold", "expired"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

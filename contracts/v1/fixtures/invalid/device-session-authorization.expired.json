@@ -1,0 +1,12 @@
+{
+  "contract_version": 1,
+  "authorization_id": "auth-expired",
+  "device_id": "device-001",
+  "device_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "token_id": "token-expired",
+  "token_sha256": "fceb6a20fda55e114a7a11d0ee3ad98191d517c27f42591f2b16421f57a063f8",
+  "issued_at": "2026-08-27T06:00:00Z",
+  "not_before": "2026-08-27T06:00:00Z",
+  "expires_at": "2026-08-28T06:00:00Z",
+  "disabled": false
+}

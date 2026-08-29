@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.hooshix.local/agent/v1/external/gateway-status-signal.schema.json",
+  "title": "HooshiXAgent Gateway Status Signal v1",
+  "type": "object",
+  "required": ["contract_version", "event_id", "observed_at", "kind", "device_id"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/id" },
+    "observed_at": { "$ref": "#/$defs/timestamp" },
+    "kind": { "enum": ["session_connected", "session_disconnected", "route_opened", "route_closed", "traffic_delta"] },
+    "device_id": { "$ref": "#/$defs/id" },
+    "session_id": { "$ref": "#/$defs/id" },
+    "endpoint_id": { "$ref": "#/$defs/id" },
+    "bytes_from_public": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
+    "bytes_to_public": { "type": "integer", "minimum": 0, "maximum": 1073741824 }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 35
+    }
+  }
+}
