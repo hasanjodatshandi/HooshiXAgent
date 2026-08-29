@@ -2,9 +2,9 @@
 
 **Status:** Normative mapping
 
-This document maps approved engineering requirements to their enforcement mechanism. The actual CI workflow is introduced only when the Durable Plan reaches the repository/CI foundation leaf; this mapping does not pull that later-leaf implementation forward.
+This document maps approved engineering requirements to their enforcement mechanism. The AG-2 repository/CI foundation implements the baseline workflow in `.github/workflows/ci.yml` and reusable local gate scripts under `scripts/ci/`.
 
-| Requirement | Local / implementation evidence | Automated CI enforcement when CI exists | Blocking |
+| Requirement | Local / implementation evidence | Automated CI enforcement | Blocking |
 | --- | --- | --- | --- |
 | Formatting | `gofmt` verification | format-drift check | Yes |
 | Imports | `goimports` verification | import-format check | Yes |
@@ -23,6 +23,19 @@ This document maps approved engineering requirements to their enforcement mechan
 | Bounded resources/timeouts | tests + code review + runtime evidence | architecture/security tests and relevant runtime checks | Yes |
 | Day-One observability | runtime evidence and code review | architecture/runtime checks where automatable | Yes for applicable critical paths |
 
+
+## AG-2 executable baseline
+
+The baseline enforcement entry points are:
+
+```text
+scripts/ci/go-quality.sh
+scripts/ci/security.sh
+scripts/ci/runtime-gate.sh
+.github/workflows/ci.yml
+```
+
+The runtime guard is intentionally fail-closed. AG-2 contains no runnable product capability, so its runtime result is `Not applicable`; if a later leaf adds any `package main` capability without replacing or extending the guard with the real approved runtime procedure, the CI runtime-gate job fails.
 ## Gate semantics
 
 Use exact evidence vocabulary:

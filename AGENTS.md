@@ -57,3 +57,17 @@ Current Edge Agent + Tunnel Gateway architecture authority is frozen by AG-1 in:
 - `docs/adr/ADR-0006-routing-ownership.md`
 
 AG-1 does not authorize concrete protocol schemas, repository/runtime scaffolding, Gateway/Agent executables, Control Panel implementation, or later-leaf deployment work. Those remain gated by future `plan.next` leaves.
+
+
+Repository/CI foundation is implemented by AG-2 in:
+
+- `go.mod` — module baseline targeting Go `1.27.0`;
+- `internal/agent/` and `internal/gateway/` — product implementation boundaries without AG-2 runtime behavior;
+- `contracts/` — reserved language-neutral contract boundary; concrete schemas remain AG-3 work;
+- `internal/architecture/` — architecture fitness tests;
+- `scripts/ci/go-quality.sh` — Go format/import/module/vet/test/race/vulnerability/build baseline;
+- `scripts/ci/security.sh` — Gitleaks + Semgrep baseline;
+- `scripts/ci/runtime-gate.sh` — fail-closed executable-runtime guard;
+- `.github/workflows/ci.yml` — required CI workflow.
+
+Once AG-2 is merged, applicable changes must keep these required CI gates passing. A later leaf that introduces a runnable product capability must extend/replace the AG-2 runtime guard with the real Executable Runtime Gate for that capability; it may not weaken or bypass the guard.
