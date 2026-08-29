@@ -194,4 +194,4 @@ AG-5 does not download/apply updates or define release signing/rollback. Those b
 - stopping/restarting the Agent with the same state preserves the same identity and restores the tunnel;
 - status/log evidence does not expose the session token.
 
-This is the AG-5 local runtime gate. Stable staging/public-route acceptance and broader restart/recovery acceptance remain AG-6/AG-8 work.
+This remains the AG-5 local runtime gate. The integrated deterministic test-route and Agent/Gateway restart acceptance is now defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`; broader release resilience remains AG-8 work.

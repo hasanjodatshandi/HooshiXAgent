@@ -50,3 +50,7 @@ Operational details and the read-only external metadata snapshot layout are docu
 AG-5 introduces `cmd/agent` with persistent per-install Ed25519 identity, protected local secret state, WSS/TLS authentication/reconnect, loopback-only local endpoint mappings, bounded stream proxying, and `init/configure/expose/status/doctor/service-spec/update-info` foundations.
 
 Operational and security details are documented in `docs/runtime/agent.md`. Full installer/service installation, signed update delivery and release packaging remain AG-7 work.
+
+## Agent↔Gateway E2E acceptance
+
+AG-6 adds a blocking deterministic E2E acceptance gate for the real `cmd/agent` and `cmd/gateway` binaries. It validates external contract metadata injection, the stable `demo.hooshix.test` test route, a real HTTPS→Gateway→WSS→Agent→loopback-service request, Agent/Gateway restart recovery, offline/error behavior and security-negative routing/auth cases. See `docs/runtime/agent-gateway-e2e-acceptance.md`.
