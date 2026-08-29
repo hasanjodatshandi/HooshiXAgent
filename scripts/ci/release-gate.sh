@@ -20,11 +20,14 @@ fi
 # Agent SSRF/local-target, secret storage, argument/token and update candidate security.
 go test -count=1 ./internal/agent -run 'Test(LocalTargetPolicy|ReleaseLocalTargetPolicyAdversarialCases|IdentityPersistsAndSecretStateIsProtected|SecretStoreRejectsUnsafePermissionsAndSymlink|CLIStatusDoesNotLeakSecrets|GatewayURLValidation|UpdateFoundationValidation|ReleaseUpdateCandidateFailsClosed)$'
 
-# Language-neutral frame strictness, replay resistance, raw-target rejection and strict schemas.
-go test -count=1 ./internal/contractv1 -run 'Test(FrameRejectsMalformedAndOversizedInput|SequenceTrackerRejectsReplayAndReordering|ExternalContractRejectsExpiredAuthorizationAndRawLocalTarget|ControlPayloadScopeAndStrictness|LanguageNeutralSchemaRejectsRawLocalTarget)$'
+# Language-neutral frame/control strictness, replay resistance, wrap rejection, raw-target rejection and strict schemas.
+go test -count=1 ./internal/contractv1 -run 'Test(FrameRejectsMalformedAndOversizedInput|SequenceTrackerRejectsReplayAndReordering|SequenceTrackerRequiresFirstSequenceOneAndRejectsWrap|ProtocolSequenceGapRejected|ProtocolInvalidUTF8Rejected|ProtocolDuplicateJSONKeysRejected|StrictJSONRejectsNestedAndEscapedDuplicateKeys|ExternalContractRejectsExpiredAuthorizationAndRawLocalTarget|ControlPayloadScopeAndStrictness|LanguageNeutralSchemaRejectsRawLocalTarget)$'
 
-# Gateway auth/TLS/replay, request/stream limits, malformed protocol and pending-handshake exhaustion.
-go test -count=1 ./internal/gateway -run 'Test(GatewayRejectsUntrustedTLSInvalidTokenAndReplay|GatewayRequestAndStreamLimits|GatewayRejectsMalformedProtocolAndHandshakeExhaustion)$'
+# Gateway auth/TLS/replay, exact sequence/control parsing, request/stream limits, malformed protocol and pending-handshake exhaustion.
+go test -count=1 ./internal/gateway -run 'Test(GatewayRejectsUntrustedTLSInvalidTokenAndReplay|GatewayRejectsAuthenticatedProtocolStrictnessViolations|GatewaySequenceExhaustionTerminatesSession|GatewayRequestAndStreamLimits|GatewayRejectsMalformedProtocolAndHandshakeExhaustion)$'
+
+# R-2 strict protocol gate includes authenticated negatives plus bounded fuzz smoke.
+bash scripts/ci/protocol-strictness.sh
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

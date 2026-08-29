@@ -359,18 +359,31 @@ func (sess *session) sendFrame(parent context.Context, kind contractv1.Kind, str
 
 	sess.writeMu.Lock()
 	defer sess.writeMu.Unlock()
-	sequence := sess.outbound.Add(1)
+	sequence, err := contractv1.NextSequence(sess.outbound.Load())
+	if err != nil {
+		sess.failAll(err)
+		sess.close(websocket.StatusPolicyViolation, "sequence exhausted")
+		return err
+	}
 	frame, err := contractv1.EncodeFrame(contractv1.Frame{Kind: kind, StreamID: streamID, Sequence: sequence, Payload: payload})
 	if err != nil {
 		return err
 	}
-	return sess.conn.Write(ctx, websocket.MessageBinary, frame)
+	sess.outbound.Store(sequence)
+	if err := sess.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		sess.failAll(err)
+		sess.close(websocket.StatusInternalError, "protocol write failed")
+		return err
+	}
+	return nil
 }
 
 func (sess *session) close(status websocket.StatusCode, reason string) {
 	sess.closeOnce.Do(func() {
 		close(sess.done)
-		_ = sess.conn.Close(status, reason)
+		if sess.conn != nil {
+			_ = sess.conn.Close(status, reason)
+		}
 	})
 }
 

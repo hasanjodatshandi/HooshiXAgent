@@ -302,6 +302,9 @@ type SessionRevoked struct {
 }
 
 func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
+	if err := validateStrictJSONObject(data); err != nil {
+		return err
+	}
 	var envelope struct {
 		ContractVersion int    `json:"contract_version"`
 		MessageType     string `json:"message_type"`
@@ -360,7 +363,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var ready SessionReady
-		if err := decodeStrict(data, &ready); err != nil {
+		if err := decodeControlStrict(data, &ready); err != nil {
 			return err
 		}
 		if ready.MessageType != "session_ready" || ready.ContractVersion != ProtocolVersion {
@@ -381,7 +384,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var heartbeat Heartbeat
-		if err := decodeStrict(data, &heartbeat); err != nil {
+		if err := decodeControlStrict(data, &heartbeat); err != nil {
 			return err
 		}
 		if heartbeat.MessageType != envelope.MessageType || heartbeat.ContractVersion != ProtocolVersion {
@@ -407,7 +410,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var message StreamOpen
-		if err := decodeStrict(data, &message); err != nil {
+		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
 		for name, value := range map[string]string{"endpoint_id": message.EndpointID, "assignment_id": message.AssignmentID, "local_endpoint_id": message.LocalEndpointID, "request_id": message.RequestID} {
@@ -421,7 +424,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var message StreamClose
-		if err := decodeStrict(data, &message); err != nil {
+		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
 		if !oneOf(message.ReasonCode, "completed", "peer_closed", "cancelled") {
@@ -433,7 +436,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var message StreamError
-		if err := decodeStrict(data, &message); err != nil {
+		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
 		if !oneOf(message.Code, "local_target_unavailable", "route_revoked", "protocol_error", "resource_limit", "internal_error") {
@@ -448,7 +451,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return err
 		}
 		var message SessionRevoked
-		if err := decodeStrict(data, &message); err != nil {
+		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
 		if err := validateID("authorization_id", message.AuthorizationID); err != nil {
@@ -465,7 +468,7 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 
 func DecodeClientHello(data []byte) (ClientHello, error) {
 	var message ClientHello
-	if err := decodeStrict(data, &message); err != nil {
+	if err := decodeControlStrict(data, &message); err != nil {
 		return message, err
 	}
 	if message.ContractVersion != ProtocolVersion || message.MessageType != "client_hello" {
@@ -487,7 +490,7 @@ func DecodeClientHello(data []byte) (ClientHello, error) {
 
 func DecodeServerChallenge(data []byte) (ServerChallenge, error) {
 	var message ServerChallenge
-	if err := decodeStrict(data, &message); err != nil {
+	if err := decodeControlStrict(data, &message); err != nil {
 		return message, err
 	}
 	if message.ContractVersion != ProtocolVersion || message.MessageType != "server_challenge" {
@@ -507,7 +510,7 @@ func DecodeServerChallenge(data []byte) (ServerChallenge, error) {
 
 func DecodeClientAuth(data []byte) (ClientAuth, error) {
 	var message ClientAuth
-	if err := decodeStrict(data, &message); err != nil {
+	if err := decodeControlStrict(data, &message); err != nil {
 		return message, err
 	}
 	if message.ContractVersion != ProtocolVersion || message.MessageType != "client_auth" {
@@ -560,6 +563,13 @@ func MatchSessionToken(record DeviceSessionAuthorization, token string) bool {
 	}
 	digest := sha256.Sum256([]byte(token))
 	return subtle.ConstantTimeCompare(digest[:], expected) == 1
+}
+
+func decodeControlStrict(data []byte, target any) error {
+	if err := validateStrictJSONObject(data); err != nil {
+		return err
+	}
+	return decodeStrict(data, target)
 }
 
 func decodeStrict(data []byte, target any) error {

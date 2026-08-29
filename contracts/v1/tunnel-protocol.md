@@ -197,10 +197,11 @@ The receiver rejects:
 - non-zero reserved flags;
 - invalid UTF-8 control payloads;
 - malformed JSON;
+- duplicate JSON object member names at any nesting depth;
 - unknown control `message_type` values;
 - unknown JSON fields;
 - fields outside schema lengths/ranges/patterns;
-- replayed/out-of-order sequence values;
+- repeated, lower, skipped/gapped, wrapped, or otherwise non-contiguous sequence values;
 - invalid stream scope for a control message;
 - oversized payloads;
 - payload-length mismatch.

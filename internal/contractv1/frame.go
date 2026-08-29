@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	HeaderSize        = 24
-	ProtocolVersion   = 1
-	MaxControlPayload = 64 * 1024
-	MaxDataPayload    = 1024 * 1024
+	HeaderSize               = 24
+	ProtocolVersion          = 1
+	MaxControlPayload        = 64 * 1024
+	MaxDataPayload           = 1024 * 1024
+	MaxSequence       uint64 = ^uint64(0)
 )
 
 var magic = [4]byte{'H', 'X', 'T', '1'}
@@ -125,12 +126,20 @@ type SequenceTracker struct {
 	last uint64
 }
 
-func (tracker *SequenceTracker) Accept(sequence uint64) error {
-	if sequence == 0 {
-		return errors.New("sequence must start at 1")
+func NextSequence(last uint64) (uint64, error) {
+	if last == MaxSequence {
+		return 0, errors.New("sequence space exhausted; session must terminate before wrap")
 	}
-	if sequence <= tracker.last {
-		return fmt.Errorf("replayed or out-of-order sequence: got=%d last=%d", sequence, tracker.last)
+	return last + 1, nil
+}
+
+func (tracker *SequenceTracker) Accept(sequence uint64) error {
+	expected, err := NextSequence(tracker.last)
+	if err != nil {
+		return err
+	}
+	if sequence != expected {
+		return fmt.Errorf("non-contiguous sequence: got=%d expected=%d last=%d", sequence, expected, tracker.last)
 	}
 	tracker.last = sequence
 	return nil
