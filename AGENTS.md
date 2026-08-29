@@ -85,3 +85,6 @@ AG-6 integrated acceptance authority is `internal/runtimegate/e2e_acceptance_tes
 
 
 AG-7 packaging/operations authority is `docs/adr/ADR-0010-packaging-deployment-and-release-trust.md` plus `docs/runtime/packaging-and-operations.md`. Agent persistence must remain within the accepted per-user secret ownership model; Gateway deployment is Docker Compose with Caddy and verified upstream TLS only; no Control Panel service/database, Kubernetes, Redis, or AG-8 final release-hardening belongs in AG-7.
+
+
+AG-8 release authority: AG-8 release authority is `docs/runtime/security-resilience-release-gate.md`. It is acceptance-only: do not add Control Panel scope or silently change architecture. A release-ready claim requires the final dependency-chained AG-8 CI job, merged-main CI, and applicable post-merge runtime/E2E/release verification to pass. Hosted CI evidence must not be mislabeled as a literal physical OS reboot.

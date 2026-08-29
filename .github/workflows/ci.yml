@@ -173,3 +173,40 @@ jobs:
       - name: Enforce fail-closed runtime gate
         shell: bash
         run: bash scripts/ci/runtime-gate.sh
+
+  release-gate:
+    name: AG-8 final security / resilience / release gate
+    needs:
+      - go-quality
+      - agent-platform
+      - architecture
+      - security
+      - e2e-acceptance
+      - packaging-ops
+      - runtime-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run final Agent/Gateway release gate
+        shell: bash
+        env:
+          HOOSHIX_RELEASE_EVIDENCE_DIR: ${{ runner.temp }}/hooshix-ag8-evidence
+        run: bash scripts/ci/release-gate.sh
+
+      - name: Upload AG-8 release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ag8-release-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/hooshix-ag8-evidence/AG8-EVIDENCE.txt
+          if-no-files-found: error
+          retention-days: 30

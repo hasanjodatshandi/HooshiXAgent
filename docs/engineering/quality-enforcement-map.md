@@ -78,3 +78,7 @@ AG-6 adds `scripts/ci/e2e-acceptance.sh` and the blocking `Agent↔Gateway E2E a
 ## Packaging and operations gate
 
 AG-7 adds platform Agent clean-install/rollback/uninstall smoke tests plus the blocking `Packaging / clean deployment / rollback` CI job driven by `scripts/ci/packaging-ops.sh`. The gate builds checksummed release archives, installs the produced Linux Agent archive, extracts and clean-deploys the produced Gateway Docker Compose+Caddy bundle, verifies Caddy→Gateway TLS, verifies that `/readyz` and `/metrics` remain internal-only, validates aggregate metrics, and checks that the tag release workflow uses OIDC-backed artifact attestations. Existing Go, architecture, security, runtime and E2E gates remain blocking.
+
+## AG-8 final release gate
+
+AG-8 adds the blocking dependency-chained `AG-8 final security / resilience / release gate` job. It cannot run successfully unless Go/vulnerability, all Agent platform package jobs, architecture, Gitleaks/Semgrep, executable runtime, Agent↔Gateway E2E, and packaging/clean-deployment jobs have already passed. `scripts/ci/release-gate.sh` then runs focused SSRF/update, malformed/replay, auth/resource-exhaustion, real network-interruption/cold-restart and artifact-tamper checks and uploads commit-bound release evidence. See `docs/runtime/security-resilience-release-gate.md`.
