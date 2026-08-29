@@ -9,7 +9,7 @@ The separate **HooshiX Control Panel** is external and is not implemented in thi
 ```text
 contracts/v1/           Agent↔Gateway protocol v1 + external Control Panel integration contracts/fixtures
 internal/agent/          Edge Agent implementation boundary; no product runtime behavior yet
-internal/gateway/        Tunnel Gateway implementation boundary; no product runtime behavior yet
+internal/gateway/        AG-4 Tunnel Gateway data-plane runtime
 internal/contractv1/     Go reference codec/strict validation for the language-neutral v1 contracts
 internal/architecture/   repository architecture fitness tests
 scripts/ci/              executable quality/security/runtime guard scripts
@@ -37,4 +37,10 @@ scripts/ci/security.sh
 scripts/ci/runtime-gate.sh
 ```
 
-The runtime gate is fail-closed. While the repository has no runnable product capability, it reports `Not applicable`; a later leaf that introduces one must add its real runtime procedure instead of treating compilation or tests as runtime evidence.
+The runtime gate is fail-closed. AG-4 now exercises the real `cmd/gateway` process over TLS/WSS with authenticated tunnel ingress. Any additional runnable capability must add its own approved runtime procedure instead of treating compilation or tests as runtime evidence.
+
+## Tunnel Gateway runtime
+
+AG-4 introduces the first runnable product capability: `cmd/gateway`. It serves TLS-only HTTPS/WSS, authenticates protocol-v1 Agent sessions against validated external metadata, multiplexes bounded logical streams, routes public HTTP ingress by externally supplied hostname assignments, and emits bounded status/traffic signals.
+
+Operational details and the read-only external metadata snapshot layout are documented in `docs/runtime/gateway.md`. The Edge Agent product remains AG-5 work.

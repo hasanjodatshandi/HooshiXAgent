@@ -5,11 +5,36 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 mapfile -t runnable_files < <(grep -RIl --include='*.go' --exclude-dir='.git' '^package main$' . 2>/dev/null | sort || true)
-if ((${#runnable_files[@]} != 0)); then
-  echo "runnable Go capability detected:" >&2
-  printf '  %s\n' "${runnable_files[@]}" >&2
-  echo "The AG-2 baseline runtime gate is fail-closed. The leaf that introduces a runnable capability must replace or extend this guard with the real Executable Runtime Gate required by docs/engineering/executable-runtime-gate.md." >&2
+if ((${#runnable_files[@]} == 0)); then
+  echo "Executable Runtime Gate: Not applicable — current repository state introduces no runnable product capability."
+  exit 0
+fi
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "required runtime-gate tool not found: go" >&2
   exit 1
 fi
 
-echo "Executable Runtime Gate: Not applicable — current repository state introduces no runnable product capability."
+unexpected=()
+for file in "${runnable_files[@]}"; do
+  case "$file" in
+    ./cmd/gateway/*.go) ;;
+    *) unexpected+=("$file") ;;
+  esac
+done
+if ((${#unexpected[@]} != 0)); then
+  echo "runnable capability lacks an approved executable runtime procedure:" >&2
+  printf '  %s\n' "${unexpected[@]}" >&2
+  exit 1
+fi
+
+runtime_dir="$(mktemp -d)"
+trap 'rm -rf "$runtime_dir"' EXIT
+
+gateway_binary="$runtime_dir/hooshix-gateway"
+go build -o "$gateway_binary" ./cmd/gateway
+
+HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
+  go test -count=1 -run 'TestExternalProcessRuntimeGate|TestExecutableRefusesPlaintextStartup' ./internal/gateway
+
+echo "Executable Runtime Gate: PASSED — real Gateway process exercised over TLS/WSS with authenticated tunnel ingress and plaintext-startup rejection."

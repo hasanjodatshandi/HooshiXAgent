@@ -35,7 +35,7 @@ scripts/ci/runtime-gate.sh
 .github/workflows/ci.yml
 ```
 
-The runtime guard is intentionally fail-closed. AG-2 contains no runnable product capability, so its runtime result is `Not applicable`; if a later leaf adds any `package main` capability without replacing or extending the guard with the real approved runtime procedure, the CI runtime-gate job fails.
+The runtime gate is fail-closed. AG-4 extends it with the real approved Gateway runtime procedure: build `cmd/gateway`, launch the executable as a separate TLS process, exercise authenticated WSS/tunnel/public-ingress behavior with deterministic external metadata and a test-only peer, and verify plaintext startup rejection. Any additional runnable capability still fails the gate until its own approved runtime procedure is added.
 ## Gate semantics
 
 Use exact evidence vocabulary:
