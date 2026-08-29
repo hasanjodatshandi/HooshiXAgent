@@ -1,0 +1,26 @@
+{
+	admin off
+}
+
+{$HOOSHIX_PUBLIC_HOST:localhost} {
+	@internal_ops path /readyz /metrics
+	respond @internal_ops 404
+
+	reverse_proxy https://gateway:8443 {
+		header_up Host {host}
+		health_uri /healthz
+		health_interval 10s
+		health_timeout 3s
+		transport http {
+			tls_trust_pool file /etc/caddy/gateway-ca.pem
+			tls_server_name gateway
+			dial_timeout 3s
+			response_header_timeout 20s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -82,3 +82,6 @@ AG-5 Edge Agent runtime authority is implemented in `cmd/agent`, `internal/agent
 
 
 AG-6 integrated acceptance authority is `internal/runtimegate/e2e_acceptance_test.go`, `scripts/ci/e2e-acceptance.sh`, and `docs/runtime/agent-gateway-e2e-acceptance.md`. It is acceptance-only: do not add Control Panel implementation, deployment packaging, installer/update delivery, or AG-8 release-hardening scope under AG-6.
+
+
+AG-7 packaging/operations authority is `docs/adr/ADR-0010-packaging-deployment-and-release-trust.md` plus `docs/runtime/packaging-and-operations.md`. Agent persistence must remain within the accepted per-user secret ownership model; Gateway deployment is Docker Compose with Caddy and verified upstream TLS only; no Control Panel service/database, Kubernetes, Redis, or AG-8 final release-hardening belongs in AG-7.

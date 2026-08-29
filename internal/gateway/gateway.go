@@ -59,6 +59,8 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 func (gateway *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", gateway.handleHealth)
+	mux.HandleFunc("GET /readyz", gateway.handleReady)
+	mux.HandleFunc("GET /metrics", gateway.handleMetrics)
 	mux.HandleFunc(agentPath, gateway.handleAgent)
 	mux.HandleFunc("/", gateway.handleIngress)
 	return mux
@@ -68,6 +70,39 @@ func (gateway *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, `{"status":"ok"}`)
+}
+
+func (gateway *Gateway) handleReady(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, `{"status":"ready"}`)
+}
+
+func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	gateway.mu.RLock()
+	sessions := make([]*session, 0, len(gateway.sessions))
+	for _, sess := range gateway.sessions {
+		sessions = append(sessions, sess)
+	}
+	gateway.mu.RUnlock()
+
+	activeStreams := 0
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		activeStreams += len(sess.streams)
+		sess.mu.Unlock()
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_agent_sessions Current authenticated Agent sessions.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_agent_sessions gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_agent_sessions %d\n", len(sessions))
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_active_streams Current active tunnel streams.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_active_streams gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_active_streams %d\n", activeStreams)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_pending_handshakes Current Agent handshakes consuming bounded slots.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_pending_handshakes gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_pending_handshakes %d\n", len(gateway.handshakeSlots))
 }
 
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
@@ -230,7 +265,7 @@ func (gateway *Gateway) sessionForDevice(deviceID string) *session {
 }
 
 func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == "/healthz" || request.URL.Path == agentPath {
+	if request.URL.Path == "/healthz" || request.URL.Path == "/readyz" || request.URL.Path == "/metrics" || request.URL.Path == agentPath {
 		http.NotFound(w, request)
 		return
 	}

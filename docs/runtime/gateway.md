@@ -111,3 +111,10 @@ The executable emits versioned JSON-lines `GatewayStatusSignal` records to stdou
 - TLS/plaintext-startup negative verification.
 
 The Gateway-specific runtime check remains in place. Integrated real Agent↔Gateway acceptance, including restart/reconnect behavior, is defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`.
+
+
+## AG-7 deployment and operations
+
+The initial deployment package is now `deploy/gateway/`: Docker Compose runs only the Tunnel Gateway and Caddy public edge. Caddy owns public TLS and forwards to the Gateway over certificate-verified HTTPS using a deployment-local CA; the Gateway itself remains TLS-only and is not published directly on a host port.
+
+The internal Gateway listener also exposes `/readyz` and low-cardinality aggregate `/metrics` in addition to `/healthz`. Caddy blocks `/readyz` and `/metrics` on the public edge. Packaging, diagnostics, certificate bootstrap and release provenance are documented in `docs/runtime/packaging-and-operations.md`.
