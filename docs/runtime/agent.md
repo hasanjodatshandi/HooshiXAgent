@@ -151,6 +151,8 @@ Default Agent runtime bounds:
 ```text
 active streams/session       64
 queued inbound frames/stream 16
+queued inbound bytes/stream   2 MiB
+queued inbound bytes/session  8 MiB
 local dial timeout             5 s
 handshake timeout             10 s
 write timeout                 10 s

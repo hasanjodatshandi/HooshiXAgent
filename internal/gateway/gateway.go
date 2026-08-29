@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -31,6 +30,7 @@ type Gateway struct {
 	mu             sync.RWMutex
 	sessions       map[string]*session
 	handshakeSlots chan struct{}
+	resources      gatewayResources
 }
 
 func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog.Logger) (*Gateway, error) {
@@ -53,6 +53,7 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 		logger:         logger,
 		sessions:       make(map[string]*session),
 		handshakeSlots: make(chan struct{}, limits.MaxPendingHandshakes),
+		resources:      newGatewayResources(limits),
 	}, nil
 }
 
@@ -97,19 +98,52 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_agent_sessions Current authenticated Agent sessions.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_agent_sessions gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_agent_sessions %d\n", len(sessions))
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_agent_sessions_limit gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_agent_sessions_limit %d\n", gateway.limits.MaxAgentSessions)
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_active_streams Current active tunnel streams.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_active_streams gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_active_streams %d\n", activeStreams)
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_pending_handshakes Current Agent handshakes consuming bounded slots.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_pending_handshakes gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_pending_handshakes %d\n", len(gateway.handshakeSlots))
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_pending_handshakes_limit gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_pending_handshakes_limit %d\n", gateway.limits.MaxPendingHandshakes)
+
+	queueUsed, queueLimit, _ := gateway.resources.queueBytes.snapshot()
+	ingressUsed, ingressLimit, _ := gateway.resources.ingressBytes.snapshot()
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_queued_bytes Current Agent-to-Gateway payload bytes waiting in stream queues.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queued_bytes gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_queued_bytes %d\n", queueUsed)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_queued_bytes_limit Global queued-payload byte budget.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queued_bytes_limit gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_queued_bytes_limit %d\n", queueLimit)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight Current public ingress requests consuming bounded slots.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight %d\n", len(gateway.resources.ingressSlots))
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_limit gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_limit %d\n", gateway.limits.MaxIngressInFlight)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes Current serialized public-ingress bytes held before tunnel forwarding.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes %d\n", ingressUsed)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes_limit Global ingress serialization byte budget.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes_limit gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes_limit %d\n", ingressLimit)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queue_rejections_total counter\nhooshix_gateway_queue_rejections_total %d\n", gateway.resources.queueRejects.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
 }
 
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
+	if !gateway.resources.handshakeRate.allow(time.Now()) {
+		http.Error(w, "agent handshake rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
 	select {
 	case gateway.handshakeSlots <- struct{}{}:
 		defer func() { <-gateway.handshakeSlots }()
 	default:
+		gateway.resources.handshakeRejects.Add(1)
 		http.Error(w, "too many pending handshakes", http.StatusServiceUnavailable)
 		return
 	}
@@ -248,6 +282,7 @@ func (gateway *Gateway) registerSession(sess *session) error {
 		delete(gateway.sessions, sess.deviceID)
 	}
 	if len(gateway.sessions) >= gateway.limits.MaxAgentSessions {
+		gateway.resources.sessionRejects.Add(1)
 		return errors.New("agent session capacity reached")
 	}
 	gateway.sessions[sess.deviceID] = sess
@@ -284,6 +319,18 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	if !gateway.resources.ingressRate.allow(time.Now()) {
+		http.Error(w, "public ingress rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	select {
+	case gateway.resources.ingressSlots <- struct{}{}:
+		defer func() { <-gateway.resources.ingressSlots }()
+	default:
+		gateway.resources.ingressRejects.Add(1)
+		http.Error(w, "public ingress capacity reached", http.StatusServiceUnavailable)
+		return
+	}
 
 	now := time.Now().UTC()
 	route, err := gateway.metadata.RouteByHostname(request.Context(), request.Host, now)
@@ -305,16 +352,24 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	defer sess.removeStream(stream.id)
 
 	request.Body = http.MaxBytesReader(w, request.Body, gateway.limits.MaxRequestBytes)
-	var encoded bytes.Buffer
-	limited := &limitWriter{w: &encoded, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
+	encoded := newBudgetBuffer(gateway.resources.ingressBytes)
+	defer encoded.release()
+	limited := &limitWriter{w: encoded, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
 	if err := request.Write(limited); err != nil {
+		if errors.Is(err, errResourceBudget) {
+			gateway.resources.ingressRejects.Add(1)
+			http.Error(w, "public ingress byte budget exhausted", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "request serialization failed", http.StatusBadRequest)
 		return
 	}
+	fromPublic := int64(encoded.Len())
 	if err := sess.sendBytes(request.Context(), stream.id, encoded.Bytes()); err != nil {
 		http.Error(w, "tunnel write failed", http.StatusBadGateway)
 		return
 	}
+	encoded.release()
 
 	reader := io.LimitReader(stream, gateway.limits.MaxResponseBytes+1)
 	response, err := http.ReadResponse(bufio.NewReader(reader), request)
@@ -346,7 +401,6 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		}
 	}
 
-	fromPublic := int64(encoded.Len())
 	toPublic := written
 	gateway.emitStatus(request.Context(), contractv1.GatewayStatusSignal{
 		ContractVersion: contractv1.ProtocolVersion,

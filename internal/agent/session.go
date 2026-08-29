@@ -32,18 +32,23 @@ type agentSession struct {
 
 	mu          sync.Mutex
 	streams     map[uint32]*agentStream
+	queueBudget *agentByteBudget
 	maxStreamID uint32
 	closed      chan struct{}
 	closeOnce   sync.Once
 }
 
 type agentStream struct {
-	id       uint32
-	endpoint Endpoint
-	incoming chan []byte
-	ctx      context.Context
-	cancel   context.CancelFunc
-	finish   sync.Once
+	id            uint32
+	endpoint      Endpoint
+	incoming      chan agentQueuedPayload
+	ctx           context.Context
+	cancel        context.CancelFunc
+	queueMu       sync.Mutex
+	closed        bool
+	streamBudget  *agentByteBudget
+	sessionBudget *agentByteBudget
+	finish        sync.Once
 }
 
 func authenticateAgent(
@@ -127,14 +132,15 @@ func authenticateAgent(
 	}
 
 	sess := &agentSession{
-		conn:      conn,
-		config:    config,
-		limits:    limits,
-		logger:    logger,
-		sessionID: ready.SessionID,
-		inbound:   inbound,
-		streams:   make(map[uint32]*agentStream),
-		closed:    make(chan struct{}),
+		conn:        conn,
+		config:      config,
+		limits:      limits,
+		logger:      logger,
+		sessionID:   ready.SessionID,
+		inbound:     inbound,
+		streams:     make(map[uint32]*agentStream),
+		queueBudget: newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:      make(chan struct{}),
 	}
 	sess.outbound.Store(2)
 	sess.limits.IdleTimeout = time.Duration(ready.IdleTimeoutSeconds) * time.Second
@@ -238,11 +244,13 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 	}
 	streamCtx, cancel := context.WithCancel(parent)
 	stream := &agentStream{
-		id:       frame.StreamID,
-		endpoint: endpoint,
-		incoming: make(chan []byte, sess.limits.MaxQueueFrames),
-		ctx:      streamCtx,
-		cancel:   cancel,
+		id:            frame.StreamID,
+		endpoint:      endpoint,
+		incoming:      make(chan agentQueuedPayload, sess.limits.MaxQueueFrames),
+		ctx:           streamCtx,
+		cancel:        cancel,
+		streamBudget:  newAgentByteBudget(sess.limits.MaxStreamQueueBytes),
+		sessionBudget: sess.queueBudget,
 	}
 	sess.streams[frame.StreamID] = stream
 	sess.mu.Unlock()
@@ -258,15 +266,57 @@ func (sess *agentSession) handleData(frame contractv1.Frame) error {
 	if stream == nil {
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
-	payload := append([]byte(nil), frame.Payload...)
-	select {
-	case stream.incoming <- payload:
-		return nil
-	default:
-		_ = sess.sendStreamError(context.Background(), frame.StreamID, "resource_limit", "stream input queue is full", true)
+	if !stream.enqueue(frame.Payload) {
+		_ = sess.sendStreamError(context.Background(), frame.StreamID, "resource_limit", "stream input byte/frame budget exhausted", true)
 		sess.finishStream(frame.StreamID)
-		return nil
 	}
+	return nil
+}
+
+func (stream *agentStream) enqueue(data []byte) bool {
+	size := int64(len(data))
+	stream.queueMu.Lock()
+	defer stream.queueMu.Unlock()
+	if stream.closed {
+		return false
+	}
+	if !stream.streamBudget.tryAcquire(size) {
+		return false
+	}
+	if !stream.sessionBudget.tryAcquire(size) {
+		stream.streamBudget.release(size)
+		return false
+	}
+	queued := agentQueuedPayload{data: append([]byte(nil), data...), size: size}
+	select {
+	case stream.incoming <- queued:
+		return true
+	default:
+		stream.releaseQueued(size)
+		return false
+	}
+}
+
+func (stream *agentStream) releaseQueued(size int64) {
+	stream.sessionBudget.release(size)
+	stream.streamBudget.release(size)
+}
+
+func (stream *agentStream) finishStream() {
+	stream.finish.Do(func() {
+		stream.queueMu.Lock()
+		stream.closed = true
+		for {
+			select {
+			case queued := <-stream.incoming:
+				stream.releaseQueued(queued.size)
+			default:
+				stream.queueMu.Unlock()
+				stream.cancel()
+				return
+			}
+		}
+	})
 }
 
 func (sess *agentSession) serveStream(stream *agentStream) {
@@ -331,7 +381,9 @@ func (sess *agentSession) writeLocal(stream *agentStream, conn net.Conn) error {
 		select {
 		case <-stream.ctx.Done():
 			return nil
-		case payload := <-stream.incoming:
+		case queued := <-stream.incoming:
+			stream.releaseQueued(queued.size)
+			payload := queued.data
 			if err := conn.SetWriteDeadline(time.Now().Add(sess.limits.WriteTimeout)); err != nil {
 				return err
 			}
@@ -414,7 +466,7 @@ func (sess *agentSession) finishStream(streamID uint32) {
 	delete(sess.streams, streamID)
 	sess.mu.Unlock()
 	if stream != nil {
-		stream.finish.Do(stream.cancel)
+		stream.finishStream()
 	}
 }
 
@@ -426,7 +478,7 @@ func (sess *agentSession) shutdown() {
 		sess.streams = make(map[uint32]*agentStream)
 		sess.mu.Unlock()
 		for _, stream := range streams {
-			stream.finish.Do(stream.cancel)
+			stream.finishStream()
 		}
 		if sess.conn != nil {
 			sess.conn.CloseNow()

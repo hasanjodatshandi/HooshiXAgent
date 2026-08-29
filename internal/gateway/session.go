@@ -31,6 +31,7 @@ type session struct {
 	writeMu                    sync.Mutex
 	mu                         sync.Mutex
 	streams                    map[uint32]*stream
+	queueBudget                *byteBudget
 	nextID                     uint32
 	done                       chan struct{}
 	closeOnce                  sync.Once
@@ -48,6 +49,7 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 		authorizationExpiresAt: authorizationExpiresAt,
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
+		queueBudget:            newByteBudget(gateway.limits.MaxSessionQueueBytes),
 		nextID:                 1,
 		done:                   make(chan struct{}),
 	}
@@ -254,13 +256,10 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 	if stream == nil {
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
-	payload := append([]byte(nil), frame.Payload...)
-	select {
-	case stream.incoming <- payload:
-		return nil
-	default:
-		return fmt.Errorf("stream %d inbound queue full", frame.StreamID)
+	if err := stream.enqueue(frame.Payload); err != nil {
+		return fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err)
 	}
+	return nil
 }
 
 func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRouteAssignment) (*stream, error) {
@@ -275,7 +274,14 @@ func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRo
 		return nil, errors.New("stream ID exhausted")
 	}
 	sess.nextID++
-	stream := newStream(streamID, sess.gateway.limits.MaxStreamQueueFrames)
+	stream := newStream(
+		streamID,
+		sess.gateway.limits.MaxStreamQueueFrames,
+		sess.gateway.limits.MaxStreamQueueBytes,
+		sess.queueBudget,
+		sess.gateway.resources.queueBytes,
+		&sess.gateway.resources.queueRejects,
+	)
 	sess.streams[streamID] = stream
 	sess.mu.Unlock()
 
@@ -387,33 +393,89 @@ func (sess *session) close(status websocket.StatusCode, reason string) {
 	})
 }
 
-type stream struct {
-	id         uint32
-	incoming   chan []byte
-	errCh      chan error
-	buffer     []byte
-	finishOnce sync.Once
+type queuedPayload struct {
+	data []byte
+	size int64
 }
 
-func newStream(id uint32, queueFrames int) *stream {
+type stream struct {
+	id            uint32
+	incoming      chan queuedPayload
+	errCh         chan error
+	buffer        []byte
+	queueMu       sync.Mutex
+	closed        bool
+	streamBudget  *byteBudget
+	sessionBudget *byteBudget
+	globalBudget  *byteBudget
+	rejectCounter *atomic.Uint64
+	finishOnce    sync.Once
+}
+
+func newStream(id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
 	return &stream{
-		id:       id,
-		incoming: make(chan []byte, queueFrames),
-		errCh:    make(chan error, 1),
+		id:            id,
+		incoming:      make(chan queuedPayload, queueFrames),
+		errCh:         make(chan error, 1),
+		streamBudget:  newByteBudget(queueBytes),
+		sessionBudget: sessionBudget,
+		globalBudget:  globalBudget,
+		rejectCounter: rejectCounter,
 	}
+}
+
+func (stream *stream) enqueue(data []byte) error {
+	size := int64(len(data))
+	stream.queueMu.Lock()
+	defer stream.queueMu.Unlock()
+	if stream.closed {
+		return errors.New("stream closed")
+	}
+	if !stream.streamBudget.tryAcquire(size) {
+		stream.rejectCounter.Add(1)
+		return errResourceBudget
+	}
+	if !stream.sessionBudget.tryAcquire(size) {
+		stream.streamBudget.release(size)
+		stream.rejectCounter.Add(1)
+		return errResourceBudget
+	}
+	if !stream.globalBudget.tryAcquire(size) {
+		stream.sessionBudget.release(size)
+		stream.streamBudget.release(size)
+		stream.rejectCounter.Add(1)
+		return errResourceBudget
+	}
+	payload := queuedPayload{data: append([]byte(nil), data...), size: size}
+	select {
+	case stream.incoming <- payload:
+		return nil
+	default:
+		stream.releaseQueued(size)
+		stream.rejectCounter.Add(1)
+		return errors.New("frame queue full")
+	}
+}
+
+func (stream *stream) releaseQueued(size int64) {
+	stream.globalBudget.release(size)
+	stream.sessionBudget.release(size)
+	stream.streamBudget.release(size)
 }
 
 func (stream *stream) Read(data []byte) (int, error) {
 	for len(stream.buffer) == 0 {
 		select {
 		case chunk := <-stream.incoming:
-			stream.buffer = chunk
+			stream.releaseQueued(chunk.size)
+			stream.buffer = chunk.data
 			continue
 		default:
 		}
 		select {
 		case chunk := <-stream.incoming:
-			stream.buffer = chunk
+			stream.releaseQueued(chunk.size)
+			stream.buffer = chunk.data
 		case err := <-stream.errCh:
 			if err == nil {
 				return 0, io.EOF
@@ -428,6 +490,17 @@ func (stream *stream) Read(data []byte) (int, error) {
 
 func (stream *stream) finish(err error) {
 	stream.finishOnce.Do(func() {
-		stream.errCh <- err
+		stream.queueMu.Lock()
+		stream.closed = true
+		for {
+			select {
+			case chunk := <-stream.incoming:
+				stream.releaseQueued(chunk.size)
+			default:
+				stream.queueMu.Unlock()
+				stream.errCh <- err
+				return
+			}
+		}
 	})
 }

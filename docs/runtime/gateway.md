@@ -119,3 +119,9 @@ The Gateway-specific runtime check remains in place. Integrated real Agent↔Gat
 The initial deployment package is now `deploy/gateway/`: Docker Compose runs only the Tunnel Gateway and Caddy public edge. Caddy owns public TLS and forwards to the Gateway over certificate-verified HTTPS using a deployment-local CA; the Gateway itself remains TLS-only and is not published directly on a host port.
 
 The internal Gateway listener also exposes `/readyz` and low-cardinality aggregate `/metrics` in addition to `/healthz`. Caddy blocks `/readyz` and `/metrics` on the public edge. Packaging, diagnostics, certificate bootstrap and release provenance are documented in `docs/runtime/packaging-and-operations.md`.
+
+## R-3 bounded resource model
+
+Gateway resource safety uses both count and byte budgets. The default Agent→Gateway queue limits are 2 MiB per stream, 8 MiB per authenticated session and 32 MiB globally; a payload must reserve all applicable budgets before it is copied into a queue. Public request serialization remains the pre-R-4 data path, but its aggregate retained bytes are capped independently at 32 MiB and public ingress is capped at 32 concurrent requests. Agent handshakes and public ingress also use bounded global token-bucket rates (32/s burst 64 and 256/s burst 512 respectively). Existing session/stream/frame/request limits remain in force.
+
+`/metrics` exposes only aggregate low-cardinality resource gauges/counters for queued bytes, ingress bytes/requests and rejection totals. Device IDs, endpoint IDs and hostnames are never metric labels. The Docker Compose Gateway memory limit remains 256 MiB; authenticated Agent sessions are capped at 64 and the two explicitly retained application payload budgets total 64 MiB and are not preallocated, leaving headroom for transient protocol frames, active response chunks, Go/TLS/WebSocket/runtime overhead and metadata. This is a safety envelope, not a throughput/capacity claim.
