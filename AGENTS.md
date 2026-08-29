@@ -45,3 +45,15 @@ Reporting/evidence requirements are normative in:
 - `docs/engineering/reporting-and-evidence-contract.md`
 
 Use the exact check-status vocabulary defined there. A leaf may not be reported `completed` with missing required evidence, skipped checks must be explicit, and architecture deviations must be `None` or explicitly approved and traceable.
+
+Current Edge Agent + Tunnel Gateway architecture authority is frozen by AG-1 in:
+
+- `docs/architecture/agent-gateway-architecture-contract.md`
+- `docs/adr/ADR-0001-agent-gateway-transport.md`
+- `docs/adr/ADR-0002-device-identity-key-locality.md`
+- `docs/adr/ADR-0003-external-control-panel-boundary.md`
+- `docs/adr/ADR-0004-caddy-tls-domain-edge.md`
+- `docs/adr/ADR-0005-bounded-stream-multiplexing.md`
+- `docs/adr/ADR-0006-routing-ownership.md`
+
+AG-1 does not authorize concrete protocol schemas, repository/runtime scaffolding, Gateway/Agent executables, Control Panel implementation, or later-leaf deployment work. Those remain gated by future `plan.next` leaves.
