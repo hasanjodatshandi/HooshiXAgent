@@ -71,6 +71,8 @@ Consumers must fail closed when a record is:
 
 Caches or fixtures cannot silently extend an expired authorization.
 
+An authenticated Agent session must not remain authorized beyond the `expires_at` of the authorization that established it. The Gateway must re-evaluate authorization freshness on a bounded session lifecycle interval and terminate the session fail closed once that authorization is expired, invalid, unavailable, disabled, mismatched, or effectively revoked.
+
 ## 7. Explicit exclusions
 
 AG-3 does not define or implement:

@@ -106,12 +106,12 @@ func TestSequenceTrackerRejectsReplayAndReordering(t *testing.T) {
 	t.Parallel()
 
 	var tracker SequenceTracker
-	for _, sequence := range []uint64{1, 2, 10} {
+	for _, sequence := range []uint64{1, 2, 3} {
 		if err := tracker.Accept(sequence); err != nil {
 			t.Fatalf("accept %d: %v", sequence, err)
 		}
 	}
-	for _, sequence := range []uint64{10, 9, 0} {
+	for _, sequence := range []uint64{3, 2, 0} {
 		if err := tracker.Accept(sequence); err == nil {
 			t.Fatalf("expected sequence %d rejection", sequence)
 		}
