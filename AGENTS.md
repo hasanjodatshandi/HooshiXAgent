@@ -33,3 +33,9 @@ Engineering/runtime/security standards are normative in:
 - `docs/engineering/quality-enforcement-map.md`
 
 Compilation alone is never completion evidence. Runnable capabilities require the real Executable Runtime Gate, applicable security failures block completion, and concurrency/timeouts/resources must remain bounded.
+
+Repository delivery workflow is normative in:
+
+- `docs/engineering/repository-change-workflow.md`
+
+Normal implementation work uses the canonical workspace/remote and one fresh branch + one PR per Durable Plan leaf. Required CI must pass before merge when applicable, and merged `main` plus post-merge verification are required before a leaf may be marked `PASSED`.
