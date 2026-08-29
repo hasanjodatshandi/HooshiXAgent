@@ -167,9 +167,9 @@ Protocol frame bounds remain governed by ADR-0007.
 hooshix-agent service-spec --state-dir <dir>
 ```
 
-AG-5 does not install the service. Installer/service installation, signing, packaging and deployment belong to AG-7.
+AG-7 now supplies user-scoped installers and persistence integration documented in `docs/runtime/packaging-and-operations.md`. Linux uses `systemd --user`, macOS uses a LaunchAgent, and Windows uses a current-user logon Scheduled Task so DPAPI CurrentUser ownership remains intact.
 
-State and identity survive normal process restart. Full OS reboot acceptance remains a later AG-8 release gate.
+State and identity survive normal process restart. Full OS reboot acceptance remains an AG-8 release gate.
 
 ## Update foundation
 
@@ -179,7 +179,7 @@ State and identity survive normal process restart. Full OS reboot acceptance rem
 - absolute HTTPS download URL;
 - lowercase SHA-256 artifact digest.
 
-AG-5 does not download/apply updates or define release signing/rollback. Those belong to AG-7/AG-8.
+AG-7 now provides checksummed, attested release packages and a previous-binary package rollback operation. The Agent still does not autonomously download/apply updates; final update/rollback resilience acceptance remains AG-8.
 
 ## Executable Runtime Gate
 

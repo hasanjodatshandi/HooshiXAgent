@@ -54,3 +54,7 @@ Operational and security details are documented in `docs/runtime/agent.md`. Full
 ## Agent↔Gateway E2E acceptance
 
 AG-6 adds a blocking deterministic E2E acceptance gate for the real `cmd/agent` and `cmd/gateway` binaries. It validates external contract metadata injection, the stable `demo.hooshix.test` test route, a real HTTPS→Gateway→WSS→Agent→loopback-service request, Agent/Gateway restart recovery, offline/error behavior and security-negative routing/auth cases. See `docs/runtime/agent-gateway-e2e-acceptance.md`.
+
+## Packaging and operations
+
+AG-7 packages the Edge Agent for Linux/macOS/Windows and provides the initial Tunnel Gateway Docker Compose deployment with Caddy as the public TLS edge. Caddy→Gateway forwarding remains certificate-verified, Gateway operational readiness/aggregate metrics are internal-only, and release tags produce checksummed GitHub-attested artifacts. See `docs/runtime/packaging-and-operations.md`.

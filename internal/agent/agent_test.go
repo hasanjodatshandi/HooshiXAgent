@@ -219,14 +219,36 @@ func TestGatewayURLValidation(t *testing.T) {
 
 func TestServiceSpecFoundations(t *testing.T) {
 	t.Parallel()
-	for _, goos := range []string{"linux", "darwin", "windows"} {
-		spec, err := NativeServiceSpec(goos, filepath.Join(t.TempDir(), "hooshix-agent"), filepath.Join(t.TempDir(), "state"))
-		if err != nil {
-			t.Fatalf("%s: %v", goos, err)
-		}
-		if spec.Native == "" || spec.Name != "hooshix-agent" {
-			t.Fatalf("invalid %s service spec: %#v", goos, spec)
-		}
+	tests := []struct {
+		goos    string
+		want    []string
+		notWant []string
+	}{
+		{goos: "linux", want: []string{"WantedBy=default.target", "ExecStart="}},
+		{goos: "darwin", want: []string{"com.hooshix.agent", "RunAtLoad"}},
+		{goos: "windows", want: []string{"schtasks.exe", "/SC ONLOGON", "/RL LIMITED"}, notWant: []string{"sc.exe create"}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.goos, func(t *testing.T) {
+			spec, err := NativeServiceSpec(test.goos, filepath.Join(t.TempDir(), "hooshix-agent"), filepath.Join(t.TempDir(), "state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.Native == "" || spec.Name != "hooshix-agent" {
+				t.Fatalf("invalid service spec: %#v", spec)
+			}
+			for _, fragment := range test.want {
+				if !strings.Contains(spec.Native, fragment) {
+					t.Fatalf("%s spec missing %q: %s", test.goos, fragment, spec.Native)
+				}
+			}
+			for _, fragment := range test.notWant {
+				if strings.Contains(spec.Native, fragment) {
+					t.Fatalf("%s spec unexpectedly contains %q: %s", test.goos, fragment, spec.Native)
+				}
+			}
+		})
 	}
 }
 

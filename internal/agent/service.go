@@ -64,7 +64,7 @@ WantedBy=default.target
 </dict></plist>
 `, xmlEscape(absoluteBinary), xmlEscape(absoluteState))
 	case "windows":
-		spec.Native = "sc.exe create HooshiXAgent start= auto binPath= " + strconv.Quote(quotedCommand)
+		spec.Native = "schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN HooshiXAgent /TR " + strconv.Quote(quotedCommand)
 	default:
 		return ServiceSpec{}, fmt.Errorf("unsupported service platform %q", goos)
 	}

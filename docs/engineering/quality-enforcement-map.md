@@ -74,3 +74,7 @@ These are not implemented by this governance leaf.
 ## Agent↔Gateway E2E acceptance
 
 AG-6 adds `scripts/ci/e2e-acceptance.sh` and the blocking `Agent↔Gateway E2E acceptance` CI job. It builds the real Agent and Gateway binaries and executes the deterministic integrated acceptance documented in `docs/runtime/agent-gateway-e2e-acceptance.md`, including validated external metadata injection, the stable `demo.hooshix.test` test route, public tunnel success, Agent/Gateway restart recovery, offline/error behavior, and security-negative cases. This gate supplements rather than replaces the executable runtime, unit/race, architecture, vulnerability, Gitleaks and Semgrep gates.
+
+## Packaging and operations gate
+
+AG-7 adds platform Agent clean-install/rollback/uninstall smoke tests plus the blocking `Packaging / clean deployment / rollback` CI job driven by `scripts/ci/packaging-ops.sh`. The gate builds checksummed release archives, installs the produced Linux Agent archive, extracts and clean-deploys the produced Gateway Docker Compose+Caddy bundle, verifies Caddy→Gateway TLS, verifies that `/readyz` and `/metrics` remain internal-only, validates aggregate metrics, and checks that the tag release workflow uses OIDC-backed artifact attestations. Existing Go, architecture, security, runtime and E2E gates remain blocking.
