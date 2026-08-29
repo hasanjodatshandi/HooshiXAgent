@@ -58,3 +58,7 @@ AG-6 adds a blocking deterministic E2E acceptance gate for the real `cmd/agent` 
 ## Packaging and operations
 
 AG-7 packages the Edge Agent for Linux/macOS/Windows and provides the initial Tunnel Gateway Docker Compose deployment with Caddy as the public TLS edge. Caddy→Gateway forwarding remains certificate-verified, Gateway operational readiness/aggregate metrics are internal-only, and release tags produce checksummed GitHub-attested artifacts. See `docs/runtime/packaging-and-operations.md`.
+
+## Final release gate
+
+AG-8 is the final Agent/Gateway security and resilience acceptance. Release readiness is blocked on the complete CI dependency chain plus focused SSRF/auth/replay/malformed/resource, network interruption/reconnect, cold restart, update/rollback, clean package/deployment and artifact/provenance checks. The external HooshiX Control Panel remains outside this repository. See `docs/runtime/security-resilience-release-gate.md`.
