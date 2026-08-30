@@ -65,6 +65,10 @@ jobs:
           go test -count=1 ./internal/agent
           go build ./cmd/agent
 
+      - name: Fuzz Agent local-target policy
+        shell: bash
+        run: go test -run '^$' -fuzz '^FuzzValidateLocalTarget$' -fuzztime=1s ./internal/agent
+
       - name: Clean Agent package install / rollback / uninstall (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -261,6 +265,33 @@ jobs:
         shell: bash
         run: bash scripts/ci/infrastructure-runtime.sh
 
+  comprehensive-tests:
+    name: R-11 comprehensive test expansion gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run comprehensive test expansion gate
+        shell: bash
+        env:
+          HOOSHIX_R11_COVERAGE_DIR: ${{ runner.temp }}/hooshix-r11-coverage
+        run: bash scripts/ci/comprehensive-tests.sh
+
+      - name: Upload R-11 coverage evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: r11-coverage-${{ github.sha }}
+          path: ${{ runner.temp }}/hooshix-r11-coverage
+          if-no-files-found: error
+          retention-days: 30
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -338,6 +369,7 @@ jobs:
       - observability-writer
       - agent-state-installer
       - infrastructure-runtime
+      - comprehensive-tests
       - e2e-acceptance
       - packaging-ops
       - runtime-gate
