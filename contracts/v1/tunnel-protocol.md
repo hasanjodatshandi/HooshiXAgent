@@ -42,8 +42,8 @@ Implementations may enforce lower operational limits through configuration, but 
 Each direction has an independent unsigned 64-bit sequence space.
 
 - first frame sent after WebSocket establishment uses sequence `1`;
-- each subsequent frame increments the sequence;
-- a receiver rejects a sequence less than or equal to the last accepted sequence;
+- each subsequent frame is exactly the previously accepted sequence plus `1`; gaps are invalid;
+- a receiver rejects repeated, lower, skipped, or otherwise non-contiguous sequence values;
 - sequence wrap is not permitted; the session must terminate before wrap.
 
 TLS protects transport confidentiality/integrity. The protocol sequence is an additional replay/order invariant within the authenticated tunnel session; it is not a replacement for TLS or authentication.
@@ -64,7 +64,7 @@ For v1 public-ingress tunnel flows:
 
 Control payloads are UTF-8 JSON objects and must satisfy `tunnel-control.schema.json` plus the semantic rules below.
 
-Unknown fields are rejected. Strings are length-bounded by the schema. Identifiers are opaque and must match the schema identifier pattern; implementations must not infer account, tenant, billing, or database semantics from them.
+Invalid UTF-8 is rejected before JSON semantic processing. Duplicate JSON object member names are invalid and must be rejected, even when the duplicate values are identical. Unknown fields are rejected. Strings are length-bounded by the schema. Identifiers are opaque and must match the schema identifier pattern; implementations must not infer account, tenant, billing, or database semantics from them.
 
 ## 6. Session establishment
 
