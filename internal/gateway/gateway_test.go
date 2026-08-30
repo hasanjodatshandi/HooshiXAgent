@@ -648,21 +648,22 @@ func TestExecutableRefusesPlaintextStartup(t *testing.T) {
 }
 
 type mockAgent struct {
-	conn            *websocket.Conn
-	identity        testIdentity
-	localURL        *url.URL
-	httpClient      *http.Client
-	writeMu         sync.Mutex
-	outSequence     atomic.Uint64
-	inSequence      contractv1.SequenceTracker
-	mu              sync.Mutex
-	streams         map[uint32]*mockStream
-	done            chan struct{}
-	closeOnce       sync.Once
-	active          atomic.Int32
-	maxConcurrent   atomic.Int32
-	pings           atomic.Int32
-	dataFromGateway atomic.Int64
+	conn                  *websocket.Conn
+	identity              testIdentity
+	localURL              *url.URL
+	httpClient            *http.Client
+	writeMu               sync.Mutex
+	outSequence           atomic.Uint64
+	inSequence            contractv1.SequenceTracker
+	mu                    sync.Mutex
+	streams               map[uint32]*mockStream
+	done                  chan struct{}
+	closeOnce             sync.Once
+	active                atomic.Int32
+	maxConcurrent         atomic.Int32
+	pings                 atomic.Int32
+	dataFromGateway       atomic.Int64
+	suppressResponseClose bool
 }
 
 type mockStream struct {
@@ -671,7 +672,7 @@ type mockStream struct {
 	done     chan struct{}
 }
 
-func connectMockAgent(t *testing.T, parent context.Context, baseURL string, client *http.Client, identity testIdentity, localServiceURL string) *mockAgent {
+func connectMockAgent(t testing.TB, parent context.Context, baseURL string, client *http.Client, identity testIdentity, localServiceURL string) *mockAgent {
 	t.Helper()
 	parsed, err := url.Parse(localServiceURL)
 	if err != nil {
@@ -833,11 +834,13 @@ func (agent *mockAgent) proxyStream(stream *mockStream) {
 	if err := agent.sendBytes(context.Background(), stream.id, encoded.Bytes()); err != nil {
 		return
 	}
-	_ = agent.sendControl(context.Background(), stream.id, contractv1.StreamClose{
-		ContractVersion: contractv1.ProtocolVersion,
-		MessageType:     "stream_close",
-		ReasonCode:      "completed",
-	})
+	if !agent.suppressResponseClose {
+		_ = agent.sendControl(context.Background(), stream.id, contractv1.StreamClose{
+			ContractVersion: contractv1.ProtocolVersion,
+			MessageType:     "stream_close",
+			ReasonCode:      "completed",
+		})
+	}
 }
 
 func (agent *mockAgent) finishStream(id uint32) {
@@ -951,7 +954,7 @@ func (reader *mockStreamReader) Read(data []byte) (int, error) {
 	return n, nil
 }
 
-func newTestIdentity(t *testing.T) testIdentity {
+func newTestIdentity(t testing.TB) testIdentity {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -971,7 +974,7 @@ func newTestIdentity(t *testing.T) testIdentity {
 	}
 }
 
-func testMetadata(t *testing.T, identity testIdentity, hostname string) *SnapshotMetadata {
+func testMetadata(t testing.TB, identity testIdentity, hostname string) *SnapshotMetadata {
 	t.Helper()
 	source := NewSnapshotMetadata()
 	auth, route := metadataRecords(identity, hostname)
@@ -1026,7 +1029,7 @@ func writeMetadataSnapshot(t *testing.T, root string, identity testIdentity, hos
 	}
 }
 
-func dialRawAgent(t *testing.T, client *http.Client, baseURL string) *websocket.Conn {
+func dialRawAgent(t testing.TB, client *http.Client, baseURL string) *websocket.Conn {
 	t.Helper()
 	wssURL := "wss" + strings.TrimPrefix(baseURL, "https") + agentPath
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1067,7 +1070,7 @@ func sendHello(ctx context.Context, conn *websocket.Conn, hello contractv1.Clien
 	return conn.Write(ctx, websocket.MessageBinary, encoded)
 }
 
-func readFrameForTest(t *testing.T, ctx context.Context, conn *websocket.Conn) contractv1.Frame {
+func readFrameForTest(t testing.TB, ctx context.Context, conn *websocket.Conn) contractv1.Frame {
 	t.Helper()
 	frame, err := readFrame(ctx, conn)
 	if err != nil {
@@ -1087,7 +1090,7 @@ func readFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame, err
 	return contractv1.DecodeFrame(data)
 }
 
-func newPublicRequest(t *testing.T, rawURL, host string, body io.Reader) *http.Request {
+func newPublicRequest(t testing.TB, rawURL, host string, body io.Reader) *http.Request {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, rawURL, body)
 	if body == nil {
@@ -1109,7 +1112,7 @@ func localHTTPClient(rawURL string) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
 
-func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
+func waitFor(t testing.TB, timeout time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

@@ -157,12 +157,19 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	}
 	select {
 	case gateway.handshakeSlots <- struct{}{}:
-		defer func() { <-gateway.handshakeSlots }()
 	default:
 		gateway.resources.handshakeRejects.Add(1)
 		http.Error(w, "too many pending handshakes", http.StatusServiceUnavailable)
 		return
 	}
+	handshakeSlotHeld := true
+	releaseHandshakeSlot := func() {
+		if handshakeSlotHeld {
+			<-gateway.handshakeSlots
+			handshakeSlotHeld = false
+		}
+	}
+	defer releaseHandshakeSlot()
 
 	conn, err := websocket.Accept(w, request, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
@@ -174,9 +181,9 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	conn.SetReadLimit(contractv1.HeaderSize + contractv1.MaxDataPayload)
 
 	ctx, cancel := context.WithTimeout(request.Context(), gateway.limits.HandshakeTimeout)
-	defer cancel()
-
 	sess, err := gateway.authenticate(ctx, conn)
+	cancel()
+	releaseHandshakeSlot()
 	if err != nil {
 		gateway.logger.Warn("agent authentication failed", "error", err)
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
