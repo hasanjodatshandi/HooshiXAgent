@@ -19,6 +19,8 @@ type Limits struct {
 	MaxRequestBytes         int64
 	MaxResponseBytes        int64
 	MaxHeaderBytes          int
+	MaxStatusQueueSignals   int
+	StatusEmitTimeout       time.Duration
 	HandshakeTimeout        time.Duration
 	ReadTimeout             time.Duration
 	WriteTimeout            time.Duration
@@ -45,6 +47,8 @@ func DefaultLimits() Limits {
 		MaxRequestBytes:         8 << 20,
 		MaxResponseBytes:        32 << 20,
 		MaxHeaderBytes:          32 << 10,
+		MaxStatusQueueSignals:   256,
+		StatusEmitTimeout:       2 * time.Second,
 		HandshakeTimeout:        10 * time.Second,
 		ReadTimeout:             15 * time.Second,
 		WriteTimeout:            10 * time.Second,
@@ -69,6 +73,7 @@ func (limits Limits) valid() bool {
 		limits.MaxRequestBytes > 0 &&
 		limits.MaxResponseBytes > 0 &&
 		limits.MaxHeaderBytes > 0 &&
+		limits.MaxStatusQueueSignals > 0 && limits.StatusEmitTimeout > 0 &&
 		limits.MaxIngressInFlightBytes >= limits.MaxRequestBytes+int64(limits.MaxHeaderBytes) &&
 		limits.HandshakeTimeout > 0 &&
 		limits.ReadTimeout > 0 &&

@@ -28,7 +28,9 @@ type session struct {
 	lastSeen   atomic.Int64
 	authorized atomic.Bool
 
-	writeMu                    sync.Mutex
+	controlWrites              chan sessionWriteRequest
+	dataWrites                 chan sessionWriteRequest
+	writeMessage               func(context.Context, []byte) error
 	mu                         sync.Mutex
 	streams                    map[uint32]*stream
 	queueBudget                *byteBudget
@@ -52,10 +54,16 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 		queueBudget:            newByteBudget(gateway.limits.MaxSessionQueueBytes),
 		nextID:                 1,
 		done:                   make(chan struct{}),
+		controlWrites:          make(chan sessionWriteRequest, 32),
+		dataWrites:             make(chan sessionWriteRequest, 2),
+	}
+	sess.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
 	}
 	sess.outbound.Store(lastOutbound)
 	sess.lastSeen.Store(time.Now().UnixNano())
 	sess.authorized.Store(true)
+	go sess.writeLoop()
 	return sess
 }
 
@@ -373,29 +381,109 @@ func (sess *session) sendControl(ctx context.Context, streamID uint32, value any
 	return sess.sendFrame(ctx, contractv1.KindControl, streamID, payload)
 }
 
+type sessionWriteRequest struct {
+	ctx      context.Context
+	kind     contractv1.Kind
+	streamID uint32
+	payload  []byte
+	result   chan error
+}
+
+var errSessionWriterClosed = errors.New("gateway session writer closed")
+
 func (sess *session) sendFrame(parent context.Context, kind contractv1.Kind, streamID uint32, payload []byte) error {
 	ctx, cancel := context.WithTimeout(parent, sess.gateway.limits.WriteTimeout)
 	defer cancel()
+	request := sessionWriteRequest{ctx: ctx, kind: kind, streamID: streamID, payload: payload, result: make(chan error, 1)}
+	queue := sess.dataWrites
+	if kind == contractv1.KindControl {
+		queue = sess.controlWrites
+	}
+	select {
+	case queue <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-sess.done:
+		return errSessionWriterClosed
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-sess.done:
+		return errSessionWriterClosed
+	}
+}
 
-	sess.writeMu.Lock()
-	defer sess.writeMu.Unlock()
+func (sess *session) writeLoop() {
+	var pendingData *sessionWriteRequest
+	for {
+		if pendingData != nil {
+			select {
+			case <-sess.done:
+				return
+			default:
+			}
+			select {
+			case request := <-sess.controlWrites:
+				sess.writeQueued(request)
+				continue
+			default:
+			}
+			request := *pendingData
+			pendingData = nil
+			sess.writeQueued(request)
+			continue
+		}
+
+		select {
+		case <-sess.done:
+			return
+		default:
+		}
+		select {
+		case request := <-sess.controlWrites:
+			sess.writeQueued(request)
+			continue
+		default:
+		}
+		select {
+		case <-sess.done:
+			return
+		case request := <-sess.controlWrites:
+			sess.writeQueued(request)
+		case request := <-sess.dataWrites:
+			pendingData = &request
+		}
+	}
+}
+
+func (sess *session) writeQueued(request sessionWriteRequest) {
+	if err := request.ctx.Err(); err != nil {
+		request.result <- err
+		return
+	}
 	sequence, err := contractv1.NextSequence(sess.outbound.Load())
 	if err != nil {
 		sess.failAll(err)
 		sess.close(websocket.StatusPolicyViolation, "sequence exhausted")
-		return err
+		request.result <- err
+		return
 	}
-	frame, err := contractv1.EncodeFrame(contractv1.Frame{Kind: kind, StreamID: streamID, Sequence: sequence, Payload: payload})
+	frame, err := contractv1.EncodeFrame(contractv1.Frame{Kind: request.kind, StreamID: request.streamID, Sequence: sequence, Payload: request.payload})
 	if err != nil {
-		return err
+		request.result <- err
+		return
 	}
 	sess.outbound.Store(sequence)
-	if err := sess.conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+	if err := sess.writeMessage(request.ctx, frame); err != nil {
+		request.result <- err
 		sess.failAll(err)
 		sess.close(websocket.StatusInternalError, "protocol write failed")
-		return err
+		return
 	}
-	return nil
+	request.result <- nil
 }
 
 func (sess *session) close(status websocket.StatusCode, reason string) {

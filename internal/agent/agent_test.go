@@ -22,11 +22,15 @@ import (
 
 func TestAgentSequenceExhaustionTerminatesSession(t *testing.T) {
 	sess := &agentSession{
-		limits:  DefaultLimits(),
-		streams: make(map[uint32]*agentStream),
-		closed:  make(chan struct{}),
+		limits:        DefaultLimits(),
+		streams:       make(map[uint32]*agentStream),
+		closed:        make(chan struct{}),
+		controlWrites: make(chan agentWriteRequest, 32),
+		dataWrites:    make(chan agentWriteRequest, 2),
+		writeMessage:  func(context.Context, []byte) error { return nil },
 	}
 	sess.outbound.Store(contractv1.MaxSequence)
+	go sess.writeLoop()
 	if err := sess.sendFrame(context.Background(), contractv1.KindControl, 0, []byte(`{"contract_version":1}`)); err == nil {
 		t.Fatal("Agent allowed outbound sequence wrap")
 	}

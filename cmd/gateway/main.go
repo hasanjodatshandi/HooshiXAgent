@@ -87,8 +87,14 @@ func run() error {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
+		if err := serverGateway.Close(shutdownCtx); err != nil {
+			logger.Warn("status exporter flush incomplete", "error", err)
+		}
 		return nil
 	case err := <-errCh:
+		closeCtx, cancel := context.WithTimeout(context.Background(), limits.ShutdownTimeout)
+		defer cancel()
+		_ = serverGateway.Close(closeCtx)
 		if errors.Is(err, context.Canceled) || errors.Is(err, os.ErrClosed) {
 			return nil
 		}

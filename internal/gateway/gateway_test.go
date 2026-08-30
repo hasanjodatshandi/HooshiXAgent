@@ -95,6 +95,11 @@ func TestGatewayWSSAuthenticationMultiplexingAndReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = gateway.Close(ctx)
+	})
 	tlsServer := httptest.NewTLSServer(gateway.Handler())
 	defer tlsServer.Close()
 
@@ -186,9 +191,9 @@ func TestGatewayWSSAuthenticationMultiplexingAndReconnect(t *testing.T) {
 		t.Fatalf("reconnected response status=%d body=%q", resp.StatusCode, body)
 	}
 
-	if statuses.count("session_connected") < 2 || statuses.count("traffic_delta") < 3 {
-		t.Fatalf("expected session/traffic status signals, got %#v", statuses.signals)
-	}
+	waitFor(t, 2*time.Second, func() bool {
+		return statuses.count("session_connected") >= 2 && statuses.count("traffic_delta") >= 3
+	})
 }
 
 func TestGatewayRejectsUntrustedTLSInvalidTokenAndReplay(t *testing.T) {
@@ -396,6 +401,11 @@ func TestGatewayStreamsRequestBeforeUploadCompletesAndAccountsTunnelBytes(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = gateway.Close(ctx)
+	})
 	tlsServer := httptest.NewTLSServer(gateway.Handler())
 	defer tlsServer.Close()
 

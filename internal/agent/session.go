@@ -26,9 +26,11 @@ type agentSession struct {
 	logger    *slog.Logger
 	sessionID string
 
-	inbound  contractv1.SequenceTracker
-	outbound atomic.Uint64
-	writeMu  sync.Mutex
+	inbound       contractv1.SequenceTracker
+	outbound      atomic.Uint64
+	controlWrites chan agentWriteRequest
+	dataWrites    chan agentWriteRequest
+	writeMessage  func(context.Context, []byte) error
 
 	mu          sync.Mutex
 	streams     map[uint32]*agentStream
@@ -134,18 +136,24 @@ func authenticateAgent(
 	}
 
 	sess := &agentSession{
-		conn:        conn,
-		config:      config,
-		limits:      limits,
-		logger:      logger,
-		sessionID:   ready.SessionID,
-		inbound:     inbound,
-		streams:     make(map[uint32]*agentStream),
-		queueBudget: newAgentByteBudget(limits.MaxSessionQueueBytes),
-		closed:      make(chan struct{}),
+		conn:          conn,
+		config:        config,
+		limits:        limits,
+		logger:        logger,
+		sessionID:     ready.SessionID,
+		inbound:       inbound,
+		streams:       make(map[uint32]*agentStream),
+		queueBudget:   newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:        make(chan struct{}),
+		controlWrites: make(chan agentWriteRequest, 32),
+		dataWrites:    make(chan agentWriteRequest, 2),
+	}
+	sess.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
 	}
 	sess.outbound.Store(2)
 	sess.limits.IdleTimeout = time.Duration(ready.IdleTimeoutSeconds) * time.Second
+	go sess.writeLoop()
 	return sess, nil
 }
 
@@ -475,31 +483,106 @@ func (sess *agentSession) sendStreamError(parent context.Context, streamID uint3
 	})
 }
 
+type agentWriteRequest struct {
+	ctx      context.Context
+	kind     contractv1.Kind
+	streamID uint32
+	payload  []byte
+	result   chan error
+}
+
+var errAgentWriterClosed = errors.New("agent session writer closed")
+
 func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind, streamID uint32, payload []byte) error {
 	ctx, cancel := context.WithTimeout(parent, sess.limits.WriteTimeout)
 	defer cancel()
-	sess.writeMu.Lock()
-	defer sess.writeMu.Unlock()
+	request := agentWriteRequest{ctx: ctx, kind: kind, streamID: streamID, payload: payload, result: make(chan error, 1)}
+	queue := sess.dataWrites
+	if kind == contractv1.KindControl {
+		queue = sess.controlWrites
+	}
+	select {
+	case queue <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-sess.closed:
+		return errAgentWriterClosed
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-sess.closed:
+		return errAgentWriterClosed
+	}
+}
+
+func (sess *agentSession) writeLoop() {
+	var pendingData *agentWriteRequest
+	for {
+		if pendingData != nil {
+			select {
+			case <-sess.closed:
+				return
+			default:
+			}
+			select {
+			case request := <-sess.controlWrites:
+				sess.writeQueued(request)
+				continue
+			default:
+			}
+			request := *pendingData
+			pendingData = nil
+			sess.writeQueued(request)
+			continue
+		}
+		select {
+		case <-sess.closed:
+			return
+		default:
+		}
+		select {
+		case request := <-sess.controlWrites:
+			sess.writeQueued(request)
+			continue
+		default:
+		}
+		select {
+		case <-sess.closed:
+			return
+		case request := <-sess.controlWrites:
+			sess.writeQueued(request)
+		case request := <-sess.dataWrites:
+			pendingData = &request
+		}
+	}
+}
+
+func (sess *agentSession) writeQueued(request agentWriteRequest) {
+	if err := request.ctx.Err(); err != nil {
+		request.result <- err
+		return
+	}
 	sequence, err := contractv1.NextSequence(sess.outbound.Load())
 	if err != nil {
 		sess.shutdown()
-		return err
+		request.result <- err
+		return
 	}
-	encoded, err := contractv1.EncodeFrame(contractv1.Frame{
-		Kind:     kind,
-		StreamID: streamID,
-		Sequence: sequence,
-		Payload:  payload,
-	})
+	encoded, err := contractv1.EncodeFrame(contractv1.Frame{Kind: request.kind, StreamID: request.streamID, Sequence: sequence, Payload: request.payload})
 	if err != nil {
-		return err
+		request.result <- err
+		return
 	}
 	sess.outbound.Store(sequence)
-	if err := sess.conn.Write(ctx, websocket.MessageBinary, encoded); err != nil {
+	if err := sess.writeMessage(request.ctx, encoded); err != nil {
+		request.result <- err
 		sess.shutdown()
-		return err
+		return
 	}
-	return nil
+	request.result <- nil
 }
 
 func (sess *agentSession) finishStreamFromPeer(streamID uint32) {

@@ -25,7 +25,7 @@ const agentPath = "/agent/v1/connect"
 
 type Gateway struct {
 	metadata MetadataSource
-	status   StatusSink
+	status   *statusExporter
 	limits   Limits
 	logger   *slog.Logger
 
@@ -48,15 +48,16 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Gateway{
+	gateway := &Gateway{
 		metadata:       metadata,
-		status:         status,
 		limits:         limits,
 		logger:         logger,
 		sessions:       make(map[string]*session),
 		handshakeSlots: make(chan struct{}, limits.MaxPendingHandshakes),
 		resources:      newGatewayResources(limits),
-	}, nil
+	}
+	gateway.status = newStatusExporter(status, logger, limits.MaxStatusQueueSignals, limits.StatusEmitTimeout)
+	return gateway, nil
 }
 
 func (gateway *Gateway) Handler() http.Handler {
@@ -141,6 +142,12 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
+	statusQueued, statusLimit, statusDropped, statusFailures := gateway.status.snapshot()
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_status_queue_depth Current queued status signals waiting for asynchronous export.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_queue_depth gauge\nhooshix_gateway_status_queue_depth %d\n", statusQueued)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_queue_limit gauge\nhooshix_gateway_status_queue_limit %d\n", statusLimit)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_dropped_total counter\nhooshix_gateway_status_dropped_total %d\n", statusDropped)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_export_failures_total counter\nhooshix_gateway_status_export_failures_total %d\n", statusFailures)
 }
 
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
@@ -436,10 +443,12 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 
 }
 
-func (gateway *Gateway) emitStatus(ctx context.Context, signal contractv1.GatewayStatusSignal) {
-	if err := gateway.status.Emit(ctx, signal); err != nil {
-		gateway.logger.Warn("status sink failed", "error", err, "kind", signal.Kind)
-	}
+func (gateway *Gateway) emitStatus(_ context.Context, signal contractv1.GatewayStatusSignal) {
+	gateway.status.enqueue(signal)
+}
+
+func (gateway *Gateway) Close(ctx context.Context) error {
+	return gateway.status.close(ctx)
 }
 
 func readProtocolFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame, error) {
