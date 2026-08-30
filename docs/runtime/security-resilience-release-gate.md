@@ -120,3 +120,7 @@ AG-8 completes this Durable Plan only when:
 3. merged-main CI is fully green on the merge SHA;
 4. applicable post-merge runtime, E2E and release gates are rerun successfully;
 5. no required evidence is `Failed`, `Not run`, `Partially verified`, `Inconclusive` or `Not verified` unless the check is genuinely `Not applicable` under the approved scope.
+
+## R-6 release supply-chain prerequisite
+
+The final CI release gate is now additionally dependency-chained behind `R-6 release / supply-chain gate`. That gate proves immutable third-party Action pins, digest-pinned external container bases, negative exact-commit release-policy behavior, privilege separation between read-only build/test jobs and the privileged publish job, SPDX SBOM generation and vulnerability scanning of the release archives and final Gateway image candidate. Tag publication independently rechecks exact-commit CI evidence before any publish privilege is used.

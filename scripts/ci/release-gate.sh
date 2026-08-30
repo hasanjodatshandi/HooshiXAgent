@@ -84,8 +84,10 @@ fi
 # Signing/provenance workflow must remain OIDC-backed and verify identity before publishing.
 grep -q 'id-token: write' .github/workflows/release.yml
 grep -q 'attestations: write' .github/workflows/release.yml
-grep -q 'uses: actions/attest@v4' .github/workflows/release.yml
+grep -Eq 'uses: actions/attest@[0-9a-f]{40} # v4\.' .github/workflows/release.yml
 grep -q 'gh attestation verify' .github/workflows/release.yml
+grep -q 'verify-release-commit.py' .github/workflows/release.yml
+grep -q 'supply-chain-artifacts.sh' .github/workflows/release.yml
 
 # This final job is intentionally chained behind all prerequisite CI jobs in ci.yml.
 grep -q 'name: AG-8 final security / resilience / release gate' .github/workflows/ci.yml
@@ -103,6 +105,7 @@ network_interruption_reconnect_cold_restart=Passed
 artifact_checksum_tamper=Passed
 artifact_scope_secret_content=Passed
 release_attestation_workflow=Passed
+supply_chain_gate=required-by-needs
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF

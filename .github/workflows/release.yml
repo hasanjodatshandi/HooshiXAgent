@@ -4,47 +4,156 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Dry-run package version; no GitHub release is published
+        required: true
+        default: v0.0.0-r6-verify
+        type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+  contents: read
 
 jobs:
-  release:
-    name: Build, attest and publish release
+  policy:
+    name: Verify exact release commit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      release_sha: ${{ steps.release_commit.outputs.release_sha }}
+      release_version: ${{ steps.release_commit.outputs.release_version }}
     steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v4
+      - name: Checkout release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
+      - name: Resolve release commit and version
+        id: release_commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "release verification dry-run must be dispatched from main" >&2
+              exit 1
+            fi
+            release_sha="${GITHUB_SHA}"
+            release_version='${{ inputs.version }}'
+          else
+            release_sha="$(git rev-list -n1 "${GITHUB_REF_NAME}")"
+            release_version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release source did not resolve to a Git commit" >&2
+            exit 1
+          fi
+          if [[ ! "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release version is not a valid v-prefixed semantic version" >&2
+            exit 1
+          fi
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful CI and final release gate for exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/verify-release-commit.py \
+            --sha '${{ steps.release_commit.outputs.release_sha }}' \
+            --repo '${{ github.repository }}'
+
+  build:
+    name: Build, SBOM and vulnerability scan
+    needs: policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout verified release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.policy.outputs.release_sha }}
+
       - name: Set up Go 1.27
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.27.0'
           cache: false
 
       - name: Build release packages
         shell: bash
-        run: bash scripts/release/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_WORKSPACE}/dist"
+        run: bash scripts/release/build-release.sh '${{ needs.policy.outputs.release_version }}' "${GITHUB_WORKSPACE}/dist"
 
-      - name: Verify release checksums
+      - name: Build final Gateway image candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false -t 'hooshix-gateway:${{ needs.policy.outputs.release_version }}' -f deploy/gateway/Dockerfile .
+          docker save 'hooshix-gateway:${{ needs.policy.outputs.release_version }}' -o "${RUNNER_TEMP}/hooshix-gateway-image.tar"
+
+      - name: Generate SBOMs and scan release artifacts/image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/supply-chain-artifacts.sh \
+            "${GITHUB_WORKSPACE}/dist" \
+            "${RUNNER_TEMP}/hooshix-gateway-image.tar" \
+            '${{ needs.policy.outputs.release_version }}'
+
+      - name: Verify finalized release checksums
         shell: bash
         run: |
           set -euo pipefail
           cd dist
           sha256sum -c SHA256SUMS
 
-      - name: Attest release packages
-        uses: actions/attest@v4
+      - name: Upload verified release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ needs.policy.outputs.release_sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Attest and verify release candidate
+    needs:
+      - policy
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download verified release candidate
+        uses: actions/download-artifact@6b208ae046db98c579e8a3aa621ab581ff575935 # v4.1.1
+        with:
+          name: release-candidate-${{ needs.policy.outputs.release_sha }}
+          path: dist
+
+      - name: Verify release checksums before privileged operations
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+
+      - name: Attest release packages and SBOMs
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
 
       - name: Attest checksum manifest
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/SHA256SUMS
 
@@ -59,6 +168,37 @@ jobs:
             gh attestation verify "dist/${artifact}" --repo "${GITHUB_REPOSITORY}"
           done < dist/SHA256SUMS
           gh attestation verify dist/SHA256SUMS --repo "${GITHUB_REPOSITORY}"
+  publish:
+    name: Publish verified release
+    if: github.event_name == 'push'
+    needs:
+      - policy
+      - build
+      - attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Download attested release candidate
+        uses: actions/download-artifact@6b208ae046db98c579e8a3aa621ab581ff575935 # v4.1.1
+        with:
+          name: release-candidate-${{ needs.policy.outputs.release_sha }}
+          path: dist
+
+      - name: Verify release checksums and attestations before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          while read -r _ artifact; do
+            artifact="${artifact#\*}"
+            gh attestation verify "${artifact}" --repo "${GITHUB_REPOSITORY}"
+          done < SHA256SUMS
+          gh attestation verify SHA256SUMS --repo "${GITHUB_REPOSITORY}"
 
       - name: Publish GitHub release
         env:

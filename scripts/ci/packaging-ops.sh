@@ -138,7 +138,9 @@ fi
 # Release workflow trust must use OIDC-backed artifact attestations and verify them before publishing.
 grep -q 'id-token: write' "$repo_root/.github/workflows/release.yml"
 grep -q 'attestations: write' "$repo_root/.github/workflows/release.yml"
-grep -q 'uses: actions/attest@v4' "$repo_root/.github/workflows/release.yml"
+grep -Eq 'uses: actions/attest@[0-9a-f]{40} # v4\.' "$repo_root/.github/workflows/release.yml"
 grep -q 'gh attestation verify' "$repo_root/.github/workflows/release.yml"
+grep -q 'verify-release-commit.py' "$repo_root/.github/workflows/release.yml"
+grep -q 'supply-chain-artifacts.sh' "$repo_root/.github/workflows/release.yml"
 
 echo "Packaging/operations gate: PASSED — release archives, clean Agent package install, clean Gateway Compose+Caddy deployment, verified internal TLS, private operational endpoints and release-attestation workflow were exercised."
