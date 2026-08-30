@@ -311,9 +311,8 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 	t.Run("raw local target in external route is rejected", func(t *testing.T) {
 		stateDir := t.TempDir()
 		metadataDir := t.TempDir()
-		certPath, keyPath, roots := writeCertificate(t)
+		certPath, keyPath, _ := writeCertificate(t)
 		gatewayAddress := reserveAddress(t)
-		gatewayBaseURL := "https://" + gatewayAddress
 		gatewayWSS := "wss://" + gatewayAddress + "/agent/v1/connect"
 		localAddress, stopLocal := startLocalHTTPService(t)
 		defer stopLocal()
@@ -338,19 +337,21 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 			"-tls-key", keyPath,
 			"-metadata-dir", metadataDir,
 		)
-		defer gateway.stop(t)
-		client := trustedClient(roots)
-		waitGatewayHealth(t, client, gatewayBaseURL)
-		agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
-		defer agent.stop(t)
-
-		response, err := publicRequest(client, gatewayBaseURL, "/raw-target", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		response.Body.Close()
-		if response.StatusCode != http.StatusNotFound {
-			t.Fatalf("raw-target route status=%d want=%d", response.StatusCode, http.StatusNotFound)
+		done := make(chan error, 1)
+		go func() { done <- gateway.cmd.Wait() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("Gateway unexpectedly started with raw local_target metadata")
+			}
+			stderr := gateway.stderr.String()
+			if !strings.Contains(stderr, "load external metadata snapshot") || !strings.Contains(stderr, "local_target") {
+				t.Fatalf("Gateway startup rejection did not identify invalid external metadata: %v\n%s", err, stderr)
+			}
+		case <-time.After(3 * time.Second):
+			_ = gateway.cmd.Process.Kill()
+			<-done
+			t.Fatal("Gateway remained running with raw local_target metadata")
 		}
 	})
 

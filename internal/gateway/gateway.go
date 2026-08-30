@@ -77,6 +77,13 @@ func (gateway *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (gateway *Gateway) handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if readiness, ok := gateway.metadata.(interface{ Ready() error }); ok {
+		if err := readiness.Ready(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"status":"not_ready"}`)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, `{"status":"ready"}`)
 }

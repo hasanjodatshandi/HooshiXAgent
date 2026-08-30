@@ -38,6 +38,9 @@ bash scripts/ci/streaming-ingress.sh
 # R-5 HTTP/stream isolation gate proves per-stream fault isolation and proxy correctness.
 bash scripts/ci/http-proxy-correctness.sh
 
+# R-7 metadata gate proves strict typed snapshot loading, indexed revocations and fail-closed readiness.
+bash scripts/ci/metadata-scalability.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
@@ -106,6 +109,7 @@ artifact_checksum_tamper=Passed
 artifact_scope_secret_content=Passed
 release_attestation_workflow=Passed
 supply_chain_gate=required-by-needs
+metadata_scalability_gate=Passed
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF

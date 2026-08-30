@@ -199,6 +199,23 @@ jobs:
         shell: bash
         run: bash scripts/ci/supply-chain.sh
 
+  metadata-scalability:
+    name: R-7 metadata scalability / determinism gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run metadata scalability and determinism gate
+        shell: bash
+        run: bash scripts/ci/metadata-scalability.sh
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -272,6 +289,7 @@ jobs:
       - streaming-ingress
       - http-proxy-correctness
       - supply-chain
+      - metadata-scalability
       - e2e-acceptance
       - packaging-ops
       - runtime-gate
