@@ -131,3 +131,34 @@ func TestAgentQueueBackpressureAllowsBoundedStreaming(t *testing.T) {
 		t.Fatalf("backpressure cleanup leaked bytes: %d", sessionBudget.used.Load())
 	}
 }
+
+func TestAgentPeerTerminalOwnsStreamAndSuppressesLocalTerminal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := &agentStream{
+		id:            7,
+		incoming:      make(chan agentQueuedPayload, 1),
+		space:         make(chan struct{}, 1),
+		ctx:           ctx,
+		cancel:        cancel,
+		streamBudget:  newAgentByteBudget(64),
+		sessionBudget: newAgentByteBudget(64),
+	}
+	sess := &agentSession{streams: map[uint32]*agentStream{7: stream}}
+	sess.finishStreamFromPeer(7)
+	executed := false
+	stream.terminal.Do(func() { executed = true })
+	if executed {
+		t.Fatal("local terminal signal remained available after peer terminal")
+	}
+	sess.mu.Lock()
+	_, present := sess.streams[7]
+	sess.mu.Unlock()
+	if present {
+		t.Fatal("peer-terminal stream remained registered")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("peer terminal did not cancel stream context")
+	}
+}

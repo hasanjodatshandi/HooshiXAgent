@@ -252,12 +252,17 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 func (sess *session) handleData(frame contractv1.Frame) error {
 	sess.mu.Lock()
 	stream := sess.streams[frame.StreamID]
+	nextID := sess.nextID
 	sess.mu.Unlock()
 	if stream == nil {
+		if frame.StreamID != 0 && frame.StreamID < nextID {
+			return nil
+		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
 	if err := stream.enqueue(frame.Payload); err != nil {
-		return fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err)
+		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
+		return nil
 	}
 	return nil
 }
@@ -294,30 +299,13 @@ func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRo
 		RequestID:       newID("request"),
 	}
 	if err := sess.sendControl(ctx, streamID, message); err != nil {
-		sess.removeStream(streamID)
+		sess.finishStream(streamID, err)
 		return nil, err
 	}
 	return stream, nil
 }
 
-func (sess *session) removeStream(streamID uint32) {
-	sess.mu.Lock()
-	stream := sess.streams[streamID]
-	delete(sess.streams, streamID)
-	sess.mu.Unlock()
-	if stream != nil {
-		stream.finish(io.EOF)
-		ctx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
-		defer cancel()
-		_ = sess.sendControl(ctx, streamID, contractv1.StreamClose{
-			ContractVersion: contractv1.ProtocolVersion,
-			MessageType:     "stream_close",
-			ReasonCode:      "completed",
-		})
-	}
-}
-
-func (sess *session) finishStream(streamID uint32, err error) {
+func (sess *session) detachStream(streamID uint32, err error) *stream {
 	sess.mu.Lock()
 	stream := sess.streams[streamID]
 	delete(sess.streams, streamID)
@@ -325,6 +313,32 @@ func (sess *session) finishStream(streamID uint32, err error) {
 	if stream != nil {
 		stream.finish(err)
 	}
+	return stream
+}
+
+func (sess *session) closeStream(streamID uint32, reasonCode string) {
+	if sess.detachStream(streamID, io.EOF) == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
+	defer cancel()
+	_ = sess.sendControl(ctx, streamID, contractv1.StreamClose{ContractVersion: contractv1.ProtocolVersion, MessageType: "stream_close", ReasonCode: reasonCode})
+}
+
+func (sess *session) errorStream(streamID uint32, code, message string, retryable bool, streamErr error) {
+	if sess.detachStream(streamID, streamErr) == nil {
+		return
+	}
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
+	defer cancel()
+	_ = sess.sendControl(ctx, streamID, contractv1.StreamError{ContractVersion: contractv1.ProtocolVersion, MessageType: "stream_error", Code: code, Message: message, Retryable: retryable})
+}
+
+func (sess *session) finishStream(streamID uint32, err error) {
+	_ = sess.detachStream(streamID, err)
 }
 
 func (sess *session) failAll(err error) {
