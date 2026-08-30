@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 func TestGatewayRejectsMalformedProtocolAndHandshakeExhaustion(t *testing.T) {
@@ -71,4 +73,76 @@ func TestGatewayRejectsMalformedProtocolAndHandshakeExhaustion(t *testing.T) {
 			t.Fatalf("handshake over capacity status=%d want=%d", response.StatusCode, http.StatusServiceUnavailable)
 		}
 	})
+}
+
+func TestGatewayRejectsAuthenticatedProtocolStrictnessViolations(t *testing.T) {
+	identity := newTestIdentity(t)
+	metadata := testMetadata(t, identity, testRouteHost)
+	limits := DefaultLimits()
+	gateway, err := New(metadata, NopStatusSink{}, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(gateway.Handler())
+	defer tlsServer.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
+	defer local.Close()
+
+	tests := []struct {
+		name  string
+		frame func() contractv1.Frame
+	}{
+		{
+			name: "sequence gap",
+			frame: func() contractv1.Frame {
+				payload := []byte(fmt.Sprintf(`{"contract_version":1,"message_type":"pong","ping_id":"ping-gap","received_at":%q}`, time.Now().UTC().Format(time.RFC3339)))
+				return contractv1.Frame{Kind: contractv1.KindControl, StreamID: 0, Sequence: 4, Payload: payload}
+			},
+		},
+		{
+			name: "invalid UTF-8 control payload",
+			frame: func() contractv1.Frame {
+				payload := append([]byte(`{"contract_version":1,"message_type":"pong","ping_id":"ping-`), byte(0xff))
+				payload = append(payload, []byte(fmt.Sprintf(`","received_at":%q}`, time.Now().UTC().Format(time.RFC3339)))...)
+				return contractv1.Frame{Kind: contractv1.KindControl, StreamID: 0, Sequence: 3, Payload: payload}
+			},
+		},
+		{
+			name: "duplicate JSON key",
+			frame: func() contractv1.Frame {
+				payload := []byte(fmt.Sprintf(`{"contract_version":1,"message_type":"pong","ping_id":"ping-one","ping_id":"ping-two","received_at":%q}`, time.Now().UTC().Format(time.RFC3339)))
+				return contractv1.Frame{Kind: contractv1.KindControl, StreamID: 0, Sequence: 3, Payload: payload}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agent := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
+			defer agent.close()
+			waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := agent.writeFrame(ctx, test.frame()); err != nil {
+				t.Fatalf("write adversarial frame: %v", err)
+			}
+			waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) == nil })
+		})
+	}
+}
+
+func TestGatewaySequenceExhaustionTerminatesSession(t *testing.T) {
+	sess := &session{
+		gateway: &Gateway{limits: DefaultLimits()},
+		streams: make(map[uint32]*stream),
+		done:    make(chan struct{}),
+	}
+	sess.outbound.Store(contractv1.MaxSequence)
+	if err := sess.sendFrame(context.Background(), contractv1.KindControl, 0, []byte(`{"contract_version":1}`)); err == nil {
+		t.Fatal("Gateway allowed outbound sequence wrap")
+	}
+	select {
+	case <-sess.done:
+	default:
+		t.Fatal("Gateway session did not terminate on sequence exhaustion")
+	}
 }

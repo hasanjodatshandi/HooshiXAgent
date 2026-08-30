@@ -16,7 +16,26 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
+
+func TestAgentSequenceExhaustionTerminatesSession(t *testing.T) {
+	sess := &agentSession{
+		limits:  DefaultLimits(),
+		streams: make(map[uint32]*agentStream),
+		closed:  make(chan struct{}),
+	}
+	sess.outbound.Store(contractv1.MaxSequence)
+	if err := sess.sendFrame(context.Background(), contractv1.KindControl, 0, []byte(`{"contract_version":1}`)); err == nil {
+		t.Fatal("Agent allowed outbound sequence wrap")
+	}
+	select {
+	case <-sess.closed:
+	default:
+		t.Fatal("Agent session did not terminate on sequence exhaustion")
+	}
+}
 
 func TestLocalTargetPolicy(t *testing.T) {
 	t.Parallel()

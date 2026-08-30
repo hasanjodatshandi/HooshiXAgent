@@ -386,7 +386,11 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 	defer cancel()
 	sess.writeMu.Lock()
 	defer sess.writeMu.Unlock()
-	sequence := sess.outbound.Add(1)
+	sequence, err := contractv1.NextSequence(sess.outbound.Load())
+	if err != nil {
+		sess.shutdown()
+		return err
+	}
 	encoded, err := contractv1.EncodeFrame(contractv1.Frame{
 		Kind:     kind,
 		StreamID: streamID,
@@ -396,7 +400,12 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 	if err != nil {
 		return err
 	}
-	return sess.conn.Write(ctx, websocket.MessageBinary, encoded)
+	sess.outbound.Store(sequence)
+	if err := sess.conn.Write(ctx, websocket.MessageBinary, encoded); err != nil {
+		sess.shutdown()
+		return err
+	}
+	return nil
 }
 
 func (sess *agentSession) finishStream(streamID uint32) {
@@ -419,7 +428,9 @@ func (sess *agentSession) shutdown() {
 		for _, stream := range streams {
 			stream.finish.Do(stream.cancel)
 		}
-		sess.conn.CloseNow()
+		if sess.conn != nil {
+			sess.conn.CloseNow()
+		}
 	})
 }
 
