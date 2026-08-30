@@ -100,13 +100,19 @@ The script uses a tag-derived version and deterministic tar/gzip metadata where 
 
 ## Signed release/provenance workflow
 
-`.github/workflows/release.yml` runs only on version tags. It:
+The publication path in `.github/workflows/release.yml` runs on version tags and is fail-closed around the exact tagged commit; `workflow_dispatch` exists only for non-publishing post-merge verification on `main`. The tag is resolved to a 40-hex commit and `scripts/release/verify-release-commit.py` requires a completed successful `CI` **push** run for that exact SHA on `main`, including a successful `AG-8 final security / resilience / release gate` job. A tag pointing at an unverified commit is refused before build or publish.
 
-1. builds release packages;
-2. verifies `SHA256SUMS`;
-3. creates GitHub Artifact Attestations for release subjects and the checksum manifest using OIDC-backed repository identity;
-4. verifies those attestations against the canonical repository identity;
-5. publishes the GitHub release only after verification succeeds.
+The workflow is privilege-separated:
+
+1. `policy` has `contents: read` plus `actions: read` only and proves exact-commit CI eligibility;
+2. `build` has `contents: read` only, builds release archives and the final Gateway image candidate, generates SPDX JSON SBOMs with digest-pinned Syft, and scans artifact SBOMs plus the Gateway image SBOM with digest-pinned Trivy; fixed High/Critical findings block the build;
+3. the verified candidate is transferred through GitHub Actions artifacts with `SHA256SUMS`;
+4. `attest` has `contents: read` plus only the OIDC/attestation privileges (`id-token: write`, `attestations: write`, `artifact-metadata: write`); it re-verifies checksums, creates Artifact Attestations for every checksummed subject and the manifest, and verifies repository identity;
+5. only `publish` receives `contents: write`. It is job-level guarded by `if: github.event_name == 'push'`, has no OIDC or attestation-minting permission, re-verifies checksums/attestations, and then creates the GitHub release.
+
+For post-merge verification without publishing a real release, the same workflow exposes `workflow_dispatch` on `main`. The dry-run still requires successful exact-SHA main CI, builds/scans the candidate, executes the OIDC `attest` job and repository-identity verification, while the entire `publish` job is skipped. This gives R-6 actual OIDC verification evidence without granting publication privilege to the dry-run or creating/moving a version tag.
+
+All third-party GitHub Actions in CI/release workflows are pinned to reviewed immutable 40-character commit SHAs with the reviewed semantic version recorded in an inline comment. Release archives include per-artifact SPDX JSON SBOMs and an SPDX JSON SBOM for the built Gateway image candidate; these SBOMs are themselves checksummed and attested.
 
 Operators verify a downloaded release before promotion:
 
@@ -133,3 +139,11 @@ AG-7 adds:
 - release-attestation workflow trust checks.
 
 All existing Go quality, architecture, security, executable runtime and Agent↔Gateway E2E gates remain blocking.
+
+## R-6 dependency and image pin maintenance
+
+Runtime/build container references keep a human-readable tag and an immutable manifest-list digest. The Gateway runtime image also pins the OpenSSL runtime packages to the fixed versions required by the R-6 vulnerability gate when the pinned Alpine base contains a known fixed High-severity issue. Current pinned references cover the Go build image, Alpine runtime base and Caddy public edge; Syft/Trivy scanner containers are also version+digest pinned inside the R-6 scripts. `scripts/ci/supply-chain.sh` rejects missing/mutable image and Action pins.
+
+To update an Action pin, resolve the reviewed semantic tag directly from the upstream Git repository, record the dereferenced 40-hex commit in the workflow, keep the version comment, review upstream release notes/diff, and run the full R-6 plus existing release gates. To update a container base/scanner, select an explicit reviewed tag, resolve its multi-platform digest with `docker buildx imagetools inspect`, update tag and digest together, rebuild the Gateway candidate, regenerate SBOMs and rerun Trivy. Never update a digest without also reviewing what tag/content it represents.
+
+Rollback never bypasses release eligibility. Operators may roll back to an earlier already checksummed/attested verified release. If a new fixed release is required, create a new version tag on a commit that has independently passed the exact-main CI policy; do not move/reuse a published version tag to evade the gate.
