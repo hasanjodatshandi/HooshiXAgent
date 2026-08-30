@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -123,6 +124,90 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 	combinedLogs := gateway.stderr.String() + agentOne.stderr.String() + agentTwo.stderr.String()
 	if bytes.Contains(statusJSON, []byte(token)) || strings.Contains(combinedLogs, token) {
 		t.Fatal("E2E evidence leaked the session token")
+	}
+}
+
+func TestAgentGatewayLargeRequestStreaming(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("E2E process orchestration uses POSIX interrupt semantics in CI")
+	}
+	agentBinary, gatewayBinary := requiredBinaries(t)
+
+	stateDir := t.TempDir()
+	metadataDir := t.TempDir()
+	certPath, keyPath, roots := writeCertificate(t)
+	gatewayAddress := reserveAddress(t)
+	gatewayBaseURL := "https://" + gatewayAddress
+	gatewayWSS := "wss://" + gatewayAddress + "/agent/v1/connect"
+
+	listener, err := netListenLoopback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	localServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hash := sha256.New()
+		n, err := io.Copy(hash, r.Body)
+		if err != nil {
+			http.Error(w, "body read failed", http.StatusBadRequest)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "%d:%x", n, hash.Sum(nil))
+	})}
+	go func() { _ = localServer.Serve(listener) }()
+	defer func() {
+		_ = localServer.Close()
+		_ = listener.Close()
+	}()
+
+	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, listener.Addr().String())
+	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{})
+	gateway := startProcess(t, gatewayBinary,
+		"-listen", gatewayAddress,
+		"-tls-cert", certPath,
+		"-tls-key", keyPath,
+		"-metadata-dir", metadataDir,
+	)
+	defer gateway.stop(t)
+	client := trustedClient(roots)
+	waitGatewayHealth(t, client, gatewayBaseURL)
+	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
+	defer agent.stop(t)
+
+	const bodySize = 7<<20 + 123
+	payload := bytes.Repeat([]byte("s"), bodySize)
+	expectedHash := sha256.Sum256(payload)
+	var response *http.Response
+	var lastErr error
+	lastStatus := 0
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		request, err := http.NewRequest(http.MethodPost, gatewayBaseURL+"/large-stream", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = e2ePublicHost
+		response, lastErr = client.Do(request)
+		if lastErr == nil {
+			lastStatus = response.StatusCode
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+			response.Body.Close()
+			response = nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if response == nil {
+		t.Fatalf("large streamed request never succeeded: last_status=%d last_error=%v gateway_stderr=%q agent_stderr=%q", lastStatus, lastErr, gateway.stderr.String(), agent.stderr.String())
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := fmt.Sprintf("%d:%x", bodySize, expectedHash[:])
+	if string(body) != expected {
+		t.Fatalf("large streamed request mismatch: got=%q want=%q", body, expected)
 	}
 }
 

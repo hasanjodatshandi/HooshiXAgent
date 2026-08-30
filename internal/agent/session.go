@@ -42,6 +42,7 @@ type agentStream struct {
 	id            uint32
 	endpoint      Endpoint
 	incoming      chan agentQueuedPayload
+	space         chan struct{}
 	ctx           context.Context
 	cancel        context.CancelFunc
 	queueMu       sync.Mutex
@@ -169,7 +170,7 @@ func (sess *agentSession) run(parent context.Context) error {
 				return err
 			}
 		case contractv1.KindData:
-			if err := sess.handleData(frame); err != nil {
+			if err := sess.handleData(parent, frame); err != nil {
 				return err
 			}
 		default:
@@ -247,6 +248,7 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		id:            frame.StreamID,
 		endpoint:      endpoint,
 		incoming:      make(chan agentQueuedPayload, sess.limits.MaxQueueFrames),
+		space:         make(chan struct{}, 1),
 		ctx:           streamCtx,
 		cancel:        cancel,
 		streamBudget:  newAgentByteBudget(sess.limits.MaxStreamQueueBytes),
@@ -259,47 +261,71 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 	return nil
 }
 
-func (sess *agentSession) handleData(frame contractv1.Frame) error {
+func (sess *agentSession) handleData(parent context.Context, frame contractv1.Frame) error {
 	sess.mu.Lock()
 	stream := sess.streams[frame.StreamID]
 	sess.mu.Unlock()
 	if stream == nil {
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
-	if !stream.enqueue(frame.Payload) {
-		_ = sess.sendStreamError(context.Background(), frame.StreamID, "resource_limit", "stream input byte/frame budget exhausted", true)
+	if !stream.enqueue(parent, frame.Payload, sess.limits.WriteTimeout) {
+		_ = sess.sendStreamError(context.Background(), frame.StreamID, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
 		sess.finishStream(frame.StreamID)
 	}
 	return nil
 }
 
-func (stream *agentStream) enqueue(data []byte) bool {
+func (stream *agentStream) enqueue(parent context.Context, data []byte, wait time.Duration) bool {
 	size := int64(len(data))
-	stream.queueMu.Lock()
-	defer stream.queueMu.Unlock()
-	if stream.closed {
-		return false
-	}
-	if !stream.streamBudget.tryAcquire(size) {
-		return false
-	}
-	if !stream.sessionBudget.tryAcquire(size) {
-		stream.streamBudget.release(size)
-		return false
-	}
-	queued := agentQueuedPayload{data: append([]byte(nil), data...), size: size}
-	select {
-	case stream.incoming <- queued:
-		return true
-	default:
-		stream.releaseQueued(size)
-		return false
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		stream.queueMu.Lock()
+		if stream.closed {
+			stream.queueMu.Unlock()
+			return false
+		}
+		reservedStream := stream.streamBudget.tryAcquire(size)
+		reservedSession := false
+		if reservedStream {
+			reservedSession = stream.sessionBudget.tryAcquire(size)
+		}
+		if reservedStream && reservedSession {
+			queued := agentQueuedPayload{data: append([]byte(nil), data...), size: size}
+			select {
+			case stream.incoming <- queued:
+				stream.queueMu.Unlock()
+				return true
+			default:
+				stream.sessionBudget.release(size)
+				stream.streamBudget.release(size)
+			}
+		} else {
+			if reservedStream {
+				stream.streamBudget.release(size)
+			}
+		}
+		stream.queueMu.Unlock()
+
+		select {
+		case <-parent.Done():
+			return false
+		case <-stream.ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		case <-stream.space:
+		}
 	}
 }
 
 func (stream *agentStream) releaseQueued(size int64) {
 	stream.sessionBudget.release(size)
 	stream.streamBudget.release(size)
+	select {
+	case stream.space <- struct{}{}:
+	default:
+	}
 }
 
 func (stream *agentStream) finishStream() {

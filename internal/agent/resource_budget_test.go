@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 )
 
 func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
@@ -21,6 +22,7 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 	first := &agentStream{
 		id:            1,
 		incoming:      make(chan agentQueuedPayload, 4),
+		space:         make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,
 		streamBudget:  newAgentByteBudget(8),
@@ -31,15 +33,16 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 	second := &agentStream{
 		id:            2,
 		incoming:      make(chan agentQueuedPayload, 4),
+		space:         make(chan struct{}, 1),
 		ctx:           secondCtx,
 		cancel:        secondCancel,
 		streamBudget:  newAgentByteBudget(8),
 		sessionBudget: sessionBudget,
 	}
-	if !first.enqueue(bytes.Repeat([]byte{'a'}, 8)) {
+	if !first.enqueue(context.Background(), bytes.Repeat([]byte{'a'}, 8), time.Millisecond) {
 		t.Fatal("initial Agent queue reservation failed")
 	}
-	if second.enqueue(bytes.Repeat([]byte{'b'}, 5)) {
+	if second.enqueue(context.Background(), bytes.Repeat([]byte{'b'}, 5), time.Millisecond) {
 		t.Fatal("Agent session queue budget allowed overcommit")
 	}
 	if sessionBudget.used.Load() != 8 {
@@ -50,7 +53,7 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 	if sessionBudget.used.Load() != 0 {
 		t.Fatal("Agent dequeue did not release session byte budget")
 	}
-	if !second.enqueue(bytes.Repeat([]byte{'c'}, 5)) {
+	if !second.enqueue(context.Background(), bytes.Repeat([]byte{'c'}, 5), time.Millisecond) {
 		t.Fatal("Agent queue did not recover after release")
 	}
 	second.finishStream()
@@ -67,15 +70,16 @@ func TestAgentQueueFrameLimitDoesNotLeakBytes(t *testing.T) {
 	stream := &agentStream{
 		id:            1,
 		incoming:      make(chan agentQueuedPayload, 1),
+		space:         make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,
 		streamBudget:  newAgentByteBudget(64),
 		sessionBudget: sessionBudget,
 	}
-	if !stream.enqueue([]byte("first")) {
+	if !stream.enqueue(context.Background(), []byte("first"), time.Millisecond) {
 		t.Fatal("initial Agent frame enqueue failed")
 	}
-	if stream.enqueue([]byte("second")) {
+	if stream.enqueue(context.Background(), []byte("second"), time.Millisecond) {
 		t.Fatal("Agent frame queue over-capacity succeeded")
 	}
 	if got := sessionBudget.used.Load(); got != int64(len("first")) {
@@ -84,5 +88,46 @@ func TestAgentQueueFrameLimitDoesNotLeakBytes(t *testing.T) {
 	stream.finishStream()
 	if sessionBudget.used.Load() != 0 {
 		t.Fatal("Agent frame-limit cleanup leaked reservation")
+	}
+}
+
+func TestAgentQueueBackpressureAllowsBoundedStreaming(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sessionBudget := newAgentByteBudget(64)
+	stream := &agentStream{
+		id:            1,
+		incoming:      make(chan agentQueuedPayload, 1),
+		space:         make(chan struct{}, 1),
+		ctx:           ctx,
+		cancel:        cancel,
+		streamBudget:  newAgentByteBudget(64),
+		sessionBudget: sessionBudget,
+	}
+	if !stream.enqueue(context.Background(), []byte("first"), time.Second) {
+		t.Fatal("initial frame enqueue failed")
+	}
+	result := make(chan bool, 1)
+	go func() {
+		result <- stream.enqueue(context.Background(), []byte("second"), time.Second)
+	}()
+	select {
+	case <-result:
+		t.Fatal("backpressured enqueue completed before queue space was released")
+	case <-time.After(25 * time.Millisecond):
+	}
+	queued := <-stream.incoming
+	stream.releaseQueued(queued.size)
+	select {
+	case ok := <-result:
+		if !ok {
+			t.Fatal("backpressured enqueue did not resume after queue space release")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backpressured enqueue remained blocked after queue space release")
+	}
+	stream.finishStream()
+	if sessionBudget.used.Load() != 0 {
+		t.Fatalf("backpressure cleanup leaked bytes: %d", sessionBudget.used.Load())
 	}
 }
