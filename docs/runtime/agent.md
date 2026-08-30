@@ -1,6 +1,6 @@
 # Edge Agent Runtime — AG-5
 
-**Status:** Current AG-5 runtime contract
+**Status:** Current runtime contract (origin AG-5; reconciled through R-13)
 
 The Edge Agent executable is `cmd/agent`.
 
@@ -29,7 +29,7 @@ macOS:   ~/Library/Application Support/HooshiXAgent
 Windows: %LOCALAPPDATA%\HooshiXAgent
 ```
 
-Every command supports `--state-dir` so service/packaging work can provide an explicit install location later.
+Every command supports `--state-dir`; packaged service/persistence integration uses this explicit state location without changing the per-user secret ownership model.
 
 The non-secret `config.json` contains the versioned Gateway/identifier/endpoint/update-channel configuration. It never contains the Ed25519 private seed or raw session token.
 
@@ -171,7 +171,7 @@ hooshix-agent service-spec --state-dir <dir>
 
 AG-7 now supplies user-scoped installers and persistence integration documented in `docs/runtime/packaging-and-operations.md`. Linux uses `systemd --user`, macOS uses a LaunchAgent, and Windows uses a current-user logon Scheduled Task so DPAPI CurrentUser ownership remains intact.
 
-State and identity survive normal process restart. Full OS reboot acceptance remains an AG-8 release gate.
+State and identity survive normal process restart. AG-8 release acceptance additionally verifies native persistence definitions on Linux/macOS/Windows plus fresh-process recovery of the same persisted identity/config/credentials. GitHub-hosted CI does not claim a literal physical runner reboot.
 
 ## Update foundation
 
@@ -181,7 +181,7 @@ State and identity survive normal process restart. Full OS reboot acceptance rem
 - absolute HTTPS download URL;
 - lowercase SHA-256 artifact digest.
 
-AG-7 now provides checksummed, attested release packages and a previous-binary package rollback operation. The Agent still does not autonomously download/apply updates; final update/rollback resilience acceptance remains AG-8.
+Checksummed, attested release packages and previous-binary rollback are implemented. AG-8 verifies platform-matched HTTPS update metadata, package rollback, release checksums and tamper rejection. The Agent still does not autonomously download/apply updates; promotion remains an explicit operator action using verified packages.
 
 ## Executable Runtime Gate
 
@@ -196,7 +196,7 @@ AG-7 now provides checksummed, attested release packages and a previous-binary p
 - stopping/restarting the Agent with the same state preserves the same identity and restores the tunnel;
 - status/log evidence does not expose the session token.
 
-This remains the AG-5 local runtime gate. The integrated deterministic test-route and Agent/Gateway restart acceptance is now defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`; broader release resilience remains AG-8 work.
+This runtime gate remains the base real-process check. The integrated deterministic route/restart acceptance is defined by `docs/runtime/agent-gateway-e2e-acceptance.md`, while the completed release-resilience coverage is defined by `docs/runtime/security-resilience-release-gate.md`.
 
 ## R-8 outbound writer isolation
 

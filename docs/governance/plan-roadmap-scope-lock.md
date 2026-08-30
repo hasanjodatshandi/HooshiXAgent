@@ -112,7 +112,7 @@ The implementing AI MUST NOT disable, downgrade, bypass, remove, or silently rei
 
 ## 8. Current roadmap boundary
 
-The approved roadmap is:
+The approved execution history/order is:
 
 ```text
 AG-0 Governance/Repository/Delivery
@@ -124,6 +124,24 @@ AG-0 Governance/Repository/Delivery
 → AG-6 Agent↔Gateway End-to-End Tunnel Acceptance
 → AG-7 Agent/Gateway Packaging and Operations
 → AG-8 Security/Resilience/Agent-Gateway Release Gate
+→ AG-9 First Prototype Smoke Test
+→ R-0 Audit Regression Baseline
+→ R-1 Authorization Lifecycle Hardening
+→ R-2 Protocol Strictness Hardening
+→ R-3 Resource and DoS Budget Model
+→ R-4 Streaming Public-to-Agent Data Path
+→ R-5 Stream Isolation and HTTP Proxy Correctness
+→ R-6 Release and Supply-Chain Hardening
+→ R-7 Metadata Scalability and Determinism
+→ R-8 Observability and Tunnel Writer Isolation
+→ R-9 Agent State and Installer Hardening
+→ R-10 Infrastructure Runtime Hardening
+→ R-11 Comprehensive Test Expansion
+→ R-12 Performance and Capacity Gate
+→ R-13 Current-State Documentation Reconciliation
+→ R-14 Final Security, Architecture and Performance Re-audit
 ```
 
-Only `plan.next` determines which leaf within this roadmap is actionable.
+At the R-13 reconciliation point, AG-0 through AG-9 and R-0 through R-12 have completed their required lifecycle. R-13 changes current-state documentation only. R-14 remains ordered after successful R-13 completion.
+
+This static list is descriptive only. **Only `plan.resume` / `plan.next` determines the actionable leaf.**

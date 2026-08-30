@@ -50,6 +50,12 @@ The resident-session probe reached 1000 simultaneous authenticated WSS sessions 
 
 The three ordinary public round-trip benchmark samples were approximately **110–130 µs/op**, **67–72 KiB/op**, and **404–407 allocs/op**. A five-second local sustained run completed about 59k operations at approximately **125 µs/op** with zero request errors. CI uses a longer ten-second soak by default.
 
+## Merged-main hosted-runner evidence
+
+The R-12 artifact uploaded by merged-main CI for merge `0e3d299e493b41e48c98616253e677b4f62893d9` recorded Go 1.27.0 on Linux amd64 with four logical CPUs. Three 1000-request probes reported p99 values of approximately **1.028 s**, **1.071 s**, and **1.027 s**. Three 1000-resident-session probes connected in approximately **2.776 s**, **2.714 s**, and **2.709 s**, or about **360–369 sessions/second**. Ordinary public round-trip samples were approximately **156–161 µs/op** on that shared runner.
+
+The same artifact contains non-empty CPU, heap, block and mutex profiles plus symbolized top reports, and explicitly records `production_defaults_unchanged=true`. Hosted-runner results are synthetic regression evidence, not production guarantees.
+
 ## Profile interpretation
 
 The reference CPU profile was dominated by kernel/syscall and Go runtime scheduling/I/O costs rather than one Gateway compute function. Allocation-space profiling showed the largest costs in buffered HTTP reader/writer creation, MIME/header parsing, context lifecycle, and test-peer work; `newStream` and `session.sendFrame` were visible but not dominant. Block time was expectedly dominated by network/channel `select` waits; the Gateway ingress/stream read paths appeared cumulatively because this benchmark is an I/O pipeline. Mutex profiling did not identify a single production Gateway mutex as the dominant lock hotspot; much of the observed contention belonged to the in-process mock peer.
@@ -76,4 +82,4 @@ R-12 deliberately leaves the shipped runtime defaults unchanged:
 
 The 100/500/1000 probes demonstrate scaling headroom in a local, in-process, loopback environment after the handshake-slot defect is fixed; they do **not** reproduce Internet RTT, many physical Agent hosts, Caddy TLS edge cost, heterogeneous local services, or a 1-CPU/256-MiB container boundary. Increasing production defaults from that evidence would overstate what was measured.
 
-The accepted production capacity envelope therefore remains the existing bounded defaults. Operators requiring a larger envelope must repeat the R-12 evidence on representative deployment hardware/workload before changing limits. R-13 may reconcile this current-state result into user-facing documentation; R-12 does not pre-empt that documentation leaf.
+The accepted production capacity envelope therefore remains the existing bounded defaults. Operators requiring a larger envelope must repeat the R-12 evidence on representative deployment hardware/workload before changing limits. R-13 reconciles this result into the current README/runtime/operations documentation without changing the measured defaults.

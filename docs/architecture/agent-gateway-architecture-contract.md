@@ -4,7 +4,9 @@
 **Durable Plan leaf:** `AG-1 — Edge Agent + Tunnel Gateway Architecture Contract`
 **Project:** `hooshix-agent`
 
-This document freezes only the architecture boundaries required by AG-1. It does not implement AG-2 or later work.
+This document freezes the architecture boundaries originally approved in AG-1. Decision-time statements about work belonging to later AG leaves are retained as provenance rather than rewritten.
+
+**R-13 current-state note:** AG-2 through AG-9 and hardening R-0 through R-12 have since been implemented without changing the ownership/trust model frozen here. Current runtime limits, failure semantics, deployment posture and capacity evidence are summarized in `docs/engineering/current-state.md`. Historical ADR text remains unchanged.
 
 ## 1. Product boundary
 

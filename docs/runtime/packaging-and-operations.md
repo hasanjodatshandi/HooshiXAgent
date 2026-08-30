@@ -1,6 +1,6 @@
 # Agent/Gateway Packaging and Operations — AG-7
 
-**Status:** Current AG-7 packaging/operations contract
+**Status:** Current packaging/operations contract (origin AG-7; reconciled through R-13)
 
 AG-7 packages and operates the existing Edge Agent and Tunnel Gateway. It does not add the separate HooshiX Control Panel, a Control Panel database, tenant/user management, quotas, billing, Kubernetes, Redis or unrelated infrastructure.
 
@@ -72,7 +72,7 @@ The two-service Compose topology remains unchanged. Gateway and Caddy run as num
 
 Every host bind is read-only and refuses implicit source creation. The deployment CA private key remains host-only. The Gateway server private key is bind-mounted read-only only into Gateway from the host-private TLS directory; Caddy receives only `ca.crt`. Runtime acceptance inspects the actual containers to reject privilege, capability, namespace, writable-mount or resource-policy drift.
 
-These container limits are safety ceilings, not production capacity claims. Evidence-based throughput/capacity tuning remains R-12 work.
+These container limits are safety ceilings, not production capacity claims. R-12 measured synthetic 100/500/1000 scenarios and deliberately retained these production limits/defaults; larger deployments require representative re-measurement rather than extrapolation.
 
 ## Operational signals
 
@@ -132,11 +132,11 @@ gh attestation verify SHA256SUMS -R hasanjodatshandi/HooshiXAgent
 
 An attestation proves provenance/identity; it does not replace vulnerability, security, runtime or release acceptance gates.
 
-The Agent does not autonomously fetch or apply an update in AG-7. Promotion remains explicit through verified packages. Final network interruption, exhaustion, update/rollback and release-security acceptance remains AG-8.
+The Agent does not autonomously fetch or apply an update. Promotion remains explicit through verified packages. AG-8 release acceptance now covers forced network interruption/recovery, bounded exhaustion cases, update-candidate validation, previous-binary rollback, checksum tamper rejection and release-security evidence.
 
 ## Automated gates
 
-AG-7 adds:
+The current packaging/operations gate provides:
 
 - platform clean Agent install/rollback/uninstall smoke tests on Ubuntu, macOS and Windows;
 - a blocking packaging/operations CI job;

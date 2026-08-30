@@ -1,6 +1,6 @@
 # Agent↔Gateway End-to-End Tunnel Acceptance — AG-6
 
-**Status:** Current AG-6 acceptance contract
+**Status:** Current integrated acceptance contract (origin AG-6; reconciled through R-13)
 
 AG-6 does not add Control Panel business logic, packaging, deployment, installers, update delivery or release hardening. It proves the integrated behavior of the already-implemented Edge Agent, Tunnel Gateway and AG-3 external contract boundary.
 
@@ -61,14 +61,8 @@ The lower-level AG-3/AG-4/AG-5 protocol, replay, TLS, SSRF and resource-bound te
 
 The separate HooshiX Control Panel is represented only by deterministic versioned contract records. AG-6 contains no user registration, tenant management, endpoint CRUD API/UI, quotas, billing, Control Panel database or Control Panel service.
 
-## Scope boundary after AG-6
+## Current follow-on coverage
 
-AG-6 is acceptance of the integrated tunnel path only. It does not provide:
+This E2E gate remains focused on the integrated tunnel path and does not replace other current gates. Packaging/native persistence and Docker Compose+Caddy deployment are implemented and verified by `scripts/ci/packaging-ops.sh`. Release-level exhaustion, forced network interruption/reconnect, fresh-process persisted-state recovery, update/rollback checks and artifact/provenance security are implemented by `scripts/ci/release-gate.sh` and documented in `docs/runtime/security-resilience-release-gate.md`.
 
-- Agent installers or native service installation;
-- Gateway Docker Compose/Caddy deployment packaging;
-- signed release/update delivery;
-- production observability/runbooks;
-- final exhaustion, network interruption, update/rollback or release-security acceptance.
-
-Those remain AG-7 and AG-8 work.
+The external Control Panel remains outside all of those gates.

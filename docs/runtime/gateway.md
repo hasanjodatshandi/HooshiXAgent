@@ -1,6 +1,6 @@
 # Tunnel Gateway Runtime — AG-4
 
-**Status:** Current AG-4 runtime contract
+**Status:** Current runtime contract (origin AG-4; reconciled through R-13)
 
 The Gateway executable is `cmd/gateway`.
 
@@ -28,7 +28,7 @@ The executable requires all of:
 
 There is no plaintext production startup mode. The HTTP server enforces TLS >= 1.2.
 
-The AG-4 snapshot adapter exists so the real Gateway can run before a live external Control Panel integration transport is available. It is read-only and non-authoritative.
+The current external integration adapter is a read-only filesystem snapshot. It is non-authoritative: durable Control Panel state remains external, and no direct Control Panel database coupling is introduced.
 
 Snapshot layout:
 
@@ -55,19 +55,28 @@ The public request cannot provide a raw Agent-local target. The Gateway sends on
 ## Default resource bounds
 
 ```text
-agent sessions              1024
-pending Agent handshakes     128
-streams per Agent session     64
-queued inbound frames/stream  16
-request body                 8 MiB
-response body               32 MiB
-request headers             32 KiB
-handshake timeout            10 s
-read timeout                 15 s
-write timeout                10 s
-heartbeat interval           15 s
-idle timeout                 45 s
-shutdown timeout             10 s
+agent sessions                        64
+pending Agent handshakes               64
+streams per Agent session              64
+queued inbound frames/stream           16
+queued Agent→Gateway bytes/stream    2 MiB
+queued Agent→Gateway bytes/session   8 MiB
+global queued Agent→Gateway bytes   32 MiB
+public ingress in flight               32
+public ingress streaming-byte budget 32 MiB
+handshake rate / burst              32/s / 64
+public ingress rate / burst        256/s / 512
+request body                          8 MiB
+response body                        32 MiB
+request headers                      32 KiB
+status queue                         256 signals
+status export timeout                  2 s
+handshake timeout                     10 s
+read timeout                          15 s
+write timeout                         10 s
+heartbeat interval                    15 s
+idle timeout                          45 s
+shutdown timeout                      10 s
 ```
 
 Protocol-v1 frame bounds remain authoritative from ADR-0007: 64 KiB control payload and 1 MiB data payload.
@@ -111,7 +120,7 @@ The executable emits versioned JSON-lines `GatewayStatusSignal` records to stdou
 - a real HTTPS public request through the Gateway/tunnel;
 - TLS/plaintext-startup negative verification.
 
-The Gateway-specific runtime check remains in place. Integrated real Agent↔Gateway acceptance, including restart/reconnect behavior, is defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`.
+The Gateway-specific runtime check remains in place. Integrated real Agent↔Gateway acceptance, including restart/reconnect behavior, is defined separately in `docs/runtime/agent-gateway-e2e-acceptance.md`; release-level interruption/recovery acceptance is in `docs/runtime/security-resilience-release-gate.md`.
 
 
 ## AG-7 deployment and operations

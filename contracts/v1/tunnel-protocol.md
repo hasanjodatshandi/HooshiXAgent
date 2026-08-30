@@ -210,6 +210,6 @@ No malformed input is reinterpreted as a different message type.
 
 ## 13. External Control Panel independence
 
-The tunnel protocol does not call a Control Panel CRUD API and does not read a Control Panel database. Gateway runtime implementations consume externally provided contract records defined under `contracts/v1/external/` through an integration adapter in a later implementation leaf.
+The tunnel protocol does not call a Control Panel CRUD API and does not read a Control Panel database. The current Gateway consumes externally provided contract records defined under `contracts/v1/external/` through its read-only integration adapter; any alternate external adapter must preserve this contract boundary and must not introduce direct Control Panel database authority.
 
 AG-3 test fixtures stand in for that external source so the contract can be exercised without implementing the Control Panel.

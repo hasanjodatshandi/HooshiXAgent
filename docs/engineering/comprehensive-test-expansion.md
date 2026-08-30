@@ -26,7 +26,7 @@ The dedicated scenario suite covers:
 - an eight-request concurrent Gateway burst within existing configured limits; and
 - a blocked telemetry sink remaining off critical request/session paths.
 
-These are non-functional correctness scenarios, not a capacity claim. R-12 remains responsible for reproducible load/soak profiling, capacity envelopes, SLOs, and any evidence-based default tuning.
+These are non-functional correctness scenarios, not a capacity claim. R-12 subsequently added reproducible load/soak profiling, 100/500/1000 synthetic capacity probes, profile artifacts and the evidence-based decision to retain production defaults.
 
 ## Coverage reporting
 
