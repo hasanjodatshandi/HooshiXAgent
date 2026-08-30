@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -350,73 +351,82 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		http.Error(w, "stream unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	defer sess.removeStream(stream.id)
+	terminalReason := "cancelled"
+	terminalCode := ""
+	terminalMessage := ""
+	terminalRetryable := false
+	defer func() {
+		if terminalCode != "" {
+			sess.errorStream(stream.id, terminalCode, terminalMessage, terminalRetryable, errors.New(terminalMessage))
+			return
+		}
+		sess.closeStream(stream.id, terminalReason)
+	}()
 
-	request.Body = http.MaxBytesReader(w, request.Body, gateway.limits.MaxRequestBytes)
-	streamWriter := newRequestStreamWriter(
-		request.Context(),
-		gateway.resources.ingressBytes,
-		&gateway.resources.ingressRejects,
-		func(ctx context.Context, payload []byte) error {
-			return sess.sendBytes(ctx, stream.id, payload)
-		},
-	)
+	tunnelRequest := cloneRequestForTunnel(request)
+	tunnelRequest.Body = http.MaxBytesReader(w, request.Body, gateway.limits.MaxRequestBytes)
+	streamWriter := newRequestStreamWriter(request.Context(), gateway.resources.ingressBytes, &gateway.resources.ingressRejects, func(ctx context.Context, payload []byte) error {
+		return sess.sendBytes(ctx, stream.id, payload)
+	})
 	limited := &limitWriter{w: streamWriter, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
-	if err := request.Write(limited); err != nil {
+	if err := tunnelRequest.Write(limited); err != nil {
 		if errors.Is(err, errResourceBudget) {
-			http.Error(w, "public ingress byte budget exhausted", http.StatusServiceUnavailable)
+			terminalCode, terminalMessage, terminalRetryable = "resource_limit", "public ingress byte budget exhausted", true
+			http.Error(w, terminalMessage, http.StatusServiceUnavailable)
 			return
 		}
 		if request.Context().Err() != nil {
 			return
 		}
-		http.Error(w, "request serialization failed", http.StatusBadRequest)
+		terminalCode, terminalMessage = "protocol_error", "request serialization failed"
+		http.Error(w, terminalMessage, http.StatusBadRequest)
 		return
 	}
 	fromPublic := streamWriter.Written()
 
-	reader := io.LimitReader(stream, gateway.limits.MaxResponseBytes+1)
-	response, err := http.ReadResponse(bufio.NewReader(reader), request)
+	headerLimited := newResponseHeaderLimitReader(stream, int64(gateway.limits.MaxHeaderBytes))
+	response, err := http.ReadResponse(bufio.NewReader(headerLimited), tunnelRequest)
 	if err != nil {
-		gateway.logger.Warn("invalid tunneled response", "error", err, "endpoint_id", route.EndpointID, "stream_id", stream.id)
-		http.Error(w, "invalid tunneled response", http.StatusBadGateway)
+		terminalCode, terminalMessage = "protocol_error", "invalid tunneled response"
+		if errors.Is(err, errResponseHeaderTooLarge) {
+			terminalCode, terminalMessage = "resource_limit", "tunneled response headers too large"
+		}
+		gateway.logger.Warn(terminalMessage, "error", err, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+		http.Error(w, terminalMessage, http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 
+	if response.ContentLength > gateway.limits.MaxResponseBytes {
+		terminalCode, terminalMessage = "resource_limit", "tunneled response too large"
+		http.Error(w, terminalMessage, http.StatusBadGateway)
+		return
+	}
+	removeHopByHopHeaders(response.Header)
 	for key, values := range response.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-	if response.ContentLength > gateway.limits.MaxResponseBytes {
-		http.Error(w, "tunneled response too large", http.StatusBadGateway)
-		return
-	}
 	w.WriteHeader(response.StatusCode)
-	written, err := io.CopyN(w, response.Body, gateway.limits.MaxResponseBytes)
-	if err != nil && !errors.Is(err, io.EOF) {
-		gateway.logger.Warn("public response copy failed", "error", err, "endpoint_id", route.EndpointID)
-	}
-	if err == nil {
-		probe := make([]byte, 1)
-		if n, _ := response.Body.Read(probe); n != 0 {
-			gateway.logger.Warn("public response exceeded limit and was truncated", "endpoint_id", route.EndpointID)
-		}
-	}
-
+	written, overflow, copyErr := copyTunneledResponseBody(w, response, gateway.limits.MaxResponseBytes)
 	toPublic := written
 	gateway.emitStatus(request.Context(), contractv1.GatewayStatusSignal{
-		ContractVersion: contractv1.ProtocolVersion,
-		EventID:         newID("status"),
-		ObservedAt:      time.Now().UTC().Format(time.RFC3339),
-		Kind:            "traffic_delta",
-		DeviceID:        route.DeviceID,
-		SessionID:       sess.sessionID,
-		EndpointID:      route.EndpointID,
-		BytesFromPublic: &fromPublic,
-		BytesToPublic:   &toPublic,
+		ContractVersion: contractv1.ProtocolVersion, EventID: newID("status"), ObservedAt: time.Now().UTC().Format(time.RFC3339), Kind: "traffic_delta",
+		DeviceID: route.DeviceID, SessionID: sess.sessionID, EndpointID: route.EndpointID, BytesFromPublic: &fromPublic, BytesToPublic: &toPublic,
 	})
+	if overflow {
+		terminalCode, terminalMessage = "resource_limit", "tunneled response body exceeded limit"
+		gateway.logger.Warn(terminalMessage, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+		panic(http.ErrAbortHandler)
+	}
+	if copyErr != nil {
+		terminalCode, terminalMessage = "internal_error", "tunneled response body ended unexpectedly"
+		gateway.logger.Warn(terminalMessage, "error", copyErr, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+		panic(http.ErrAbortHandler)
+	}
+	terminalReason = "completed"
+
 }
 
 func (gateway *Gateway) emitStatus(ctx context.Context, signal contractv1.GatewayStatusSignal) {
@@ -458,6 +468,103 @@ func randomBase64URL(size int) string {
 
 func newID(prefix string) string {
 	return prefix + "-" + randomBase64URL(12)
+}
+
+var errResponseHeaderTooLarge = errors.New("tunneled response headers exceed limit")
+
+var hopByHopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
+
+func removeHopByHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				header.Del(token)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		header.Del(name)
+	}
+}
+
+func cloneRequestForTunnel(request *http.Request) *http.Request {
+	cloned := request.Clone(request.Context())
+	removeHopByHopHeaders(cloned.Header)
+	cloned.Close = false
+	cloned.TransferEncoding = nil
+	cloned.Trailer = nil
+	return cloned
+}
+
+type responseHeaderLimitReader struct {
+	reader    io.Reader
+	remaining int64
+	matched   int
+	done      bool
+}
+
+func newResponseHeaderLimitReader(reader io.Reader, limit int64) *responseHeaderLimitReader {
+	return &responseHeaderLimitReader{reader: reader, remaining: limit}
+}
+
+func (reader *responseHeaderLimitReader) Read(data []byte) (int, error) {
+	if reader.done {
+		return reader.reader.Read(data)
+	}
+	if reader.remaining <= 0 {
+		return 0, errResponseHeaderTooLarge
+	}
+	if int64(len(data)) > reader.remaining {
+		data = data[:reader.remaining]
+	}
+	n, err := reader.reader.Read(data)
+	reader.remaining -= int64(n)
+	separator := []byte("\r\n\r\n")
+	for _, value := range data[:n] {
+		if value == separator[reader.matched] {
+			reader.matched++
+			if reader.matched == len(separator) {
+				reader.done = true
+				return n, err
+			}
+			continue
+		}
+		if value == separator[0] {
+			reader.matched = 1
+		} else {
+			reader.matched = 0
+		}
+	}
+	if !reader.done && reader.remaining == 0 {
+		return n, errResponseHeaderTooLarge
+	}
+	return n, err
+}
+
+func copyTunneledResponseBody(writer io.Writer, response *http.Response, limit int64) (int64, bool, error) {
+	if response.ContentLength >= 0 {
+		if response.ContentLength == 0 {
+			return 0, false, nil
+		}
+		written, err := io.CopyN(writer, response.Body, response.ContentLength)
+		return written, false, err
+	}
+	written, err := io.CopyN(writer, response.Body, limit)
+	if errors.Is(err, io.EOF) {
+		return written, false, nil
+	}
+	if err != nil {
+		return written, false, err
+	}
+	probe := make([]byte, 1)
+	n, probeErr := io.ReadFull(response.Body, probe)
+	if n > 0 {
+		return written, true, nil
+	}
+	if errors.Is(probeErr, io.EOF) {
+		return written, false, nil
+	}
+	return written, false, probeErr
 }
 
 const requestStreamChunkSize = 32 * 1024

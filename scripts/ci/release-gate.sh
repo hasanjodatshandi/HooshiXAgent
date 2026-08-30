@@ -35,6 +35,9 @@ bash scripts/ci/resource-dos.sh
 # R-4 streaming ingress gate proves bounded public→Agent request forwarding and cancellation.
 bash scripts/ci/streaming-ingress.sh
 
+# R-5 HTTP/stream isolation gate proves per-stream fault isolation and proxy correctness.
+bash scripts/ci/http-proxy-correctness.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"

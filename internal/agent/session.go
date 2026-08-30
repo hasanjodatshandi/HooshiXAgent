@@ -50,6 +50,7 @@ type agentStream struct {
 	streamBudget  *agentByteBudget
 	sessionBudget *agentByteBudget
 	finish        sync.Once
+	terminal      sync.Once
 }
 
 func authenticateAgent(
@@ -209,10 +210,10 @@ func (sess *agentSession) handleControl(parent context.Context, frame contractv1
 	case "stream_open":
 		return sess.handleStreamOpen(parent, frame)
 	case "stream_close":
-		sess.finishStream(frame.StreamID)
+		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
 	case "stream_error":
-		sess.finishStream(frame.StreamID)
+		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
 	default:
 		return fmt.Errorf("unexpected Gateway control message %q", envelope.MessageType)
@@ -269,7 +270,7 @@ func (sess *agentSession) handleData(parent context.Context, frame contractv1.Fr
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
 	if !stream.enqueue(parent, frame.Payload, sess.limits.WriteTimeout) {
-		_ = sess.sendStreamError(context.Background(), frame.StreamID, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
+		_ = sess.sendStreamTerminalError(stream, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
 		sess.finishStream(frame.StreamID)
 	}
 	return nil
@@ -348,7 +349,7 @@ func (stream *agentStream) finishStream() {
 func (sess *agentSession) serveStream(stream *agentStream) {
 	conn, err := DialLocalTarget(stream.ctx, stream.endpoint.Target, sess.limits.DialTimeout)
 	if err != nil {
-		_ = sess.sendStreamError(context.Background(), stream.id, "local_target_unavailable", "approved local target is unavailable", true)
+		_ = sess.sendStreamTerminalError(stream, "local_target_unavailable", "approved local target is unavailable", true)
 		sess.finishStream(stream.id)
 		return
 	}
@@ -393,11 +394,7 @@ readLoop:
 	case <-time.After(sess.limits.WriteTimeout):
 	}
 	if !peerClosed {
-		_ = sess.sendControl(context.Background(), stream.id, contractv1.StreamClose{
-			ContractVersion: contractv1.ProtocolVersion,
-			MessageType:     "stream_close",
-			ReasonCode:      "completed",
-		})
+		_ = sess.sendStreamTerminalClose(stream, "completed")
 	}
 	sess.finishStream(stream.id)
 }
@@ -446,6 +443,25 @@ func (sess *agentSession) sendControl(parent context.Context, streamID uint32, v
 	return sess.sendFrame(parent, contractv1.KindControl, streamID, payload)
 }
 
+func (sess *agentSession) sendStreamTerminalClose(stream *agentStream, reasonCode string) error {
+	var sendErr error
+	stream.terminal.Do(func() {
+		sendErr = sess.sendControl(context.Background(), stream.id, contractv1.StreamClose{ContractVersion: contractv1.ProtocolVersion, MessageType: "stream_close", ReasonCode: reasonCode})
+	})
+	return sendErr
+}
+
+func (sess *agentSession) sendStreamTerminalError(stream *agentStream, code, message string, retryable bool) error {
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	var sendErr error
+	stream.terminal.Do(func() {
+		sendErr = sess.sendControl(context.Background(), stream.id, contractv1.StreamError{ContractVersion: contractv1.ProtocolVersion, MessageType: "stream_error", Code: code, Message: message, Retryable: retryable})
+	})
+	return sendErr
+}
+
 func (sess *agentSession) sendStreamError(parent context.Context, streamID uint32, code, message string, retryable bool) error {
 	if len(message) > 256 {
 		message = message[:256]
@@ -484,6 +500,16 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 		return err
 	}
 	return nil
+}
+
+func (sess *agentSession) finishStreamFromPeer(streamID uint32) {
+	sess.mu.Lock()
+	stream := sess.streams[streamID]
+	sess.mu.Unlock()
+	if stream != nil {
+		stream.terminal.Do(func() {})
+	}
+	sess.finishStream(streamID)
 }
 
 func (sess *agentSession) finishStream(streamID uint32) {
