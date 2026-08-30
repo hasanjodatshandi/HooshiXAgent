@@ -18,31 +18,36 @@ import (
 var ErrSessionRevoked = errors.New("agent session revoked")
 
 type Limits struct {
-	MaxStreams       int
-	MaxQueueFrames   int
-	DialTimeout      time.Duration
-	HandshakeTimeout time.Duration
-	WriteTimeout     time.Duration
-	IdleTimeout      time.Duration
-	ReconnectMin     time.Duration
-	ReconnectMax     time.Duration
+	MaxStreams           int
+	MaxQueueFrames       int
+	MaxStreamQueueBytes  int64
+	MaxSessionQueueBytes int64
+	DialTimeout          time.Duration
+	HandshakeTimeout     time.Duration
+	WriteTimeout         time.Duration
+	IdleTimeout          time.Duration
+	ReconnectMin         time.Duration
+	ReconnectMax         time.Duration
 }
 
 func DefaultLimits() Limits {
 	return Limits{
-		MaxStreams:       64,
-		MaxQueueFrames:   16,
-		DialTimeout:      5 * time.Second,
-		HandshakeTimeout: 10 * time.Second,
-		WriteTimeout:     10 * time.Second,
-		IdleTimeout:      60 * time.Second,
-		ReconnectMin:     time.Second,
-		ReconnectMax:     30 * time.Second,
+		MaxStreams:           64,
+		MaxQueueFrames:       16,
+		MaxStreamQueueBytes:  2 << 20,
+		MaxSessionQueueBytes: 8 << 20,
+		DialTimeout:          5 * time.Second,
+		HandshakeTimeout:     10 * time.Second,
+		WriteTimeout:         10 * time.Second,
+		IdleTimeout:          60 * time.Second,
+		ReconnectMin:         time.Second,
+		ReconnectMax:         30 * time.Second,
 	}
 }
 
 func (limits Limits) valid() bool {
-	return limits.MaxStreams > 0 && limits.MaxQueueFrames > 0 && limits.DialTimeout > 0 &&
+	return limits.MaxStreams > 0 && limits.MaxQueueFrames > 0 &&
+		limits.MaxStreamQueueBytes > 0 && limits.MaxSessionQueueBytes >= limits.MaxStreamQueueBytes && limits.DialTimeout > 0 &&
 		limits.HandshakeTimeout > 0 && limits.WriteTimeout > 0 && limits.IdleTimeout > 0 &&
 		limits.ReconnectMin > 0 && limits.ReconnectMax >= limits.ReconnectMin
 }

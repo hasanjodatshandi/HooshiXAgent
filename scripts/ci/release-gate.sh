@@ -29,6 +29,9 @@ go test -count=1 ./internal/gateway -run 'Test(GatewayRejectsUntrustedTLSInvalid
 # R-2 strict protocol gate includes authenticated negatives plus bounded fuzz smoke.
 bash scripts/ci/protocol-strictness.sh
 
+# R-3 resource/DoS gate enforces byte budgets, rate/concurrency caps and saturation metrics.
+bash scripts/ci/resource-dos.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"

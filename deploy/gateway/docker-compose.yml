@@ -14,6 +14,28 @@ services:
       - /run/hooshix-tls/gateway.key
       - -metadata-dir
       - /var/lib/hooshix/metadata
+      - -max-agent-sessions
+      - "64"
+      - -max-pending-handshakes
+      - "64"
+      - -max-stream-queue-bytes
+      - "2097152"
+      - -max-session-queue-bytes
+      - "8388608"
+      - -max-global-queue-bytes
+      - "33554432"
+      - -max-ingress-inflight
+      - "32"
+      - -max-ingress-inflight-bytes
+      - "33554432"
+      - -handshake-rate
+      - "32"
+      - -handshake-burst
+      - "64"
+      - -ingress-rate
+      - "256"
+      - -ingress-burst
+      - "512"
     volumes:
       - ${HOOSHIX_METADATA_DIR:-./runtime/metadata}:/var/lib/hooshix/metadata:ro
       - ${HOOSHIX_TLS_DIR:-./runtime/tls}/gateway.crt:/run/hooshix-tls/gateway.crt:ro

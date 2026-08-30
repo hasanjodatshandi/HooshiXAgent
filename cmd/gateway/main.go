@@ -21,11 +21,23 @@ func main() {
 }
 
 func run() error {
+	defaults := gateway.DefaultLimits()
 	var (
-		listenAddr  = flag.String("listen", "127.0.0.1:8443", "HTTPS/WSS listen address")
-		tlsCert     = flag.String("tls-cert", "", "TLS certificate PEM path (required)")
-		tlsKey      = flag.String("tls-key", "", "TLS private key PEM path (required)")
-		metadataDir = flag.String("metadata-dir", "", "read-only external metadata snapshot directory (required)")
+		listenAddr           = flag.String("listen", "127.0.0.1:8443", "HTTPS/WSS listen address")
+		tlsCert              = flag.String("tls-cert", "", "TLS certificate PEM path (required)")
+		tlsKey               = flag.String("tls-key", "", "TLS private key PEM path (required)")
+		metadataDir          = flag.String("metadata-dir", "", "read-only external metadata snapshot directory (required)")
+		maxAgentSessions     = flag.Int("max-agent-sessions", defaults.MaxAgentSessions, "maximum authenticated Agent sessions")
+		maxPendingHandshakes = flag.Int("max-pending-handshakes", defaults.MaxPendingHandshakes, "maximum concurrent Agent handshakes")
+		maxStreamQueueBytes  = flag.Int64("max-stream-queue-bytes", defaults.MaxStreamQueueBytes, "maximum queued Agent-to-Gateway bytes per stream")
+		maxSessionQueueBytes = flag.Int64("max-session-queue-bytes", defaults.MaxSessionQueueBytes, "maximum queued Agent-to-Gateway bytes per Agent session")
+		maxGlobalQueueBytes  = flag.Int64("max-global-queue-bytes", defaults.MaxGlobalQueueBytes, "maximum queued Agent-to-Gateway bytes globally")
+		maxIngressInFlight   = flag.Int("max-ingress-inflight", defaults.MaxIngressInFlight, "maximum concurrent public ingress requests")
+		maxIngressBytes      = flag.Int64("max-ingress-inflight-bytes", defaults.MaxIngressInFlightBytes, "maximum serialized public ingress bytes globally")
+		handshakeRate        = flag.Int("handshake-rate", defaults.HandshakeRatePerSecond, "global Agent handshake rate per second")
+		handshakeBurst       = flag.Int("handshake-burst", defaults.HandshakeRateBurst, "global Agent handshake rate burst")
+		ingressRate          = flag.Int("ingress-rate", defaults.IngressRatePerSecond, "global public ingress request rate per second")
+		ingressBurst         = flag.Int("ingress-burst", defaults.IngressRateBurst, "global public ingress rate burst")
 	)
 	flag.Parse()
 
@@ -40,7 +52,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load external metadata snapshot: %w", err)
 	}
-	limits := gateway.DefaultLimits()
+	limits := defaults
+	limits.MaxAgentSessions = *maxAgentSessions
+	limits.MaxPendingHandshakes = *maxPendingHandshakes
+	limits.MaxStreamQueueBytes = *maxStreamQueueBytes
+	limits.MaxSessionQueueBytes = *maxSessionQueueBytes
+	limits.MaxGlobalQueueBytes = *maxGlobalQueueBytes
+	limits.MaxIngressInFlight = *maxIngressInFlight
+	limits.MaxIngressInFlightBytes = *maxIngressBytes
+	limits.HandshakeRatePerSecond = *handshakeRate
+	limits.HandshakeRateBurst = *handshakeBurst
+	limits.IngressRatePerSecond = *ingressRate
+	limits.IngressRateBurst = *ingressBurst
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	serverGateway, err := gateway.New(metadata, gateway.NewJSONLineStatusSink(os.Stdout), limits, logger)
 	if err != nil {

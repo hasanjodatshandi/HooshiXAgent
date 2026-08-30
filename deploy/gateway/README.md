@@ -85,7 +85,13 @@ Inspect status:
 - Caddy access logs are structured JSON on stdout.
 - Docker json-file logs are bounded by size/count.
 
-The metrics intentionally contain only aggregate session/stream/handshake counts. They do not label device IDs, endpoint IDs, tokens or user-controlled hostnames.
+The metrics intentionally contain only aggregate session/stream/handshake/resource gauges and counters. They do not label device IDs, endpoint IDs, tokens or user-controlled hostnames.
+
+### R-3 resource envelope
+
+The Compose profile keeps the Gateway at `mem_limit: 256m` while the application-owned payload budgets are explicitly capped at 32 MiB of queued Agent→Gateway data plus 32 MiB of serialized public-ingress data. These budgets are not preallocated; together they cap those explicitly retained payload buffers at 64 MiB and leave the remaining container memory for Go/runtime, WebSocket/TLS, metadata, stacks and ordinary request overhead. Each stream may queue at most 2 MiB and each Agent session at most 8 MiB, regardless of the existing frame-count/stream-count ceilings.
+
+The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims; R-12 owns evidence-based production capacity tuning.
 
 ## Upgrade and rollback
 
