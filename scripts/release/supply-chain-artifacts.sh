@@ -91,7 +91,7 @@ docker run --rm \
 
 (
   cd "$dist_dir"
-  find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+  find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name .hooshix-release-output -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
   sha256sum -c SHA256SUMS
 )
 

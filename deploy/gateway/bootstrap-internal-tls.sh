@@ -21,12 +21,37 @@ gateway_csr="$tls_dir/gateway.csr"
 gateway_cert="$tls_dir/gateway.crt"
 ext_file="$tls_dir/gateway.ext"
 
-if [[ ! -f "$ca_key" || ! -f "$ca_cert" ]]; then
-  openssl genrsa -out "$ca_key" 3072 >/dev/null 2>&1
+if [[ -f "$ca_key" && ! -f "$ca_cert" ]] || [[ ! -f "$ca_key" && -f "$ca_cert" ]]; then
+  echo "partial Gateway CA state detected: ca.key and ca.crt must either both exist or both be absent" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ca_key" && ! -f "$ca_cert" ]]; then
+  ca_tmp_dir="$(mktemp -d "$tls_dir/.ca-bootstrap.XXXXXX")"
+  cleanup_ca_tmp() { rm -rf "$ca_tmp_dir"; }
+  trap cleanup_ca_tmp EXIT
+  openssl genrsa -out "$ca_tmp_dir/ca.key" 3072 >/dev/null 2>&1
   openssl req -x509 -new -sha256 -days 3650 \
-    -key "$ca_key" \
+    -key "$ca_tmp_dir/ca.key" \
     -subj "/CN=HooshiX Gateway Deployment CA" \
-    -out "$ca_cert" >/dev/null 2>&1
+    -out "$ca_tmp_dir/ca.crt" >/dev/null 2>&1
+  chmod 600 "$ca_tmp_dir/ca.key"
+  chmod 644 "$ca_tmp_dir/ca.crt"
+  mv "$ca_tmp_dir/ca.key" "$ca_key"
+  mv "$ca_tmp_dir/ca.crt" "$ca_cert"
+  cleanup_ca_tmp
+  trap - EXIT
+fi
+
+if ! openssl pkey -in "$ca_key" -noout >/dev/null 2>&1 || ! openssl x509 -in "$ca_cert" -noout >/dev/null 2>&1; then
+  echo "Gateway CA state is unreadable or malformed" >&2
+  exit 1
+fi
+ca_key_pub="$(openssl pkey -in "$ca_key" -pubout 2>/dev/null)"
+ca_cert_pub="$(openssl x509 -in "$ca_cert" -pubkey -noout 2>/dev/null)"
+if [[ -z "$ca_key_pub" || "$ca_key_pub" != "$ca_cert_pub" ]]; then
+  echo "Gateway CA key/certificate do not match" >&2
+  exit 1
 fi
 
 openssl ecparam -name prime256v1 -genkey -noout -out "$gateway_key"

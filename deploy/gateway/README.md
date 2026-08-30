@@ -52,6 +52,7 @@ Run:
 This creates a deployment-local CA and a Gateway server certificate whose SAN is `gateway`, matching the Docker service DNS name.
 
 The CA private key remains on the host under the private TLS directory and is **not** mounted into either runtime container. Caddy receives only `ca.crt`; Gateway receives only its certificate/key and CA certificate.
+R-9 makes CA bootstrap fail closed if only one of `ca.key` or `ca.crt` exists, if either file is malformed, or if their public keys do not match. Fresh CA material is generated as a temporary key/certificate pair before either final path is installed. Operators must recover or deliberately remove incomplete/mismatched CA state; bootstrap will not silently replace one half of an existing CA pair.
 
 Caddy verifies the Gateway certificate with:
 

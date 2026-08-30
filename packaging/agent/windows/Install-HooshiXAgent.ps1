@@ -12,6 +12,31 @@ $Target = Join-Path $Prefix 'hooshix-agent.exe'
 $Previous = "$Target.previous"
 $TaskName = 'HooshiXAgent'
 
+function Assert-SafeDirectory([string]$Label, [string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw "$Label directory must not be empty." }
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $rootRaw = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
+    $root = $rootRaw.TrimEnd('\', '/')
+    $profile = if ($env:USERPROFILE) { [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/') } else { '' }
+    if ($full -eq $root -or ($profile -and $full -ieq $profile)) {
+        throw "Refusing unsafe $Label directory: $Path"
+    }
+    $relative = $full.Substring($rootRaw.Length).Trim('\', '/')
+    $segments = @($relative -split '[\\/]' | Where-Object { $_ })
+    if ($segments.Count -lt 2) {
+        throw "Refusing shallow $Label directory: $Path"
+    }
+    if (Test-Path -LiteralPath $Path) {
+        $item = Get-Item -Force -LiteralPath $Path
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $item.PSIsContainer) {
+            throw "$Label directory must be a real directory: $Path"
+        }
+    }
+}
+
+Assert-SafeDirectory 'Agent install prefix' $Prefix
+Assert-SafeDirectory 'Agent state' $StateDir
+
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 

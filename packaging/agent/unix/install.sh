@@ -35,6 +35,36 @@ while (($#)); do
   esac
 done
 
+validate_safe_dir() {
+  local label="$1"
+  local candidate="$2"
+  if [[ -z "$candidate" || "$candidate" != /* ]]; then
+    echo "refusing unsafe $label directory: $candidate" >&2
+    exit 2
+  fi
+  if [[ "$candidate" == *"/../"* || "$candidate" == */.. || "$candidate" == ../* ]]; then
+    echo "refusing $label directory containing parent traversal: $candidate" >&2
+    exit 2
+  fi
+  local trimmed="${candidate%/}"
+  if [[ -z "$trimmed" || "$trimmed" == "/" || "$trimmed" == "${HOME%/}" ]]; then
+    echo "refusing unsafe $label directory: $candidate" >&2
+    exit 2
+  fi
+  local relative="${trimmed#/}"
+  if [[ "$relative" != */* ]]; then
+    echo "refusing shallow $label directory: $candidate" >&2
+    exit 2
+  fi
+  if [[ -L "$candidate" ]]; then
+    echo "refusing symlink $label directory: $candidate" >&2
+    exit 2
+  fi
+}
+
+validate_safe_dir "Agent install prefix" "$prefix"
+validate_safe_dir "Agent state" "$state_dir"
+
 target="$prefix/hooshix-agent"
 previous="$target.previous"
 mkdir -p "$prefix" "$state_dir"

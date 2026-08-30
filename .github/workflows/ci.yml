@@ -233,6 +233,23 @@ jobs:
         shell: bash
         run: bash scripts/ci/observability-writer.sh
 
+  agent-state-installer:
+    name: R-9 Agent state / installer hardening gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run Agent state and installer hardening gate
+        shell: bash
+        run: bash scripts/ci/agent-state-installer.sh
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -308,6 +325,7 @@ jobs:
       - supply-chain
       - metadata-scalability
       - observability-writer
+      - agent-state-installer
       - e2e-acceptance
       - packaging-ops
       - runtime-gate
