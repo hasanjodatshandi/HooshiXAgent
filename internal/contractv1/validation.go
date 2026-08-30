@@ -70,8 +70,11 @@ type GatewayStatusSignal struct {
 	BytesToPublic   *int64 `json:"bytes_to_public,omitempty"`
 }
 
-func ParseDeviceSessionAuthorization(data []byte, at time.Time) (DeviceSessionAuthorization, error) {
+func ParseDeviceSessionAuthorizationRecord(data []byte) (DeviceSessionAuthorization, error) {
 	var record DeviceSessionAuthorization
+	if err := validateStrictJSONObject(data); err != nil {
+		return record, err
+	}
 	if err := decodeStrict(data, &record); err != nil {
 		return record, err
 	}
@@ -110,17 +113,43 @@ func ParseDeviceSessionAuthorization(data []byte, at time.Time) (DeviceSessionAu
 	if issuedAt.After(notBefore) || !notBefore.Before(expiresAt) {
 		return record, errors.New("authorization timestamps must satisfy issued_at <= not_before < expires_at")
 	}
+	return record, nil
+}
+
+func ValidateDeviceSessionAuthorizationAt(record DeviceSessionAuthorization, at time.Time) error {
 	if record.Disabled {
-		return record, errors.New("authorization is disabled")
+		return errors.New("authorization is disabled")
+	}
+	notBefore, err := parseUTCTime("not_before", record.NotBefore)
+	if err != nil {
+		return err
+	}
+	expiresAt, err := parseUTCTime("expires_at", record.ExpiresAt)
+	if err != nil {
+		return err
 	}
 	if at.Before(notBefore) || !at.Before(expiresAt) {
-		return record, errors.New("authorization is not active at evaluation time")
+		return errors.New("authorization is not active at evaluation time")
+	}
+	return nil
+}
+
+func ParseDeviceSessionAuthorization(data []byte, at time.Time) (DeviceSessionAuthorization, error) {
+	record, err := ParseDeviceSessionAuthorizationRecord(data)
+	if err != nil {
+		return record, err
+	}
+	if err := ValidateDeviceSessionAuthorizationAt(record, at); err != nil {
+		return record, err
 	}
 	return record, nil
 }
 
-func ParseEndpointRouteAssignment(data []byte, at time.Time) (EndpointRouteAssignment, error) {
+func ParseEndpointRouteAssignmentRecord(data []byte) (EndpointRouteAssignment, error) {
 	var record EndpointRouteAssignment
+	if err := validateStrictJSONObject(data); err != nil {
+		return record, err
+	}
 	if err := decodeStrict(data, &record); err != nil {
 		return record, err
 	}
@@ -151,17 +180,43 @@ func ParseEndpointRouteAssignment(data []byte, at time.Time) (EndpointRouteAssig
 	if !notBefore.Before(expiresAt) {
 		return record, errors.New("route timestamps must satisfy not_before < expires_at")
 	}
+	return record, nil
+}
+
+func ValidateEndpointRouteAssignmentAt(record EndpointRouteAssignment, at time.Time) error {
 	if !record.Enabled {
-		return record, errors.New("route assignment is disabled")
+		return errors.New("route assignment is disabled")
+	}
+	notBefore, err := parseUTCTime("not_before", record.NotBefore)
+	if err != nil {
+		return err
+	}
+	expiresAt, err := parseUTCTime("expires_at", record.ExpiresAt)
+	if err != nil {
+		return err
 	}
 	if at.Before(notBefore) || !at.Before(expiresAt) {
-		return record, errors.New("route assignment is not active at evaluation time")
+		return errors.New("route assignment is not active at evaluation time")
+	}
+	return nil
+}
+
+func ParseEndpointRouteAssignment(data []byte, at time.Time) (EndpointRouteAssignment, error) {
+	record, err := ParseEndpointRouteAssignmentRecord(data)
+	if err != nil {
+		return record, err
+	}
+	if err := ValidateEndpointRouteAssignmentAt(record, at); err != nil {
+		return record, err
 	}
 	return record, nil
 }
 
 func ParseRevocationSignal(data []byte) (RevocationSignal, error) {
 	var signal RevocationSignal
+	if err := validateStrictJSONObject(data); err != nil {
+		return signal, err
+	}
 	if err := decodeStrict(data, &signal); err != nil {
 		return signal, err
 	}

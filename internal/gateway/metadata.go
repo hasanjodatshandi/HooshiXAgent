@@ -55,16 +55,35 @@ func (sink *JSONLineStatusSink) Emit(_ context.Context, signal contractv1.Gatewa
 	return err
 }
 
+type authorizationSnapshot struct {
+	record    contractv1.DeviceSessionAuthorization
+	notBefore time.Time
+	expiresAt time.Time
+}
+
+type routeSnapshot struct {
+	record    contractv1.EndpointRouteAssignment
+	notBefore time.Time
+	expiresAt time.Time
+}
+
+type revocationSubject struct {
+	kind string
+	id   string
+}
+
 type SnapshotMetadata struct {
-	authorizations map[string][]byte
-	routes         map[string][]byte
-	revocations    []contractv1.RevocationSignal
+	authorizations map[string]authorizationSnapshot
+	routes         map[string]routeSnapshot
+	revocations    map[revocationSubject]time.Time
+	readyErr       error
 }
 
 func NewSnapshotMetadata() *SnapshotMetadata {
 	return &SnapshotMetadata{
-		authorizations: make(map[string][]byte),
-		routes:         make(map[string][]byte),
+		authorizations: make(map[string]authorizationSnapshot),
+		routes:         make(map[string]routeSnapshot),
+		revocations:    make(map[revocationSubject]time.Time),
 	}
 }
 
@@ -102,62 +121,111 @@ func LoadSnapshotDirectory(root string) (*SnapshotMetadata, error) {
 	return source, nil
 }
 
+func (source *SnapshotMetadata) Ready() error {
+	if source == nil {
+		return errors.New("external metadata snapshot is unavailable")
+	}
+	if source.readyErr != nil {
+		return fmt.Errorf("external metadata snapshot is unusable: %w", source.readyErr)
+	}
+	return nil
+}
+
+func (source *SnapshotMetadata) invalidate(err error) error {
+	if source.readyErr == nil {
+		source.readyErr = err
+	}
+	return err
+}
+
 func (source *SnapshotMetadata) addAuthorizationJSON(data []byte) error {
-	var envelope struct {
-		AuthorizationID string `json:"authorization_id"`
+	record, err := contractv1.ParseDeviceSessionAuthorizationRecord(data)
+	if err != nil {
+		return source.invalidate(err)
 	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return err
+	notBefore, err := time.Parse(time.RFC3339, record.NotBefore)
+	if err != nil {
+		return source.invalidate(fmt.Errorf("parse authorization not_before: %w", err))
 	}
-	if envelope.AuthorizationID == "" {
-		return errors.New("authorization_id is required")
+	expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+	if err != nil {
+		return source.invalidate(fmt.Errorf("parse authorization expires_at: %w", err))
 	}
-	source.authorizations[envelope.AuthorizationID] = append([]byte(nil), data...)
+	if _, exists := source.authorizations[record.AuthorizationID]; exists {
+		return source.invalidate(fmt.Errorf("duplicate authorization_id %q", record.AuthorizationID))
+	}
+	source.authorizations[record.AuthorizationID] = authorizationSnapshot{
+		record:    record,
+		notBefore: notBefore,
+		expiresAt: expiresAt,
+	}
 	return nil
 }
 
 func (source *SnapshotMetadata) addRouteJSON(data []byte) error {
-	var envelope struct {
-		PublicHostname string `json:"public_hostname"`
+	record, err := contractv1.ParseEndpointRouteAssignmentRecord(data)
+	if err != nil {
+		return source.invalidate(err)
 	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return err
-	}
-	host := canonicalHostname(envelope.PublicHostname)
+	host := canonicalHostname(record.PublicHostname)
 	if host == "" {
-		return errors.New("public_hostname is required")
+		return source.invalidate(errors.New("public_hostname is required"))
 	}
-	source.routes[host] = append([]byte(nil), data...)
+	notBefore, err := time.Parse(time.RFC3339, record.NotBefore)
+	if err != nil {
+		return source.invalidate(fmt.Errorf("parse route not_before: %w", err))
+	}
+	expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+	if err != nil {
+		return source.invalidate(fmt.Errorf("parse route expires_at: %w", err))
+	}
+	if _, exists := source.routes[host]; exists {
+		return source.invalidate(fmt.Errorf("duplicate public_hostname %q", host))
+	}
+	source.routes[host] = routeSnapshot{
+		record:    record,
+		notBefore: notBefore,
+		expiresAt: expiresAt,
+	}
 	return nil
 }
 
 func (source *SnapshotMetadata) addRevocationJSON(data []byte) error {
 	signal, err := contractv1.ParseRevocationSignal(data)
 	if err != nil {
-		return err
+		return source.invalidate(err)
 	}
-	source.revocations = append(source.revocations, signal)
+	effectiveAt, err := time.Parse(time.RFC3339, signal.EffectiveAt)
+	if err != nil {
+		return source.invalidate(fmt.Errorf("parse revocation effective_at: %w", err))
+	}
+	subject := revocationSubject{kind: signal.SubjectKind, id: signal.SubjectID}
+	if current, exists := source.revocations[subject]; !exists || effectiveAt.Before(current) {
+		source.revocations[subject] = effectiveAt
+	}
 	return nil
 }
 
 func (source *SnapshotMetadata) Authorization(_ context.Context, authorizationID, deviceID, tokenID string, at time.Time) (contractv1.DeviceSessionAuthorization, error) {
-	data, ok := source.authorizations[authorizationID]
+	entry, ok := source.authorizations[authorizationID]
 	if !ok {
 		return contractv1.DeviceSessionAuthorization{}, ErrMetadataNotFound
 	}
-	record, err := contractv1.ParseDeviceSessionAuthorization(data, at)
-	if err != nil {
-		return record, err
+	record := entry.record
+	if record.Disabled {
+		return record, errors.New("authorization is disabled")
+	}
+	if at.Before(entry.notBefore) || !at.Before(entry.expiresAt) {
+		return record, errors.New("authorization is not active at evaluation time")
 	}
 	if record.DeviceID != deviceID || record.TokenID != tokenID {
 		return record, errors.New("authorization subject mismatch")
 	}
-	for _, subject := range []struct{ kind, id string }{{"device_session_authorization", record.AuthorizationID}, {"device", record.DeviceID}} {
-		revoked, err := source.Revoked(context.Background(), subject.kind, subject.id, at)
-		if err != nil {
-			return record, err
-		}
-		if revoked {
+	for _, subject := range []revocationSubject{
+		{kind: "device_session_authorization", id: record.AuthorizationID},
+		{kind: "device", id: record.DeviceID},
+	} {
+		if source.revokedAt(subject, at) {
 			return record, errors.New("authorization subject is revoked")
 		}
 	}
@@ -165,20 +233,22 @@ func (source *SnapshotMetadata) Authorization(_ context.Context, authorizationID
 }
 
 func (source *SnapshotMetadata) RouteByHostname(_ context.Context, hostname string, at time.Time) (contractv1.EndpointRouteAssignment, error) {
-	data, ok := source.routes[canonicalHostname(hostname)]
+	entry, ok := source.routes[canonicalHostname(hostname)]
 	if !ok {
 		return contractv1.EndpointRouteAssignment{}, ErrMetadataNotFound
 	}
-	record, err := contractv1.ParseEndpointRouteAssignment(data, at)
-	if err != nil {
-		return record, err
+	record := entry.record
+	if !record.Enabled {
+		return record, errors.New("route assignment is disabled")
 	}
-	for _, subject := range []struct{ kind, id string }{{"endpoint_route_assignment", record.AssignmentID}, {"device", record.DeviceID}} {
-		revoked, err := source.Revoked(context.Background(), subject.kind, subject.id, at)
-		if err != nil {
-			return record, err
-		}
-		if revoked {
+	if at.Before(entry.notBefore) || !at.Before(entry.expiresAt) {
+		return record, errors.New("route assignment is not active at evaluation time")
+	}
+	for _, subject := range []revocationSubject{
+		{kind: "endpoint_route_assignment", id: record.AssignmentID},
+		{kind: "device", id: record.DeviceID},
+	} {
+		if source.revokedAt(subject, at) {
 			return record, errors.New("route subject is revoked")
 		}
 	}
@@ -186,19 +256,12 @@ func (source *SnapshotMetadata) RouteByHostname(_ context.Context, hostname stri
 }
 
 func (source *SnapshotMetadata) Revoked(_ context.Context, subjectKind, subjectID string, at time.Time) (bool, error) {
-	for _, signal := range source.revocations {
-		if signal.SubjectKind != subjectKind || signal.SubjectID != subjectID {
-			continue
-		}
-		effectiveAt, err := time.Parse(time.RFC3339, signal.EffectiveAt)
-		if err != nil {
-			return false, err
-		}
-		if !effectiveAt.After(at) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return source.revokedAt(revocationSubject{kind: subjectKind, id: subjectID}, at), nil
+}
+
+func (source *SnapshotMetadata) revokedAt(subject revocationSubject, at time.Time) bool {
+	effectiveAt, ok := source.revocations[subject]
+	return ok && !effectiveAt.After(at)
 }
 
 func WriteSnapshotRecord(root, category, name string, value any) error {

@@ -42,7 +42,7 @@ metadata/
     └── *.json
 ```
 
-Records must conform to `contracts/v1/external/` and are revalidated for validity/revocation at use time.
+Records must conform to `contracts/v1/external/`. R-7 loads each authorization and route into a typed, strictly validated in-memory snapshot exactly once, rejects duplicate JSON object members, rejects duplicate `authorization_id` values and duplicate canonical public hostnames, and indexes revocation state by `(subject_kind, subject_id)`. Static record structure/timestamps are validated at snapshot load while enabled/disabled state, validity windows and revocation effective times remain evaluated at use time. Invalid snapshot content fails process startup through `LoadSnapshotDirectory`; if an already-constructed metadata source reports an unusable state, `/readyz` fails closed with `503 {"status":"not_ready"}` while `/healthz` remains process-health only.
 
 ## Routes
 
@@ -135,3 +135,9 @@ The Gateway preserves the existing HTTP/1 request wire semantics but no longer s
 Tunnel stream resource failures are isolated where protocol safety permits. Agent→Gateway response-queue exhaustion terminates only the affected logical stream with `stream_error: resource_limit`; the authenticated Agent session and unrelated streams remain live. Data racing a terminal control for a previously opened Gateway-owned stream is rejected at stream scope, while truly unknown/future stream IDs remain protocol violations. Session-wide authentication, sequence and malformed-control failures remain session-fatal.
 
 Public request and tunneled response hop-by-hop headers are removed explicitly, including headers nominated by `Connection`. The existing `MaxHeaderBytes` value is also the explicit tunneled response status-line/header-section bound. Known positive `Content-Length` values above `MaxResponseBytes` return `502` before a success status is committed. Chunked or otherwise unknown-length bodies may stream up to `MaxResponseBytes`; if any additional body byte exists, the Gateway aborts the public HTTP response rather than completing a clean truncated success. Premature body failure after a status is committed is likewise aborted. Stream terminal ownership is single-shot so peer close/error or a local resource/protocol error cannot later be followed by a contradictory local `completed` terminal signal.
+
+## R-7 metadata scalability and determinism
+
+The read-only snapshot adapter no longer retains raw authorization/route JSON for repeated parsing on every authentication or public request. It stores typed records with parsed validity-window boundaries and performs map lookup by authorization ID and canonical hostname. Revocations are reduced to the earliest effective time per unique `(subject_kind, subject_id)`, so repeated revocation events for one subject do not grow the runtime revocation index. This preserves fail-closed semantics because a subject is considered revoked once the earliest event becomes effective.
+
+Snapshot load is deterministic and fail-closed: strict JSON rejects unknown fields, duplicate object member names and malformed timestamps; duplicate authorization IDs and canonical host routes reject the whole snapshot rather than allowing filename/order-dependent overwrite behavior. Structurally valid records may be currently expired, future-dated or disabled without making the snapshot itself malformed; those dynamic authorization/route conditions are checked at the exact use time. `scripts/ci/metadata-scalability.sh` covers malformed/duplicate negatives, use-time expiry/revocation behavior, readiness failure and a 100,000-subject lookup benchmark with allocation reporting.
