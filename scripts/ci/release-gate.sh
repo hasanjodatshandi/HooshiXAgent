@@ -32,6 +32,9 @@ bash scripts/ci/protocol-strictness.sh
 # R-3 resource/DoS gate enforces byte budgets, rate/concurrency caps and saturation metrics.
 bash scripts/ci/resource-dos.sh
 
+# R-4 streaming ingress gate proves bounded public→Agent request forwarding and cancellation.
+bash scripts/ci/streaming-ingress.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"

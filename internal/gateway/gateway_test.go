@@ -70,6 +70,17 @@ func (recorder *statusRecorder) count(kind string) int {
 	return count
 }
 
+func (recorder *statusRecorder) latest(kind string) (contractv1.GatewayStatusSignal, bool) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	for i := len(recorder.signals) - 1; i >= 0; i-- {
+		if recorder.signals[i].Kind == kind {
+			return recorder.signals[i], true
+		}
+	}
+	return contractv1.GatewayStatusSignal{}, false
+}
+
 func TestGatewayWSSAuthenticationMultiplexingAndReconnect(t *testing.T) {
 	t.Parallel()
 
@@ -325,6 +336,221 @@ func TestGatewayRequestAndStreamLimits(t *testing.T) {
 	}
 }
 
+func TestRequestStreamWriterBoundsChunkRetentionAndAccounting(t *testing.T) {
+	budget := newByteBudget(64 << 10)
+	var rejects atomic.Uint64
+	var observedPeak int64
+	var observedMaxChunk int
+	writer := newRequestStreamWriter(context.Background(), budget, &rejects, func(_ context.Context, payload []byte) error {
+		used, _, _ := budget.snapshot()
+		if used > observedPeak {
+			observedPeak = used
+		}
+		if len(payload) > observedMaxChunk {
+			observedMaxChunk = len(payload)
+		}
+		return nil
+	})
+	payload := bytes.Repeat([]byte{'x'}, 8<<20)
+	n, err := writer.Write(payload)
+	if err != nil || n != len(payload) {
+		t.Fatalf("stream write n=%d err=%v", n, err)
+	}
+	if writer.Written() != int64(len(payload)) {
+		t.Fatalf("written=%d want=%d", writer.Written(), len(payload))
+	}
+	if observedMaxChunk > requestStreamChunkSize || observedPeak > requestStreamChunkSize {
+		t.Fatalf("streaming retention exceeded chunk bound: max_chunk=%d peak_budget=%d", observedMaxChunk, observedPeak)
+	}
+	if used, _, _ := budget.snapshot(); used != 0 {
+		t.Fatalf("streaming writer leaked byte budget: %d", used)
+	}
+	if rejects.Load() != 0 {
+		t.Fatalf("unexpected ingress budget rejection: %d", rejects.Load())
+	}
+}
+
+func BenchmarkRequestStreamWriterBoundedRetention(b *testing.B) {
+	b.StopTimer()
+	payload := bytes.Repeat([]byte{'x'}, 8<<20)
+	budget := newByteBudget(64 << 10)
+	var rejects atomic.Uint64
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		writer := newRequestStreamWriter(context.Background(), budget, &rejects, func(context.Context, []byte) error { return nil })
+		if _, err := writer.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestGatewayStreamsRequestBeforeUploadCompletesAndAccountsTunnelBytes(t *testing.T) {
+	identity := newTestIdentity(t)
+	statuses := &statusRecorder{}
+	limits := DefaultLimits()
+	limits.IngressRatePerSecond = 1000
+	limits.IngressRateBurst = 1000
+	gateway, err := New(testMetadata(t, identity, testRouteHost), statuses, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(gateway.Handler())
+	defer tlsServer.Close()
+
+	firstByte := make(chan struct{})
+	var firstOnce sync.Once
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buffer := make([]byte, 1)
+		n, err := io.ReadFull(r.Body, buffer)
+		if err != nil || n != 1 {
+			http.Error(w, "body read failed", http.StatusBadRequest)
+			return
+		}
+		firstOnce.Do(func() { close(firstByte) })
+		rest, err := io.Copy(io.Discard, r.Body)
+		if err != nil {
+			http.Error(w, "body copy failed", http.StatusBadRequest)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "%d", rest+1)
+	}))
+	defer local.Close()
+	agent := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
+	defer agent.close()
+	waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
+
+	const bodySize = 512 << 10
+	reader, writer := io.Pipe()
+	request, err := http.NewRequest(http.MethodPost, tlsServer.URL+"/streaming", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = testRouteHost
+	request.ContentLength = bodySize
+	beforeTunnelBytes := agent.dataFromGateway.Load()
+	result := make(chan struct {
+		response *http.Response
+		err      error
+	}, 1)
+	go func() {
+		response, err := tlsServer.Client().Do(request)
+		result <- struct {
+			response *http.Response
+			err      error
+		}{response: response, err: err}
+	}()
+
+	firstChunk := bytes.Repeat([]byte{'a'}, 64<<10)
+	if _, err := writer.Write(firstChunk); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstByte:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive request body before public upload completed; request path is still buffering")
+	}
+	remaining := bodySize - len(firstChunk)
+	if _, err := writer.Write(bytes.Repeat([]byte{'b'}, remaining)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome := <-result
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	defer outcome.response.Body.Close()
+	body, _ := io.ReadAll(outcome.response.Body)
+	if outcome.response.StatusCode != http.StatusOK || string(body) != fmt.Sprintf("%d", bodySize) {
+		t.Fatalf("streamed response status=%d body=%q", outcome.response.StatusCode, body)
+	}
+	waitFor(t, 2*time.Second, func() bool { return statuses.count("traffic_delta") > 0 })
+	signal, ok := statuses.latest("traffic_delta")
+	if !ok || signal.BytesFromPublic == nil {
+		t.Fatal("streamed request traffic signal missing bytes_from_public")
+	}
+	tunnelDelta := agent.dataFromGateway.Load() - beforeTunnelBytes
+	if *signal.BytesFromPublic != tunnelDelta {
+		t.Fatalf("traffic accounting=%d tunnel_data_bytes=%d", *signal.BytesFromPublic, tunnelDelta)
+	}
+	if *signal.BytesFromPublic < bodySize {
+		t.Fatalf("traffic accounting=%d smaller than request body=%d", *signal.BytesFromPublic, bodySize)
+	}
+	if used, _, _ := gateway.resources.ingressBytes.snapshot(); used != 0 {
+		t.Fatalf("ingress streaming budget leaked after request: %d", used)
+	}
+}
+
+func TestGatewayStreamingUploadCancellationReleasesResources(t *testing.T) {
+	identity := newTestIdentity(t)
+	limits := DefaultLimits()
+	limits.IngressRatePerSecond = 1000
+	limits.IngressRateBurst = 1000
+	gateway, err := New(testMetadata(t, identity, testRouteHost), NopStatusSink{}, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(gateway.Handler())
+	defer tlsServer.Close()
+
+	firstByte := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buffer := make([]byte, 1)
+		if _, err := io.ReadFull(r.Body, buffer); err == nil {
+			close(firstByte)
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = io.WriteString(w, "done")
+	}))
+	defer local.Close()
+	agent := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
+	defer agent.close()
+	waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, pipeWriter := io.Pipe()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tlsServer.URL+"/cancel", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = testRouteHost
+	request.ContentLength = 4 << 20
+	result := make(chan error, 1)
+	go func() {
+		response, err := tlsServer.Client().Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		result <- err
+	}()
+	if _, err := pipeWriter.Write(bytes.Repeat([]byte{'x'}, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstByte:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not observe partial upload before cancellation")
+	}
+	cancel()
+	_ = pipeWriter.CloseWithError(context.Canceled)
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled public upload unexpectedly completed successfully")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled public upload did not terminate promptly")
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		used, _, _ := gateway.resources.ingressBytes.snapshot()
+		return used == 0 && len(gateway.resources.ingressSlots) == 0 && agent.active.Load() == 0
+	})
+}
+
 func TestExternalProcessRuntimeGate(t *testing.T) {
 	binary := os.Getenv("HOOSHIX_GATEWAY_BINARY")
 	if binary == "" {
@@ -412,20 +638,21 @@ func TestExecutableRefusesPlaintextStartup(t *testing.T) {
 }
 
 type mockAgent struct {
-	conn          *websocket.Conn
-	identity      testIdentity
-	localURL      *url.URL
-	httpClient    *http.Client
-	writeMu       sync.Mutex
-	outSequence   atomic.Uint64
-	inSequence    contractv1.SequenceTracker
-	mu            sync.Mutex
-	streams       map[uint32]*mockStream
-	done          chan struct{}
-	closeOnce     sync.Once
-	active        atomic.Int32
-	maxConcurrent atomic.Int32
-	pings         atomic.Int32
+	conn            *websocket.Conn
+	identity        testIdentity
+	localURL        *url.URL
+	httpClient      *http.Client
+	writeMu         sync.Mutex
+	outSequence     atomic.Uint64
+	inSequence      contractv1.SequenceTracker
+	mu              sync.Mutex
+	streams         map[uint32]*mockStream
+	done            chan struct{}
+	closeOnce       sync.Once
+	active          atomic.Int32
+	maxConcurrent   atomic.Int32
+	pings           atomic.Int32
+	dataFromGateway atomic.Int64
 }
 
 type mockStream struct {
@@ -509,6 +736,7 @@ func (agent *mockAgent) readLoop() {
 		case contractv1.KindControl:
 			agent.handleControl(frame)
 		case contractv1.KindData:
+			agent.dataFromGateway.Add(int64(len(frame.Payload)))
 			agent.mu.Lock()
 			stream := agent.streams[frame.StreamID]
 			agent.mu.Unlock()
@@ -541,7 +769,7 @@ func (agent *mockAgent) handleControl(frame contractv1.Frame) {
 			agent.close()
 			return
 		}
-		stream := &mockStream{id: frame.StreamID, incoming: make(chan []byte, 16), done: make(chan struct{})}
+		stream := &mockStream{id: frame.StreamID, incoming: make(chan []byte, 64), done: make(chan struct{})}
 		agent.mu.Lock()
 		agent.streams[frame.StreamID] = stream
 		agent.mu.Unlock()

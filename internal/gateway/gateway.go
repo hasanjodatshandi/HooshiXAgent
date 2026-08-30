@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -122,10 +123,10 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight %d\n", len(gateway.resources.ingressSlots))
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_limit %d\n", gateway.limits.MaxIngressInFlight)
-	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes Current serialized public-ingress bytes held before tunnel forwarding.\n")
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes Current public-ingress bytes reserved while bounded tunnel chunks are being forwarded.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes %d\n", ingressUsed)
-	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes_limit Global ingress serialization byte budget.\n")
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_ingress_inflight_bytes_limit Global public-ingress streaming chunk byte budget.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes_limit %d\n", ingressLimit)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queue_rejections_total counter\nhooshix_gateway_queue_rejections_total %d\n", gateway.resources.queueRejects.Load())
@@ -352,24 +353,27 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	defer sess.removeStream(stream.id)
 
 	request.Body = http.MaxBytesReader(w, request.Body, gateway.limits.MaxRequestBytes)
-	encoded := newBudgetBuffer(gateway.resources.ingressBytes)
-	defer encoded.release()
-	limited := &limitWriter{w: encoded, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
+	streamWriter := newRequestStreamWriter(
+		request.Context(),
+		gateway.resources.ingressBytes,
+		&gateway.resources.ingressRejects,
+		func(ctx context.Context, payload []byte) error {
+			return sess.sendBytes(ctx, stream.id, payload)
+		},
+	)
+	limited := &limitWriter{w: streamWriter, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
 	if err := request.Write(limited); err != nil {
 		if errors.Is(err, errResourceBudget) {
-			gateway.resources.ingressRejects.Add(1)
 			http.Error(w, "public ingress byte budget exhausted", http.StatusServiceUnavailable)
+			return
+		}
+		if request.Context().Err() != nil {
 			return
 		}
 		http.Error(w, "request serialization failed", http.StatusBadRequest)
 		return
 	}
-	fromPublic := int64(encoded.Len())
-	if err := sess.sendBytes(request.Context(), stream.id, encoded.Bytes()); err != nil {
-		http.Error(w, "tunnel write failed", http.StatusBadGateway)
-		return
-	}
-	encoded.release()
+	fromPublic := streamWriter.Written()
 
 	reader := io.LimitReader(stream, gateway.limits.MaxResponseBytes+1)
 	response, err := http.ReadResponse(bufio.NewReader(reader), request)
@@ -455,6 +459,48 @@ func randomBase64URL(size int) string {
 func newID(prefix string) string {
 	return prefix + "-" + randomBase64URL(12)
 }
+
+const requestStreamChunkSize = 32 * 1024
+
+type requestStreamWriter struct {
+	ctx      context.Context
+	budget   *byteBudget
+	rejected *atomic.Uint64
+	send     func(context.Context, []byte) error
+	written  int64
+}
+
+func newRequestStreamWriter(ctx context.Context, budget *byteBudget, rejected *atomic.Uint64, send func(context.Context, []byte) error) *requestStreamWriter {
+	return &requestStreamWriter{ctx: ctx, budget: budget, rejected: rejected, send: send}
+}
+
+func (writer *requestStreamWriter) Write(data []byte) (int, error) {
+	total := 0
+	for len(data) > 0 {
+		if err := writer.ctx.Err(); err != nil {
+			return total, err
+		}
+		size := len(data)
+		if size > requestStreamChunkSize {
+			size = requestStreamChunkSize
+		}
+		if !writer.budget.tryAcquire(int64(size)) {
+			writer.rejected.Add(1)
+			return total, errResourceBudget
+		}
+		err := writer.send(writer.ctx, data[:size])
+		writer.budget.release(int64(size))
+		if err != nil {
+			return total, err
+		}
+		total += size
+		writer.written += int64(size)
+		data = data[size:]
+	}
+	return total, nil
+}
+
+func (writer *requestStreamWriter) Written() int64 { return writer.written }
 
 type limitWriter struct {
 	w         io.Writer

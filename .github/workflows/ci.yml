@@ -146,6 +146,23 @@ jobs:
         shell: bash
         run: bash scripts/ci/resource-dos.sh
 
+  streaming-ingress:
+    name: R-4 streaming ingress gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run streaming ingress gate
+        shell: bash
+        run: bash scripts/ci/streaming-ingress.sh
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -216,6 +233,7 @@ jobs:
       - architecture
       - security
       - resource-dos
+      - streaming-ingress
       - e2e-acceptance
       - packaging-ops
       - runtime-gate
