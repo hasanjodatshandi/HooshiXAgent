@@ -15,38 +15,45 @@ import (
 )
 
 type session struct {
-	gateway         *Gateway
-	conn            *websocket.Conn
-	deviceID        string
-	sessionID       string
-	authorizationID string
+	gateway                *Gateway
+	conn                   *websocket.Conn
+	deviceID               string
+	sessionID              string
+	authorizationID        string
+	tokenID                string
+	authorizationExpiresAt time.Time
 
-	inbound  contractv1.SequenceTracker
-	outbound atomic.Uint64
-	lastSeen atomic.Int64
+	inbound    contractv1.SequenceTracker
+	outbound   atomic.Uint64
+	lastSeen   atomic.Int64
+	authorized atomic.Bool
 
-	writeMu   sync.Mutex
-	mu        sync.Mutex
-	streams   map[uint32]*stream
-	nextID    uint32
-	done      chan struct{}
-	closeOnce sync.Once
+	writeMu                    sync.Mutex
+	mu                         sync.Mutex
+	streams                    map[uint32]*stream
+	nextID                     uint32
+	done                       chan struct{}
+	closeOnce                  sync.Once
+	authorizationTerminateOnce sync.Once
 }
 
-func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID string, inbound contractv1.SequenceTracker, lastOutbound uint64) *session {
+func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64) *session {
 	sess := &session{
-		gateway:         gateway,
-		conn:            conn,
-		deviceID:        deviceID,
-		sessionID:       sessionID,
-		authorizationID: authorizationID,
-		inbound:         inbound,
-		streams:         make(map[uint32]*stream),
-		nextID:          1,
-		done:            make(chan struct{}),
+		gateway:                gateway,
+		conn:                   conn,
+		deviceID:               deviceID,
+		sessionID:              sessionID,
+		authorizationID:        authorizationID,
+		tokenID:                tokenID,
+		authorizationExpiresAt: authorizationExpiresAt,
+		inbound:                inbound,
+		streams:                make(map[uint32]*stream),
+		nextID:                 1,
+		done:                   make(chan struct{}),
 	}
 	sess.outbound.Store(lastOutbound)
 	sess.lastSeen.Store(time.Now().UnixNano())
+	sess.authorized.Store(true)
 	return sess
 }
 
@@ -54,6 +61,7 @@ func (sess *session) run(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	go sess.heartbeatLoop(ctx)
+	go sess.authorizationExpiryLoop(ctx)
 
 	for {
 		frame, err := readProtocolFrame(ctx, sess.conn)
@@ -100,18 +108,11 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 		case <-sess.done:
 			return
 		case <-ticker.C:
-			for _, subject := range []struct{ kind, id string }{{"device_session_authorization", sess.authorizationID}, {"device", sess.deviceID}} {
-				revoked, err := sess.gateway.metadata.Revoked(ctx, subject.kind, subject.id, time.Now().UTC())
-				if err != nil || revoked {
-					if revoked {
-						revokeCtx, revokeCancel := context.WithTimeout(ctx, sess.gateway.limits.WriteTimeout)
-						_ = sess.sendControl(revokeCtx, 0, contractv1.SessionRevoked{ContractVersion: contractv1.ProtocolVersion, MessageType: "session_revoked", AuthorizationID: sess.authorizationID, ReasonCode: "credential_revoked"})
-						revokeCancel()
-					}
-					sess.failAll(errors.New("session authorization revoked or unavailable"))
-					sess.close(websocket.StatusPolicyViolation, "authorization revoked")
-					return
-				}
+			now := time.Now().UTC()
+			reasonCode, authErr := sess.revalidateAuthorization(ctx, now)
+			if authErr != nil {
+				sess.terminateAuthorization(ctx, reasonCode, authErr)
+				return
 			}
 			lastSeen := time.Unix(0, sess.lastSeen.Load())
 			if time.Since(lastSeen) > sess.gateway.limits.IdleTimeout {
@@ -137,6 +138,73 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+func (sess *session) authorizationExpiryLoop(ctx context.Context) {
+	delay := time.Until(sess.authorizationExpiresAt)
+	if delay <= 0 {
+		sess.terminateAuthorization(ctx, "expired", errors.New("session authorization expired"))
+		return
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-sess.done:
+		return
+	case <-timer.C:
+		sess.terminateAuthorization(ctx, "expired", errors.New("session authorization expired"))
+	}
+}
+
+func (sess *session) terminateAuthorization(ctx context.Context, reasonCode string, err error) {
+	sess.authorizationTerminateOnce.Do(func() {
+		sess.authorized.Store(false)
+		sess.failAll(err)
+		if reasonCode != "" {
+			revokeCtx, revokeCancel := context.WithTimeout(ctx, sess.gateway.limits.WriteTimeout)
+			_ = sess.sendControl(revokeCtx, 0, contractv1.SessionRevoked{
+				ContractVersion: contractv1.ProtocolVersion,
+				MessageType:     "session_revoked",
+				AuthorizationID: sess.authorizationID,
+				ReasonCode:      reasonCode,
+			})
+			revokeCancel()
+		}
+		sess.close(websocket.StatusPolicyViolation, "authorization invalid")
+	})
+}
+
+func (sess *session) revalidateAuthorization(ctx context.Context, now time.Time) (string, error) {
+	if !now.Before(sess.authorizationExpiresAt) {
+		return "expired", errors.New("session authorization expired")
+	}
+
+	record, err := sess.gateway.metadata.Authorization(ctx, sess.authorizationID, sess.deviceID, sess.tokenID, now)
+	if err == nil {
+		return "", nil
+	}
+	if record.AuthorizationID == sess.authorizationID && record.DeviceID == sess.deviceID && record.TokenID == sess.tokenID {
+		if record.Disabled {
+			return "disabled", fmt.Errorf("session authorization disabled: %w", err)
+		}
+		if expiresAt, parseErr := time.Parse(time.RFC3339, record.ExpiresAt); parseErr == nil && !now.Before(expiresAt) {
+			return "expired", fmt.Errorf("session authorization expired: %w", err)
+		}
+	}
+	for _, subject := range []struct{ kind, id string }{
+		{"device_session_authorization", sess.authorizationID},
+		{"device", sess.deviceID},
+	} {
+		revoked, revokeErr := sess.gateway.metadata.Revoked(ctx, subject.kind, subject.id, now)
+		if revokeErr != nil {
+			return "", fmt.Errorf("authorization revalidation failed: %w", err)
+		}
+		if revoked {
+			return "credential_revoked", fmt.Errorf("session authorization revoked: %w", err)
+		}
+	}
+	return "", fmt.Errorf("session authorization invalid or unavailable: %w", err)
+}
 func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) error {
 	if err := contractv1.ValidateControlPayload(frame.Payload, frame.StreamID, time.Now().UTC()); err != nil {
 		return err

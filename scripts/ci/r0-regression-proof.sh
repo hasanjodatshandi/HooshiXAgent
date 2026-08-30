@@ -9,7 +9,7 @@ trap 'rm -f "$output"' EXIT
 
 set +e
 HOOSHIX_AUDIT_REGRESSION_PROOF=1 \
-  go test -count=1 -run '^TestAuditRegression' ./internal/contractv1 ./internal/gateway >"$output" 2>&1
+  go test -count=1 -run '^TestAuditRegression' ./internal/contractv1 >"$output" 2>&1
 status=$?
 set -e
 
@@ -23,7 +23,6 @@ expected=(
   TestAuditRegressionSequenceGapMustBeRejected
   TestAuditRegressionInvalidUTF8MustBeRejected
   TestAuditRegressionDuplicateJSONKeysMustBeRejected
-  TestAuditRegressionExpiredAuthorizationMustTerminateActiveSession
 )
 for test_name in "${expected[@]}"; do
   if ! grep -q -- "--- FAIL: ${test_name}" "$output"; then
@@ -36,8 +35,7 @@ done
 for marker in \
   'AUDIT-R0 sequence gap accepted' \
   'AUDIT-R0 invalid UTF-8 control payload accepted' \
-  'AUDIT-R0 duplicate JSON object keys accepted' \
-  'AUDIT-R0 active Agent session survived authorization expires_at'
+  'AUDIT-R0 duplicate JSON object keys accepted'
 do
   if ! grep -q -- "$marker" "$output"; then
     cat "$output" >&2
@@ -46,4 +44,4 @@ do
   fi
 done
 
-echo "R-0 audit regression proof: PASSED — all four confirmed pre-fix defects were reproduced deterministically."
+echo "R-0 audit regression proof: PASSED — the three still-unresolved protocol findings were reproduced deterministically; authorization expiry is now covered by the normal R-1 lifecycle tests."

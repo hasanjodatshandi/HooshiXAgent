@@ -20,6 +20,6 @@ go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayEndToEndSecurityNegatives' ./internal/runtimegate
+  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives' ./internal/runtimegate
 
-echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, offline/error behavior and security negatives were exercised."
+echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, authorization-expiry fail-closed behavior, offline/error behavior and security negatives were exercised."
