@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-for tool in go docker openssl curl tar gzip unzip zip sha256sum; do
+for tool in go docker openssl curl tar gzip unzip zip sha256sum python3; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "required packaging/operations tool not found: $tool" >&2
     exit 1
@@ -132,6 +132,73 @@ if grep -q '{' <<<"$internal_metrics"; then
   echo "Gateway operational metrics unexpectedly contain labels" >&2
   exit 1
 fi
+
+# R-10: prove the rendered policy survives into actual container HostConfig/Mounts.
+gateway_id="$(docker compose ps -q gateway)"
+caddy_id="$(docker compose ps -q caddy)"
+[[ -n "$gateway_id" && -n "$caddy_id" ]]
+python3 - "$gateway_id" "$caddy_id" <<'PY'
+import json
+import subprocess
+import sys
+
+ids = {"gateway": sys.argv[1], "caddy": sys.argv[2]}
+inspected = {}
+for name, container_id in ids.items():
+    inspected[name] = json.loads(subprocess.check_output(["docker", "inspect", container_id], text=True))[0]
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+for name, obj in inspected.items():
+    host = obj["HostConfig"]
+    cfg = obj["Config"]
+    require(host["Privileged"] is False, f"{name} unexpectedly privileged")
+    require(host["ReadonlyRootfs"] is True, f"{name} root filesystem not read-only")
+    require("no-new-privileges:true" in host.get("SecurityOpt", []), f"{name} missing no-new-privileges")
+    require(host.get("CapDrop") == ["ALL"], f"{name} must drop all capabilities")
+    require(host.get("PidsLimit") == 256, f"{name} PID limit mismatch")
+    require(host.get("Memory") == 268435456, f"{name} memory limit mismatch")
+    require(host.get("NanoCpus") == 1000000000, f"{name} CPU limit mismatch")
+    require(host.get("NetworkMode") != "host", f"{name} host networking forbidden")
+    require(host.get("PidMode", "") != "host", f"{name} host PID namespace forbidden")
+    require(host.get("IpcMode", "") != "host", f"{name} host IPC namespace forbidden")
+    require(not host.get("Devices"), f"{name} device passthrough forbidden")
+    tmpfs = host.get("Tmpfs", {}).get("/tmp", "")
+    for option in ("noexec", "nosuid", "nodev", "size=16m", "mode=1777"):
+        require(option in tmpfs, f"{name} /tmp missing {option}")
+
+require(inspected["gateway"]["Config"].get("User") == "10001:10001", "Gateway runtime user mismatch")
+require(inspected["gateway"]["HostConfig"].get("CapAdd") in (None, []), "Gateway added capabilities")
+require(inspected["caddy"]["Config"].get("User") == "10001:10001", "Caddy must run non-root")
+require(inspected["caddy"]["HostConfig"].get("CapAdd") == ["CAP_NET_BIND_SERVICE"], "Caddy capability set is not minimal")
+
+for name, obj in inspected.items():
+    for mount in obj.get("Mounts", []):
+        source = str(mount.get("Source", ""))
+        destination = str(mount.get("Destination", ""))
+        require("ca.key" not in source and "ca.key" not in destination, "CA private key mounted at runtime")
+        if mount.get("Type") == "bind":
+            require(mount.get("RW") is False, f"{name} bind mount is writable: {destination}")
+
+caddy_writable = {m["Destination"] for m in inspected["caddy"].get("Mounts", []) if m.get("RW")}
+require(caddy_writable == {"/data", "/config"}, f"unexpected writable Caddy mounts: {sorted(caddy_writable)}")
+require(not any(m.get("RW") for m in inspected["gateway"].get("Mounts", [])), "Gateway has writable persistent mount")
+PY
+
+gateway_health=""
+caddy_health=""
+for _ in $(seq 1 30); do
+  gateway_health="$(docker inspect --format '{{.State.Health.Status}}' "$gateway_id")"
+  caddy_health="$(docker inspect --format '{{.State.Health.Status}}' "$caddy_id")"
+  if [[ "$gateway_health" == healthy && "$caddy_health" == healthy ]]; then
+    break
+  fi
+  sleep 1
+done
+[[ "$gateway_health" == healthy ]]
+[[ "$caddy_health" == healthy ]]
 
 ./diagnose.sh >/dev/null
 

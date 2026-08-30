@@ -47,6 +47,9 @@ bash scripts/ci/observability-writer.sh
 # R-9 Agent state/installer gate proves strict state parsing, locking and destructive-path safety.
 bash scripts/ci/agent-state-installer.sh
 
+# R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
+bash scripts/ci/infrastructure-runtime.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
@@ -118,6 +121,7 @@ supply_chain_gate=required-by-needs
 metadata_scalability_gate=Passed
 observability_writer_gate=Passed
 agent_state_installer_gate=Passed
+infrastructure_runtime_gate=Passed
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF

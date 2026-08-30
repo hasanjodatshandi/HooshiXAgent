@@ -8,7 +8,7 @@
 
 	reverse_proxy https://gateway:8443 {
 		header_up Host {host}
-		health_uri /healthz
+		health_uri /readyz
 		health_interval 10s
 		health_timeout 3s
 		transport http {

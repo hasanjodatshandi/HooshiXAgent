@@ -250,6 +250,17 @@ jobs:
         shell: bash
         run: bash scripts/ci/agent-state-installer.sh
 
+  infrastructure-runtime:
+    name: R-10 infrastructure runtime hardening gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run infrastructure runtime hardening gate
+        shell: bash
+        run: bash scripts/ci/infrastructure-runtime.sh
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -326,6 +337,7 @@ jobs:
       - metadata-scalability
       - observability-writer
       - agent-state-installer
+      - infrastructure-runtime
       - e2e-acceptance
       - packaging-ops
       - runtime-gate
