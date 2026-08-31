@@ -294,3 +294,25 @@ func TestUpdateFoundationValidation(t *testing.T) {
 		t.Fatal("expected insecure update URL rejection")
 	}
 }
+
+func TestAgentHandlesSessionRevokedAsTerminal(t *testing.T) {
+	payload, err := json.Marshal(contractv1.SessionRevoked{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "session_revoked",
+		AuthorizationID: "auth-runtime-001",
+		ReasonCode:      "expired",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &agentSession{}
+	err = sess.handleControl(context.Background(), contractv1.Frame{
+		Kind:     contractv1.KindControl,
+		StreamID: 0,
+		Sequence: 1,
+		Payload:  payload,
+	})
+	if !errors.Is(err, ErrSessionRevoked) {
+		t.Fatalf("session_revoked error=%v want ErrSessionRevoked", err)
+	}
+}
