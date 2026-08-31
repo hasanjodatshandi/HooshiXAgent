@@ -69,6 +69,9 @@ func LoadConfig(stateDir string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := ensureStateReadable(normalized); err != nil {
+		return Config{}, err
+	}
 	return loadConfigUnlocked(normalized)
 }
 
