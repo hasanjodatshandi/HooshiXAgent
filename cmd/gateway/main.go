@@ -84,11 +84,14 @@ func run() error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), limits.ShutdownTimeout)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
+		serverGateway.BeginDrain()
+		serverErr := server.Shutdown(shutdownCtx)
+		gatewayErr := serverGateway.Close(shutdownCtx)
+		if gatewayErr != nil {
+			logger.Warn("gateway drain incomplete", "error", gatewayErr)
 		}
-		if err := serverGateway.Close(shutdownCtx); err != nil {
-			logger.Warn("status exporter flush incomplete", "error", err)
+		if serverErr != nil {
+			return fmt.Errorf("shutdown: %w", serverErr)
 		}
 		return nil
 	case err := <-errCh:

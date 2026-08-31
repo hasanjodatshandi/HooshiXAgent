@@ -1043,6 +1043,10 @@ func dialRawAgent(t testing.TB, client *http.Client, baseURL string) *websocket.
 }
 
 func clientHello(identity testIdentity) contractv1.ClientHello {
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		panic("test entropy failure: " + err.Error())
+	}
 	return contractv1.ClientHello{
 		ContractVersion: contractv1.ProtocolVersion,
 		MessageType:     "client_hello",
@@ -1050,7 +1054,7 @@ func clientHello(identity testIdentity) contractv1.ClientHello {
 		AuthorizationID: identity.authorizationID,
 		TokenID:         identity.tokenID,
 		SessionToken:    identity.token,
-		ClientNonce:     randomBase64URL(32),
+		ClientNonce:     base64.RawURLEncoding.EncodeToString(nonce),
 	}
 }
 

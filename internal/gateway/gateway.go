@@ -28,6 +28,8 @@ type Gateway struct {
 	status   *statusExporter
 	limits   Limits
 	logger   *slog.Logger
+	entropy  io.Reader
+	draining atomic.Bool
 
 	mu             sync.RWMutex
 	sessions       map[string]*session
@@ -52,6 +54,7 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 		metadata:       metadata,
 		limits:         limits,
 		logger:         logger,
+		entropy:        rand.Reader,
 		sessions:       make(map[string]*session),
 		handshakeSlots: make(chan struct{}, limits.MaxPendingHandshakes),
 		resources:      newGatewayResources(limits),
@@ -78,6 +81,11 @@ func (gateway *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (gateway *Gateway) handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if gateway.draining.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"status":"not_ready"}`)
+		return
+	}
 	if readiness, ok := gateway.metadata.(interface{ Ready() error }); ok {
 		if err := readiness.Ready(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -151,6 +159,10 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
+	if gateway.draining.Load() {
+		http.Error(w, "gateway is draining", http.StatusServiceUnavailable)
+		return
+	}
 	if !gateway.resources.handshakeRate.allow(time.Now()) {
 		http.Error(w, "agent handshake rate limit exceeded", http.StatusTooManyRequests)
 		return
@@ -198,7 +210,6 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 
 	gateway.emitStatus(context.Background(), contractv1.GatewayStatusSignal{
 		ContractVersion: contractv1.ProtocolVersion,
-		EventID:         newID("status"),
 		ObservedAt:      time.Now().UTC().Format(time.RFC3339),
 		Kind:            "session_connected",
 		DeviceID:        sess.deviceID,
@@ -210,7 +221,6 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 
 	gateway.emitStatus(context.Background(), contractv1.GatewayStatusSignal{
 		ContractVersion: contractv1.ProtocolVersion,
-		EventID:         newID("status"),
 		ObservedAt:      time.Now().UTC().Format(time.RFC3339),
 		Kind:            "session_disconnected",
 		DeviceID:        sess.deviceID,
@@ -247,11 +257,19 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 		return nil, errors.New("session token mismatch")
 	}
 
+	sessionID, err := gateway.newID("session")
+	if err != nil {
+		return nil, fmt.Errorf("generate session ID: %w", err)
+	}
+	serverNonce, err := gateway.randomBase64URL(32)
+	if err != nil {
+		return nil, fmt.Errorf("generate server nonce: %w", err)
+	}
 	challenge := contractv1.ServerChallenge{
 		ContractVersion: contractv1.ProtocolVersion,
 		MessageType:     "server_challenge",
-		SessionID:       newID("session"),
-		ServerNonce:     randomBase64URL(32),
+		SessionID:       sessionID,
+		ServerNonce:     serverNonce,
 		ExpiresAt:       time.Now().UTC().Add(gateway.limits.HandshakeTimeout).Format(time.RFC3339),
 	}
 	if err := writeControlFrame(ctx, conn, 1, 0, challenge); err != nil {
@@ -299,16 +317,23 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 
 func (gateway *Gateway) registerSession(sess *session) error {
 	gateway.mu.Lock()
-	defer gateway.mu.Unlock()
-	if current, ok := gateway.sessions[sess.deviceID]; ok {
-		current.close(websocket.StatusNormalClosure, "replaced by reconnect")
-		delete(gateway.sessions, sess.deviceID)
+	if gateway.draining.Load() {
+		gateway.mu.Unlock()
+		return errors.New("gateway is draining")
 	}
-	if len(gateway.sessions) >= gateway.limits.MaxAgentSessions {
+	current := gateway.sessions[sess.deviceID]
+	if current == nil && len(gateway.sessions) >= gateway.limits.MaxAgentSessions {
 		gateway.resources.sessionRejects.Add(1)
+		gateway.mu.Unlock()
 		return errors.New("agent session capacity reached")
 	}
 	gateway.sessions[sess.deviceID] = sess
+	gateway.mu.Unlock()
+
+	if current != nil && current != sess {
+		current.failAll(errors.New("agent session replaced by reconnect"))
+		current.close(websocket.StatusNormalClosure, "replaced by reconnect")
+	}
 	return nil
 }
 
@@ -336,6 +361,10 @@ func (gateway *Gateway) sessionForDevice(deviceID string) *session {
 func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Request) {
 	if request.URL.Path == "/healthz" || request.URL.Path == "/readyz" || request.URL.Path == "/metrics" || request.URL.Path == agentPath {
 		http.NotFound(w, request)
+		return
+	}
+	if gateway.draining.Load() {
+		http.Error(w, "gateway is draining", http.StatusServiceUnavailable)
 		return
 	}
 	if request.ContentLength > gateway.limits.MaxRequestBytes {
@@ -433,7 +462,7 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	written, overflow, copyErr := copyTunneledResponseBody(w, response, gateway.limits.MaxResponseBytes)
 	toPublic := written
 	gateway.emitStatus(request.Context(), contractv1.GatewayStatusSignal{
-		ContractVersion: contractv1.ProtocolVersion, EventID: newID("status"), ObservedAt: time.Now().UTC().Format(time.RFC3339), Kind: "traffic_delta",
+		ContractVersion: contractv1.ProtocolVersion, ObservedAt: time.Now().UTC().Format(time.RFC3339), Kind: "traffic_delta",
 		DeviceID: route.DeviceID, SessionID: sess.sessionID, EndpointID: route.EndpointID, BytesFromPublic: &fromPublic, BytesToPublic: &toPublic,
 	})
 	if overflow {
@@ -451,11 +480,65 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 }
 
 func (gateway *Gateway) emitStatus(_ context.Context, signal contractv1.GatewayStatusSignal) {
+	if signal.EventID == "" {
+		eventID, err := gateway.newID("status")
+		if err != nil {
+			gateway.logger.Warn("status signal ID generation failed", "error", err, "kind", signal.Kind)
+			return
+		}
+		signal.EventID = eventID
+	}
 	gateway.status.enqueue(signal)
 }
 
+var errGatewayShuttingDown = errors.New("gateway shutting down")
+
+func (gateway *Gateway) BeginDrain() {
+	gateway.draining.Store(true)
+}
+
 func (gateway *Gateway) Close(ctx context.Context) error {
-	return gateway.status.close(ctx)
+	gateway.BeginDrain()
+
+	gateway.mu.Lock()
+	sessions := make([]*session, 0, len(gateway.sessions))
+	for _, sess := range gateway.sessions {
+		sessions = append(sessions, sess)
+	}
+	gateway.sessions = make(map[string]*session)
+	gateway.mu.Unlock()
+
+	for _, sess := range sessions {
+		sess.failAll(errGatewayShuttingDown)
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(sessions))
+		for _, sess := range sessions {
+			sess := sess
+			go func() {
+				defer wg.Done()
+				sess.close(websocket.StatusGoingAway, "gateway shutting down")
+			}()
+		}
+		wg.Wait()
+		close(drained)
+	}()
+
+	var drainErr error
+	select {
+	case <-drained:
+	case <-ctx.Done():
+		drainErr = ctx.Err()
+		for _, sess := range sessions {
+			sess.forceClose()
+		}
+	}
+
+	statusErr := gateway.status.close(ctx)
+	return errors.Join(drainErr, statusErr)
 }
 
 func readProtocolFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame, error) {
@@ -481,16 +564,23 @@ func writeControlFrame(ctx context.Context, conn *websocket.Conn, sequence uint6
 	return conn.Write(ctx, websocket.MessageBinary, frame)
 }
 
-func randomBase64URL(size int) string {
-	data := make([]byte, size)
-	if _, err := rand.Read(data); err != nil {
-		panic("crypto/rand failed: " + err.Error())
+func (gateway *Gateway) randomBase64URL(size int) (string, error) {
+	if gateway.entropy == nil {
+		return "", errors.New("crypto entropy source is unavailable")
 	}
-	return base64.RawURLEncoding.EncodeToString(data)
+	data := make([]byte, size)
+	if _, err := io.ReadFull(gateway.entropy, data); err != nil {
+		return "", fmt.Errorf("read crypto entropy: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-func newID(prefix string) string {
-	return prefix + "-" + randomBase64URL(12)
+func (gateway *Gateway) newID(prefix string) (string, error) {
+	random, err := gateway.randomBase64URL(12)
+	if err != nil {
+		return "", err
+	}
+	return prefix + "-" + random, nil
 }
 
 var errResponseHeaderTooLarge = errors.New("tunneled response headers exceed limit")
