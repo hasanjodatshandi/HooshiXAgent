@@ -13,7 +13,11 @@ HooshiXAgent runtime code may receive validated copies of four contract record t
 3. `revocation-signal` — disables/revokes an authorization, route assignment, or device;
 4. `gateway-status-signal` — bounded operational/traffic status emitted from the Gateway toward the external system.
 
-The durable/live Control Panel transport used to exchange these records is deliberately outside this contract. The current Gateway implementation consumes these shapes through a read-only filesystem snapshot adapter; any future external transport adapter must preserve the same versioned records and must not couple the Gateway directly to a Control Panel database.
+RA-0 selects a live transport/projection model around the first three externally authoritative record types without changing their business meaning: complete immutable generations are published under a read-only filesystem projection, and one atomically published current-generation manifest identifies the generation that the Gateway may validate and activate. The Gateway does not query or own a Control Panel database. The exact manifest schema/runtime implementation belongs to RA-3 and must conform to ADR-0012.
+
+The existing flat read-only snapshot remains a static/test/migration compatibility input. It does not provide a live revocation/update guarantee and must not be described as such.
+
+Public TLS for dynamically assigned `public_hostname` values remains Caddy's edge responsibility. RA-0 selects restricted On-Demand TLS for the production multi-host path. The external endpoint/domain lifecycle authority must provide the bounded HTTP permission decision required by Caddy before certificate management is allowed for a previously unknown hostname; `200 OK` means allowed and every other result denies. That permission decision is a read-only integration boundary, not endpoint CRUD or durable state inside HooshiXAgent, and must conform to ADR-0011. Deterministic HooshiXAgent tests may use a mock permission authority.
 
 ## 2. Device session authorization
 
@@ -46,9 +50,13 @@ The route assignment contains:
 
 The Gateway uses the assignment only for active runtime routing. It does not become the durable endpoint-management authority.
 
+TLS certificate permission for a hostname and Gateway routing authorization are separate decisions. A successful Caddy certificate permission decision never authorizes a Gateway route by itself; each public request still requires a currently valid route assignment and eligible authenticated Agent session.
+
 ## 4. Revocation
 
-Revocation signals identify the externally authoritative subject and effective time. The current Gateway indexes revocations and stops relying on effectively revoked authorization/routing state according to its bounded session/request lifecycle.
+Revocation signals identify the externally authoritative subject and effective time. The Gateway indexes revocations and stops relying on effectively revoked authorization/routing state according to its bounded session/request lifecycle.
+
+Under ADR-0012, revocation changes published after process startup become visible through complete validated live generations rather than requiring a Gateway restart. The implementation does not claim instantaneous revocation: the maximum observation/termination delay remains bounded by the configured projection refresh interval plus the applicable request/session revalidation lifecycle.
 
 Revocation is not implemented as local Control Panel CRUD or persistence.
 
@@ -73,9 +81,24 @@ Caches or fixtures cannot silently extend an expired authorization.
 
 An authenticated Agent session must not remain authorized beyond the `expires_at` of the authorization that established it. The Gateway must re-evaluate authorization freshness on a bounded session lifecycle interval and terminate the session fail closed once that authorization is expired, invalid, unavailable, disabled, mismatched, or effectively revoked.
 
+For live projection generations:
+
+- a candidate generation is activated only as one fully validated atomic unit;
+- lower/replayed revisions and same-revision/different-content publication are rejected;
+- a malformed/incomplete candidate cannot partially mutate active runtime authority;
+- the last validated generation may be used only while it remains within both its external freshness deadline and the Gateway's local maximum accepted snapshot age;
+- if no fresh validated generation remains, Gateway readiness, new Agent authorization, and new public routing fail closed; existing sessions fail closed through the bounded authorization revalidation lifecycle;
+- recovery to a newer valid generation may restore readiness without process restart.
+
+For dynamic public TLS permission:
+
+- unknown, disabled, expired, unverified, malformed, unavailable, or timed-out hostname permission fails closed;
+- merely resolving or pointing DNS at the HooshiX Caddy edge does not authorize certificate management;
+- certificate permission does not replace Gateway route authorization.
+
 ## 7. Explicit exclusions
 
-AG-3 does not define or implement:
+This contract does not define or implement:
 
 - Control Panel HTTP/gRPC CRUD APIs;
 - users/accounts or their sessions;
@@ -85,6 +108,7 @@ AG-3 does not define or implement:
 - quotas, plans, billing, or commercial policy;
 - Control Panel database schemas or migrations;
 - dashboard/UI models;
-- direct Gateway access to a Control Panel database.
+- direct Gateway access to a Control Panel database;
+- Redis, NATS, Kafka, Kubernetes, or another synchronization datastore/broker.
 
 Fixtures under `contracts/v1/fixtures/` are deterministic stand-ins for the external source so Agent/Gateway contract work can be tested independently.

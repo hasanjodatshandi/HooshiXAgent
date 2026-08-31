@@ -56,6 +56,14 @@ Current Edge Agent + Tunnel Gateway architecture authority is frozen by AG-1 in:
 - `docs/adr/ADR-0005-bounded-stream-multiplexing.md`
 - `docs/adr/ADR-0006-routing-ownership.md`
 
+RA-0 refines the accepted dynamic-hostname and live-metadata architecture in:
+
+- `docs/adr/ADR-0011-authorized-on-demand-public-tls.md`
+- `docs/adr/ADR-0012-live-external-metadata-snapshot-projection.md`
+
+These ADRs preserve Caddy as the public TLS edge, the external Control Panel as durable endpoint/authorization authority, the Gateway as validated runtime enforcement only, and the Agent as final local-target authority. RA-3 owns live metadata implementation and RA-4 owns multi-host Caddy implementation; later RA leaves MUST NOT be pulled into RA-0.
+
+
 AG-1 does not authorize concrete protocol schemas, repository/runtime scaffolding, Gateway/Agent executables, Control Panel implementation, or later-leaf deployment work. Those remain gated by future `plan.next` leaves.
 
 

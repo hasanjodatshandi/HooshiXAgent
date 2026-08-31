@@ -140,8 +140,23 @@ AG-0 Governance/Repository/Delivery
 → R-12 Performance and Capacity Gate
 → R-13 Current-State Documentation Reconciliation
 → R-14 Final Security, Architecture and Performance Re-audit
+→ RA-0 Architecture Decision Gate
+→ RA-1 Gateway Concurrency and Lifecycle Correctness
+→ RA-2 Admission-Control and DoS Isolation
+→ RA-3 Live Authorization Lifecycle
+→ RA-4 Multi-Host Public Edge
+→ RA-5 Agent State Transaction Hardening
+→ RA-6 Filesystem and Installer Hardening
+→ RA-7 Observability and Protocol Consistency
+→ RA-8 Supply-Chain Policy Hardening
+→ RA-9 Critical Test Gap Expansion
+→ RA-10 Evidence-Driven Performance Pass
+→ RA-11 Maintainability Refactor
+→ RA-12 Dependency and CI Modernization
+→ RA-13 Final Documentation Reconciliation
+→ RA-14 Final Independent Re-Audit
 ```
 
-At the R-13 reconciliation point, AG-0 through AG-9 and R-0 through R-12 have completed their required lifecycle. R-13 changes current-state documentation only. R-14 remains ordered after successful R-13 completion.
+AG-0 through AG-9 and R-0 through R-14 completed their required lifecycle before the user-approved RA audit-remediation sequence was appended on 2026-08-31. RA-0 through RA-14 are strictly ordered and each is an independent Durable Plan leaf with its own branch/PR/merge/post-merge lifecycle.
 
 This static list is descriptive only. **Only `plan.resume` / `plan.next` determines the actionable leaf.**
