@@ -578,6 +578,7 @@ func TestExternalProcessRuntimeGate(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

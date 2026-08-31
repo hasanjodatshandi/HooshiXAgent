@@ -50,6 +50,7 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	client := trustedClient(roots)
 	waitGatewayHealth(t, client, gatewayBaseURL)
@@ -92,6 +93,7 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	waitGatewayHealth(t, client, gatewayBaseURL)
 	second := waitTunnel(t, client, gatewayBaseURL, "/after-gateway-restart", "payload-two")
@@ -167,6 +169,7 @@ func TestAgentGatewayLargeRequestStreaming(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
@@ -235,6 +238,7 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
@@ -311,6 +315,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
 			"-metadata-dir", metadataDir,
+			"-metadata-mode", "static",
 		)
 		defer gateway.stop(t)
 		client := trustedClient(roots)
@@ -359,6 +364,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
 			"-metadata-dir", metadataDir,
+			"-metadata-mode", "static",
 		)
 		done := make(chan error, 1)
 		go func() { done <- gateway.cmd.Wait() }()
@@ -396,6 +402,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
 			"-metadata-dir", metadataDir,
+			"-metadata-mode", "static",
 		)
 		defer gateway.stop(t)
 		client := trustedClient(roots)

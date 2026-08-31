@@ -14,6 +14,12 @@ services:
       - /run/hooshix-tls/gateway.key
       - -metadata-dir
       - /var/lib/hooshix/metadata
+      - -metadata-mode
+      - ${HOOSHIX_METADATA_MODE:-live}
+      - -metadata-refresh-interval
+      - ${HOOSHIX_METADATA_REFRESH_INTERVAL:-1s}
+      - -metadata-max-age
+      - ${HOOSHIX_METADATA_MAX_AGE:-30s}
       - -max-agent-sessions
       - "64"
       - -max-pending-handshakes

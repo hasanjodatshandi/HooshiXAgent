@@ -29,6 +29,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | R-5 HTTP / stream isolation gate | stream fault isolation, HTTP header/body correctness and deterministic terminal behavior |
 | R-6 release / supply-chain gate | exact-commit policy, immutable pins, privilege separation, SBOM/scanning/provenance policy |
 | R-7 metadata scalability / determinism gate | typed/indexed metadata, duplicate rejection, readiness and large-index lookup behavior |
+| RA-3 live metadata lifecycle gate | immutable generations, atomic activation, freshness fail-closed/recovery and existing-session live revocation |
 | R-8 observability / writer isolation gate | non-blocking bounded telemetry and single-writer control-priority scheduling |
 | R-9 Agent state / installer hardening gate | strict state/config, mutation lock, destructive-path and bootstrap safety |
 | R-10 infrastructure runtime hardening gate | hardened two-service Compose runtime and actual-container acceptance |

@@ -1,6 +1,6 @@
 # Tunnel Gateway Runtime — AG-4
 
-**Status:** Current runtime contract (origin AG-4; reconciled through R-13)
+**Status:** Current runtime contract (origin AG-4; reconciled through RA-3)
 
 The Gateway executable is `cmd/gateway`.
 
@@ -23,26 +23,77 @@ The executable requires all of:
 -listen <host:port>
 -tls-cert <certificate.pem>
 -tls-key <private-key.pem>
--metadata-dir <read-only-snapshot-directory>
+-metadata-dir <read-only-external-metadata-root>
 ```
 
 There is no plaintext production startup mode. The HTTP server enforces TLS >= 1.2.
 
-The current external integration adapter is a read-only filesystem snapshot. It is non-authoritative: durable Control Panel state remains external, and no direct Control Panel database coupling is introduced.
+### Live metadata mode (default)
 
-Snapshot layout:
+RA-3 makes the ADR-0012 generation projection the default runtime authority mode:
+
+```text
+-metadata-mode live
+-metadata-refresh-interval 1s
+-metadata-max-age 30s
+```
+
+The external publisher/projection process remains outside this repository. The Gateway consumes only the read-only projection and does not connect to a Control Panel database/API or implement Control Panel CRUD/business logic.
+
+The concrete live layout is:
 
 ```text
 metadata/
-├── authorizations/
-│   └── *.json
-├── routes/
-│   └── *.json
-└── revocations/
-    └── *.json
+??? current.json
+??? generations/
+    ??? <generation>/
+        ??? authorizations/*.json
+        ??? routes/*.json
+        ??? revocations/*.json
 ```
 
-Records must conform to `contracts/v1/external/`. R-7 loads each authorization and route into a typed, strictly validated in-memory snapshot exactly once, rejects duplicate JSON object members, rejects duplicate `authorization_id` values and duplicate canonical public hostnames, and indexes revocation state by `(subject_kind, subject_id)`. Static record structure/timestamps are validated at snapshot load while enabled/disabled state, validity windows and revocation effective times remain evaluated at use time. Invalid snapshot content fails process startup through `LoadSnapshotDirectory`; if an already-constructed metadata source reports an unusable state, `/readyz` fails closed with `503 {"status":"not_ready"}` while `/healthz` remains process-health only.
+`current.json` is a strict JSON object:
+
+```json
+{
+  "contract_version": 1,
+  "revision": 42,
+  "generation": "generation-42",
+  "published_at": "2026-08-31T12:00:00Z",
+  "valid_until": "2026-08-31T12:05:00Z"
+}
+```
+
+`revision` is a positive monotonically increasing unsigned integer. `generation` is a bounded filesystem-safe identifier containing only ASCII letters, digits, `.`, `_` or `-`; path separators and traversal names are rejected. `published_at` and `valid_until` are RFC3339 timestamps and `valid_until` must be later than `published_at`. The publisher writes/closes the complete immutable generation first and atomically replaces `current.json` last.
+
+On every refresh the Gateway reads the manifest, strictly validates it, loads the entire referenced generation into a new typed/indexed snapshot, duplicate-checks the AG-3 records and computes a deterministic content digest before activation. The active pointer is swapped only after the candidate is fully valid. Lower revisions are rejected. Reusing an accepted revision with a different manifest or generation content is rejected; re-reading the same unchanged revision never extends its freshness deadline.
+
+Freshness expires at the earliest of the external `valid_until`, `published_at + metadata-max-age`, and the local acceptance time plus `metadata-max-age`. With the shipped defaults the manifest is polled every 1 second and an unchanged authority cannot remain valid for more than 30 seconds. A publisher that wants authority to remain live must therefore publish a newer monotonically ordered revision before the active generation expires; a newer revision may reference unchanged immutable content if the publisher intentionally renews the authority lease.
+
+Candidate input is resource-bounded before activation: `current.json` is limited to 16 KiB, each record file to 1 MiB, one generation to at most 100,000 JSON records and at most 64 MiB of raw record bytes. Only the active typed/indexed snapshot plus bounded replay/refresh bookkeeping is retained in Gateway memory; cleanup/retention of immutable generation directories belongs to the external publisher because the Gateway mount is read-only.
+
+Cold start with no valid `current.json` is allowed only as a fail-closed liveness state: the process can serve `/healthz`, but `/readyz`, new Agent authorization and new public route lookup remain unavailable until a valid generation is published. If a malformed/incomplete/replayed candidate appears, the last fully validated generation remains active only until its original freshness deadline. Once stale, `/readyz` returns 503, new authentication/routing fails closed, and existing sessions terminate on their existing authorization revalidation lifecycle. A later valid higher revision restores readiness without restarting the Gateway.
+
+A newly activated revocation/disable is visible to new authorization lookups after at most the refresh interval. Existing sessions revalidate on the existing heartbeat loop. With current defaults (`1s` metadata refresh and `15s` heartbeat), an effective live revocation is bounded by those two intervals rather than process restart; tests allow scheduling/write-close headroom and do not claim instantaneous revocation.
+
+### Static compatibility mode
+
+The legacy flat snapshot remains available only as explicit static/test/migration compatibility:
+
+```text
+-metadata-mode static
+```
+
+with the legacy layout:
+
+```text
+metadata/
+??? authorizations/*.json
+??? routes/*.json
+??? revocations/*.json
+```
+
+Static mode retains the R-7 strict typed snapshot loader and use-time validity checks but **does not** provide live-update/revocation freshness. It must not be used to claim the RA-3 live lifecycle.
 
 ## Routes
 
@@ -166,6 +217,12 @@ Public request and tunneled response hop-by-hop headers are removed explicitly, 
 The read-only snapshot adapter no longer retains raw authorization/route JSON for repeated parsing on every authentication or public request. It stores typed records with parsed validity-window boundaries and performs map lookup by authorization ID and canonical hostname. Revocations are reduced to the earliest effective time per unique `(subject_kind, subject_id)`, so repeated revocation events for one subject do not grow the runtime revocation index. This preserves fail-closed semantics because a subject is considered revoked once the earliest event becomes effective.
 
 Snapshot load is deterministic and fail-closed: strict JSON rejects unknown fields, duplicate object member names and malformed timestamps; duplicate authorization IDs and canonical host routes reject the whole snapshot rather than allowing filename/order-dependent overwrite behavior. Structurally valid records may be currently expired, future-dated or disabled without making the snapshot itself malformed; those dynamic authorization/route conditions are checked at the exact use time. `scripts/ci/metadata-scalability.sh` covers malformed/duplicate negatives, use-time expiry/revocation behavior, readiness failure and a 100,000-subject lookup benchmark with allocation reporting.
+
+## RA-3 live authorization lifecycle
+
+`scripts/ci/live-metadata-lifecycle.sh` builds the real Gateway and Agent binaries and exercises the live projection as a separate-process boundary. It proves that a higher route generation replaces the old hostname without Gateway restart, an unchanged revision cannot extend authority past its freshness deadline, stale authority makes readiness and new ingress fail closed while `/healthz` stays live, a newer generation restores routing/readiness without restart, and a live effective revocation terminates an already-authenticated Agent session on the bounded authorization-revalidation lifecycle.
+
+The live adapter exposes only aggregate/unlabeled metadata metrics: `hooshix_gateway_metadata_fresh`, `hooshix_gateway_metadata_snapshot_age_seconds`, `hooshix_gateway_metadata_refresh_successes_total`, and `hooshix_gateway_metadata_refresh_failures_total`. Revision IDs, generation names, authorization IDs, device IDs and hostnames are not metric labels. Activation logs may record the numeric revision and timestamps for operator diagnosis, but telemetry remains non-authoritative.
 
 ## R-8 observability and tunnel writer isolation
 

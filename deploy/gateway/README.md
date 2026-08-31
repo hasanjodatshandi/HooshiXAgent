@@ -16,7 +16,7 @@ Internet / Agent WSS :443
           |
      Tunnel Gateway :8443
           |
- read-only external metadata snapshots
+ read-only external live metadata projection
 ```
 
 The Gateway is not published on a host port. Caddy is the only public listener.
@@ -31,15 +31,20 @@ cp .env.example .env
 
 Set `HOOSHIX_PUBLIC_HOST` to a DNS name whose A/AAAA record points at the deployment host. Caddy performs public certificate automation for that name.
 
-`HOOSHIX_METADATA_DIR` is a read-only snapshot supplied by the external Control Panel integration flow. Its layout remains:
+`HOOSHIX_METADATA_DIR` is a read-only projection supplied by the external Control Panel integration flow. The Compose default is `HOOSHIX_METADATA_MODE=live`, with a 1-second refresh interval and 30-second maximum generation age. Production live layout is:
 
 ```text
-authorizations/*.json
-routes/*.json
-revocations/*.json
+current.json
+generations/<generation>/authorizations/*.json
+generations/<generation>/routes/*.json
+generations/<generation>/revocations/*.json
 ```
 
-No Control Panel database is mounted or assumed.
+The publisher writes a complete immutable generation and atomically publishes `current.json` last. `bootstrap-internal-tls.sh` creates the empty metadata/generations directories but deliberately does **not** invent authorization/routing authority. Until an external publisher supplies a valid current generation, Gateway `/healthz` remains live while `/readyz` fails closed and Caddy will not route to it.
+
+`HOOSHIX_METADATA_REFRESH_INTERVAL` and `HOOSHIX_METADATA_MAX_AGE` override the bounded defaults. `HOOSHIX_METADATA_MODE=static` is retained only for explicit compatibility/test/migration use with the legacy flat `authorizations/`, `routes/`, `revocations/` layout and does not provide live-revocation semantics.
+
+No Control Panel database/API/service is mounted or assumed.
 
 ## 2. Bootstrap internal TLS
 
@@ -78,8 +83,8 @@ Inspect status:
 ## Operations
 
 - `/healthz` is the Gateway liveness endpoint.
-- `/readyz` is an internal readiness endpoint.
-- `/metrics` emits low-cardinality aggregate Prometheus text metrics.
+- `/readyz` is an internal readiness endpoint and fails closed when live metadata has no fresh validated generation.
+- `/metrics` emits low-cardinality aggregate Prometheus text metrics, including live metadata freshness/refresh health.
 - Caddy blocks `/readyz` and `/metrics` on the public edge.
 - Gateway structured logs go to stderr.
 - Gateway integration/status JSONL goes to stdout.

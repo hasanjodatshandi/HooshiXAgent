@@ -1,6 +1,6 @@
 # Agent/Gateway Packaging and Operations — AG-7
 
-**Status:** Current packaging/operations contract (origin AG-7; reconciled through R-13)
+**Status:** Current packaging/operations contract (origin AG-7; reconciled through RA-3)
 
 AG-7 packages and operates the existing Edge Agent and Tunnel Gateway. It does not add the separate HooshiX Control Panel, a Control Panel database, tenant/user management, quotas, billing, Kubernetes, Redis or unrelated infrastructure.
 
@@ -42,15 +42,18 @@ Tunnel Gateway
 
 The Gateway is not host-published. Only Caddy owns public ports 80/443.
 
-External Control Panel integration remains a read-only metadata snapshot mount:
+External Control Panel integration remains a read-only metadata mount, but RA-3 makes the production/default Gateway mode the ADR-0012 live generation projection:
 
 ```text
-authorizations/*.json
-routes/*.json
-revocations/*.json
+current.json
+generations/<generation>/authorizations/*.json
+generations/<generation>/routes/*.json
+generations/<generation>/revocations/*.json
 ```
 
-No Control Panel service or database is bundled.
+Compose exposes `HOOSHIX_METADATA_MODE`, `HOOSHIX_METADATA_REFRESH_INTERVAL` and `HOOSHIX_METADATA_MAX_AGE`; defaults are `live`, `1s` and `30s`. The bootstrap creates directories only. It does not manufacture a current generation, so a deployment without a valid publisher remains alive but not ready. Explicit `HOOSHIX_METADATA_MODE=static` keeps the legacy flat snapshot solely for compatibility/test/migration use.
+
+No Control Panel service, API, database, durable Gateway datastore, broker or cache is bundled.
 
 ### TLS topology
 
