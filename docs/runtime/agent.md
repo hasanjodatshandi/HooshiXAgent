@@ -197,3 +197,9 @@ AG-7 now provides checksummed, attested release packages and a previous-binary p
 - status/log evidence does not expose the session token.
 
 This remains the AG-5 local runtime gate. The integrated deterministic test-route and Agent/Gateway restart acceptance is now defined separately by AG-6 in `docs/runtime/agent-gateway-e2e-acceptance.md`; broader release resilience remains AG-8 work.
+
+## R-8 outbound writer isolation
+
+After session authentication the Agent sends protocol frames through one outbound WebSocket writer goroutine. Control/heartbeat frames use a bounded 32-entry control queue and stream data uses a bounded 2-entry data queue. The writer assigns sequence numbers immediately before encoding and performs every post-authentication WebSocket write, so concurrent stream goroutines cannot create concurrent socket writers or sequence races. Control is preferred whenever both queues have work at a frame boundary; an already-running bounded data-frame write is allowed to finish first and remains subject to the existing write timeout. Authentication handshake frames are still direct single-threaded writes before the session writer starts.
+
+These queues are scheduling bounds, not additional bulk buffering or a capacity claim. Existing stream/session byte budgets, frame-size limits, reconnect behavior, local-target policy, and protocol-v1 semantics remain unchanged.

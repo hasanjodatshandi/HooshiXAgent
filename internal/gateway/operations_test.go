@@ -37,6 +37,10 @@ func TestOperationalReadinessAndMetrics(t *testing.T) {
 		"hooshix_gateway_agent_sessions 0",
 		"hooshix_gateway_active_streams 0",
 		"hooshix_gateway_pending_handshakes 0",
+		"hooshix_gateway_status_queue_depth 0",
+		"hooshix_gateway_status_queue_limit 256",
+		"hooshix_gateway_status_dropped_total 0",
+		"hooshix_gateway_status_export_failures_total 0",
 	} {
 		if !strings.Contains(text, metric) {
 			t.Fatalf("metrics missing %q: %s", metric, text)
