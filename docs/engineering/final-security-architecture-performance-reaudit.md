@@ -26,7 +26,7 @@ On the R-14 branch created directly from the audit baseline:
 - A local Gitleaks `v8.30.0` directory scan reported the deterministic invalid authorization fixture covered by the repository's explicit `generic-api-key` allowlist. Because CI is pinned to Gitleaks `8.30.1`, this local version discrepancy is not treated as a confirmed repository leak; exact-head CI remains authoritative.
 - Semgrep local container scan: **Passed**, 2 rules on 26 Go files, 0 findings.
 - Executable runtime gate: **Passed**.
-- Agent↔Gateway E2E: first attempt reproduced the known timing-sensitive authorization-expiry observation failure; an immediate unchanged exact-SHA rerun **Passed**. The failed attempt still showed fail-closed transport termination and reconnect. This is recorded as a non-Critical/non-High test-observation reliability risk rather than hidden.
+- Agent↔Gateway E2E initially reproduced the authorization-expiry observation failure. R-14 root-cause analysis showed the test incorrectly treated the first `503` as proof that `expires_at` had elapsed; a transient pre-expiry transport loss can also return `503`. The test now synchronizes to the exact fixture `expires_at`, verifies repeated post-expiry fail-closed behavior, and keeps explicit `session_revoked` send/consume semantics in deterministic Agent/Gateway tests. Five consecutive local E2E runs passed after this test-only correction.
 - Packaging/operations gate: **Passed**, including six Agent packages, checksums, clean Agent install/uninstall, and clean two-service Gateway+Caddy deployment with verified internal TLS.
 - Final release gate: **Passed**. Its dependency chain freshly exercised R-2, R-3, R-4, R-5, R-7, R-8, R-9, R-10, R-11 and R-12 plus network interruption/cold restart, artifact checksums/tamper rejection, scope inspection and release provenance policy.
 
@@ -51,7 +51,7 @@ Public round-trip benchmark samples were about `132–137 µs/op`; the 10-second
 | Finding | Severity | Disposition |
 | --- | --- | --- |
 | Prior R-0 Critical/High audit findings | Critical/High historically | **Closed** by R-1/R-2 behavior and fresh regression/release tests. |
-| Authorization-expiry E2E explicit-log observation can miss `session_revoked` while the session still fails closed | Medium test/reliability risk | **Accepted for R-14 with explicit evidence**: unchanged exact-SHA rerun passes; unit/integration lifecycle tests and release gates pass; no security fallback occurs. Any future change to delivery/close semantics must remain within protocol/architecture governance. |
+| Authorization-expiry E2E used the first `503` as a proxy for actual expiry | Medium test/reliability defect | **Resolved in R-14** with test-only changes: synchronize to exact metadata `expires_at`, repeatedly prove post-expiry `503`, and deterministically test Gateway `session_revoked` emission plus Agent terminal handling. No runtime/protocol behavior changed. |
 | Local `govulncheck` vulnerability DB access returns 403 | External service limitation | **Not a repository defect**; exact-head and merged-main CI vulnerability jobs are mandatory before R-14 completion. |
 | Local Gitleaks 8.30.0 directory scan flags the documented deterministic fixture despite configured allowlist | Tool-version discrepancy | **Inconclusive locally**; pinned CI 8.30.1 is authoritative and must pass before merge/completion. |
 

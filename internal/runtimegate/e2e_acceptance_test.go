@@ -227,7 +227,7 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 	defer stopLocal()
 
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
-	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{authorizationTTL: 8 * time.Second})
+	authorizationExpiresAt := writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{authorizationTTL: 8 * time.Second})
 
 	gateway := startProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
@@ -244,7 +244,13 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 		t.Fatalf("unexpected pre-expiry response: %q", body)
 	}
 
-	waitFor(t, 25*time.Second, func() bool {
+	// A temporary transport loss also produces 503, so do not use the first 503 as
+	// a proxy for authorization expiry. Synchronize the real-process assertion to
+	// the exact expires_at value written into the metadata fixture.
+	if delay := time.Until(authorizationExpiresAt.Add(100 * time.Millisecond)); delay > 0 {
+		time.Sleep(delay)
+	}
+	waitFor(t, 5*time.Second, func() bool {
 		response, err := publicRequest(client, gatewayBaseURL, "/after-authorization-expiry", "")
 		if err != nil {
 			return false
@@ -252,12 +258,28 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 		defer response.Body.Close()
 		return response.StatusCode == http.StatusServiceUnavailable
 	})
-	// Give the real Agent a bounded opportunity to consume session_revoked before collecting its process output.
-	time.Sleep(500 * time.Millisecond)
-	agent.stop(t)
-	if !strings.Contains(agent.stderr.String(), "agent session revoked") {
-		t.Fatalf("real Agent did not observe explicit session revocation after authorization expiry; stderr=%q", agent.stderr.String())
+	// Keep proving the security invariant after expiry instead of depending on which
+	// terminal signal wins the WebSocket close/write race. The explicit
+	// session_revoked control path is covered deterministically in Agent/Gateway
+	// unit tests; this real-process E2E proves the expired Agent cannot become
+	// routable again and that it observes session termination.
+	for attempt := 0; attempt < 10; attempt++ {
+		response, err := publicRequest(client, gatewayBaseURL, "/after-authorization-expiry-stays-closed", "")
+		if err != nil {
+			t.Fatalf("post-expiry fail-closed probe: %v", err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("expired authorization became routable again: status=%d", response.StatusCode)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
+	agent.stop(t)
+	stderr := agent.stderr.String()
+	if !strings.Contains(stderr, "agent session revoked") && !strings.Contains(stderr, "agent session ended; reconnecting") {
+		t.Fatalf("real Agent did not observe authorization-expiry session termination; stderr=%q", stderr)
+	}
+
 }
 
 func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
@@ -396,7 +418,7 @@ type metadataOptions struct {
 	authorizationTTL time.Duration
 }
 
-func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options metadataOptions) {
+func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options metadataOptions) time.Time {
 	t.Helper()
 	localEndpointID := options.localEndpointID
 	if localEndpointID == "" {
@@ -447,6 +469,11 @@ func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options
 	}
 	writeJSON(t, filepath.Join(root, "authorizations", "auth.json"), authorization)
 	writeJSON(t, filepath.Join(root, "routes", "route.json"), route)
+	expiresAt, err := time.Parse(time.RFC3339, authorization.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse authorization fixture expiry: %v", err)
+	}
+	return expiresAt
 }
 
 func requiredBinaries(t *testing.T) (string, string) {

@@ -268,3 +268,56 @@ func TestAuthorizationRevalidationClassifiesEffectiveRevocation(t *testing.T) {
 		t.Fatalf("revocation reason=%q want=credential_revoked", reasonCode)
 	}
 }
+
+func TestTerminateAuthorizationSendsSessionRevokedBeforeClose(t *testing.T) {
+	limits := DefaultLimits()
+	gateway := &Gateway{limits: limits}
+	written := make(chan []byte, 1)
+	sess := &session{
+		gateway:         gateway,
+		authorizationID: "auth-runtime-001",
+		controlWrites:   make(chan sessionWriteRequest, 1),
+		dataWrites:      make(chan sessionWriteRequest, 1),
+		streams:         make(map[uint32]*stream),
+		done:            make(chan struct{}),
+		writeMessage: func(_ context.Context, frame []byte) error {
+			written <- append([]byte(nil), frame...)
+			return nil
+		},
+	}
+	sess.authorized.Store(true)
+	go sess.writeLoop()
+
+	sess.terminateAuthorization(context.Background(), "expired", errors.New("session authorization expired"))
+
+	if sess.authorized.Load() {
+		t.Fatal("terminated authorization remained authorized")
+	}
+	select {
+	case frameBytes := <-written:
+		frame, err := contractv1.DecodeFrame(frameBytes)
+		if err != nil {
+			t.Fatalf("decode session_revoked frame: %v", err)
+		}
+		if frame.Kind != contractv1.KindControl || frame.StreamID != 0 {
+			t.Fatalf("session_revoked frame scope kind=%v stream=%d", frame.Kind, frame.StreamID)
+		}
+		if err := contractv1.ValidateControlPayload(frame.Payload, frame.StreamID, time.Now().UTC()); err != nil {
+			t.Fatalf("validate session_revoked payload: %v", err)
+		}
+		var revoked contractv1.SessionRevoked
+		if err := json.Unmarshal(frame.Payload, &revoked); err != nil {
+			t.Fatal(err)
+		}
+		if revoked.AuthorizationID != sess.authorizationID || revoked.ReasonCode != "expired" {
+			t.Fatalf("session_revoked=%+v", revoked)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session_revoked control frame was not written")
+	}
+	select {
+	case <-sess.done:
+	default:
+		t.Fatal("session was not closed after session_revoked write")
+	}
+}
