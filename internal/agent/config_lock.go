@@ -30,21 +30,16 @@ func withConfigLock(stateDir string, operation func() error) error {
 			defer os.Remove(lockPath)
 			return operation()
 		}
-		if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("acquire config lock: %w", err)
-		}
 		info, statErr := os.Lstat(lockPath)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				continue
+		if statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return errors.New("config lock path is not a private regular file")
 			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return fmt.Errorf("inspect config lock: %w", statErr)
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("config lock path is not a private regular file")
-		}
 		if time.Now().After(deadline) {
-			return errors.New("timed out waiting for config lock")
+			return fmt.Errorf("timed out waiting for config lock after create error: %w", err)
 		}
 		time.Sleep(configLockPoll)
 	}
