@@ -33,6 +33,51 @@ while (($#)); do
   esac
 done
 
+guard_purge_state() {
+  local candidate="$1"
+  if [[ -z "$candidate" || "$candidate" != /* ]]; then
+    echo "refusing unsafe Agent state purge path: $candidate" >&2
+    exit 2
+  fi
+  if [[ "$candidate" == *"/../"* || "$candidate" == */.. || "$candidate" == ../* ]]; then
+    echo "refusing Agent state purge path containing parent traversal: $candidate" >&2
+    exit 2
+  fi
+  local trimmed="${candidate%/}"
+  if [[ -z "$trimmed" || "$trimmed" == "/" || "$trimmed" == "${HOME%/}" ]]; then
+    echo "refusing unsafe Agent state purge path: $candidate" >&2
+    exit 2
+  fi
+  local relative="${trimmed#/}"
+  if [[ "$relative" != */* ]]; then
+    echo "refusing shallow Agent state purge path: $candidate" >&2
+    exit 2
+  fi
+  if [[ -L "$candidate" ]]; then
+    echo "refusing symlink Agent state purge path: $candidate" >&2
+    exit 2
+  fi
+  if [[ -e "$candidate" ]]; then
+    local resolved
+    resolved="$(cd "$candidate" && pwd -P)"
+    if [[ "$resolved" == "/" || "$resolved" == "$HOME" ]]; then
+      echo "refusing resolved unsafe Agent state purge path: $resolved" >&2
+      exit 2
+    fi
+    if find "$candidate" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      local marker="$candidate/.hooshix-agent-state"
+      if [[ ! -f "$marker" || -L "$marker" ]] || [[ "$(cat "$marker")" != "hooshix-agent-state-v1" ]]; then
+        echo "refusing to purge unowned non-empty Agent state directory without a valid real marker: $candidate" >&2
+        exit 2
+      fi
+    fi
+  fi
+}
+
+if [[ "$purge_state" == true ]]; then
+  guard_purge_state "$state_dir"
+fi
+
 if [[ "$no_service" != true ]]; then
   case "$os_name" in
     linux)

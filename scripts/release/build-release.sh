@@ -20,8 +20,57 @@ if ! command -v zip >/dev/null 2>&1; then
   exit 1
 fi
 
+guard_release_output() {
+  local candidate="$1"
+  if [[ -z "$candidate" || "$candidate" != /* ]]; then
+    echo "refusing unsafe release output directory: $candidate" >&2
+    exit 2
+  fi
+  if [[ "$candidate" == *"/../"* || "$candidate" == */.. || "$candidate" == ../* ]]; then
+    echo "refusing release output directory containing parent traversal: $candidate" >&2
+    exit 2
+  fi
+  local trimmed="${candidate%/}"
+  if [[ -z "$trimmed" || "$trimmed" == "/" || "$trimmed" == "${HOME%/}" || "$trimmed" == "${repo_root%/}" ]]; then
+    echo "refusing unsafe release output directory: $candidate" >&2
+    exit 2
+  fi
+  local relative="${trimmed#/}"
+  if [[ "$relative" != */* ]]; then
+    echo "refusing shallow release output directory: $candidate" >&2
+    exit 2
+  fi
+  if [[ -L "$candidate" ]]; then
+    echo "refusing symlink release output directory: $candidate" >&2
+    exit 2
+  fi
+  case "$repo_root/" in
+    "$trimmed/"*)
+      echo "refusing release output directory that is an ancestor of the repository: $candidate" >&2
+      exit 2
+      ;;
+  esac
+  if [[ -d "$candidate" ]]; then
+    local resolved
+    resolved="$(cd "$candidate" && pwd -P)"
+    if [[ "$resolved" == "/" || "$resolved" == "$HOME" || "$resolved" == "$repo_root" ]]; then
+      echo "refusing resolved unsafe release output directory: $resolved" >&2
+      exit 2
+    fi
+    if find "$candidate" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      if [[ ! -f "$candidate/.hooshix-release-output" || -L "$candidate/.hooshix-release-output" ]] || [[ "$(cat "$candidate/.hooshix-release-output")" != "hooshix-release-output-v1" ]]; then
+        echo "refusing to delete unowned non-empty release output directory: $candidate" >&2
+        exit 2
+      fi
+    fi
+  fi
+}
+
+guard_release_output "$out_dir"
+
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
+printf '%s\n' 'hooshix-release-output-v1' >"$out_dir/.hooshix-release-output"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
@@ -74,7 +123,7 @@ tar --sort=name --mtime='UTC 2000-01-01' --owner=0 --group=0 --numeric-owner -C 
 
 (
   cd "$out_dir"
-  find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+  find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name .hooshix-release-output -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
 )
 
 echo "Release packages built in $out_dir"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -64,8 +65,16 @@ func ConfigPath(stateDir string) string {
 }
 
 func LoadConfig(stateDir string) (Config, error) {
+	normalized, err := NormalizeStateDir(stateDir)
+	if err != nil {
+		return Config{}, err
+	}
+	return loadConfigUnlocked(normalized)
+}
+
+func loadConfigUnlocked(stateDir string) (Config, error) {
 	path := ConfigPath(stateDir)
-	data, err := os.ReadFile(path)
+	data, err := readStateFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return DefaultConfig(), nil
@@ -78,6 +87,13 @@ func LoadConfig(stateDir string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Config{}, errors.New("decode config: trailing JSON value")
+		}
+		return Config{}, fmt.Errorf("decode config trailing data: %w", err)
+	}
 	if config.Version != configVersion {
 		return Config{}, fmt.Errorf("unsupported config version: %d", config.Version)
 	}
@@ -88,6 +104,33 @@ func LoadConfig(stateDir string) (Config, error) {
 }
 
 func SaveConfig(stateDir string, config Config) error {
+	normalized, err := NormalizeStateDir(stateDir)
+	if err != nil {
+		return err
+	}
+	return withConfigLock(normalized, func() error {
+		return saveConfigUnlocked(normalized, config)
+	})
+}
+
+func MutateConfig(stateDir string, mutate func(*Config) error) error {
+	normalized, err := NormalizeStateDir(stateDir)
+	if err != nil {
+		return err
+	}
+	return withConfigLock(normalized, func() error {
+		config, err := loadConfigUnlocked(normalized)
+		if err != nil {
+			return err
+		}
+		if err := mutate(&config); err != nil {
+			return err
+		}
+		return saveConfigUnlocked(normalized, config)
+	})
+}
+
+func saveConfigUnlocked(stateDir string, config Config) error {
 	config.Version = configVersion
 	if config.UpdateChannel == "" {
 		config.UpdateChannel = "stable"
@@ -187,11 +230,43 @@ func (config *Config) RemoveEndpoint(id string) bool {
 
 func NormalizeStateDir(stateDir string) (string, error) {
 	if strings.TrimSpace(stateDir) == "" {
-		return DefaultStateDir()
+		defaultDir, err := DefaultStateDir()
+		if err != nil {
+			return "", err
+		}
+		stateDir = defaultDir
 	}
 	absolute, err := filepath.Abs(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve state directory: %w", err)
 	}
+	absolute = filepath.Clean(absolute)
+	volumeRoot := filepath.Clean(filepath.VolumeName(absolute) + string(os.PathSeparator))
+	if absolute == volumeRoot {
+		return "", errors.New("state directory must not be a filesystem root")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		homeAbs, absErr := filepath.Abs(home)
+		if absErr == nil && samePath(absolute, filepath.Clean(homeAbs)) {
+			return "", errors.New("state directory must not be the user home directory")
+		}
+	}
+	if info, err := os.Lstat(absolute); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("state directory must not be a symlink")
+		}
+		if !info.IsDir() {
+			return "", errors.New("state directory path is not a directory")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect state directory: %w", err)
+	}
 	return absolute, nil
+}
+
+func samePath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }

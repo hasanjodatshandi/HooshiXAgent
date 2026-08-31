@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 type SecretState struct {
@@ -21,13 +23,17 @@ type SecretStore interface {
 }
 
 func LoadOrCreateIdentity(store SecretStore) (ed25519.PublicKey, ed25519.PrivateKey, error) {
+	return loadOrCreateIdentity(store, rand.Reader)
+}
+
+func loadOrCreateIdentity(store SecretStore, entropy io.Reader) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	state, err := store.Load()
 	if err != nil {
 		return nil, nil, err
 	}
 	if state.Seed == "" {
 		seed := make([]byte, ed25519.SeedSize)
-		if _, err := rand.Read(seed); err != nil {
+		if _, err := io.ReadFull(entropy, seed); err != nil {
 			return nil, nil, fmt.Errorf("generate Ed25519 seed: %w", err)
 		}
 		state.Seed = base64.RawURLEncoding.EncodeToString(seed)
@@ -80,9 +86,18 @@ func decodeSecretState(data []byte) (SecretState, error) {
 	if len(data) == 0 {
 		return SecretState{}, nil
 	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var state SecretState
-	if err := json.Unmarshal(data, &state); err != nil {
+	if err := decoder.Decode(&state); err != nil {
 		return SecretState{}, fmt.Errorf("decode secret state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return SecretState{}, errors.New("decode secret state: trailing JSON value")
+		}
+		return SecretState{}, fmt.Errorf("decode secret state trailing data: %w", err)
 	}
 	return state, nil
 }

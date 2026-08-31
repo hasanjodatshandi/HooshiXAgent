@@ -44,6 +44,9 @@ bash scripts/ci/metadata-scalability.sh
 # R-8 observability/writer gate proves bounded telemetry and control-priority single-writer scheduling.
 bash scripts/ci/observability-writer.sh
 
+# R-9 Agent state/installer gate proves strict state parsing, locking and destructive-path safety.
+bash scripts/ci/agent-state-installer.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
@@ -114,6 +117,7 @@ release_attestation_workflow=Passed
 supply_chain_gate=required-by-needs
 metadata_scalability_gate=Passed
 observability_writer_gate=Passed
+agent_state_installer_gate=Passed
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF

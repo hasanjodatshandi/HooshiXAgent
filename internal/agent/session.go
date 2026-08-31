@@ -650,8 +650,12 @@ func writeInitialControl(ctx context.Context, conn *websocket.Conn, sequence uin
 }
 
 func randomNonce() (string, error) {
+	return randomNonceFrom(rand.Reader)
+}
+
+func randomNonceFrom(entropy io.Reader) (string, error) {
 	data := make([]byte, 32)
-	if _, err := rand.Read(data); err != nil {
+	if _, err := io.ReadFull(entropy, data); err != nil {
 		return "", fmt.Errorf("generate client nonce: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(data), nil

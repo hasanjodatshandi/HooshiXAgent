@@ -71,16 +71,23 @@ func commandInit(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	config, err := LoadConfig(dir)
-	if err != nil {
-		return err
-	}
-	if err := SaveConfig(dir, config); err != nil {
-		return err
-	}
 	store := NewPlatformSecretStore(dir)
-	publicKey, _, err := LoadOrCreateIdentity(store)
-	if err != nil {
+	var publicKey []byte
+	if err := withConfigLock(dir, func() error {
+		config, err := loadConfigUnlocked(dir)
+		if err != nil {
+			return err
+		}
+		if err := saveConfigUnlocked(dir, config); err != nil {
+			return err
+		}
+		key, _, err := LoadOrCreateIdentity(store)
+		if err != nil {
+			return err
+		}
+		publicKey = append(publicKey[:0], key...)
+		return nil
+	}); err != nil {
 		return err
 	}
 	result := map[string]any{"state_dir": dir, "public_key": PublicKeyBase64(publicKey), "secret_store": store.Kind()}
@@ -127,27 +134,34 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	config, err := LoadConfig(dir)
-	if err != nil {
-		return err
-	}
-	config.GatewayURL = *gatewayURL
-	config.CAFile = *caFile
-	config.DeviceID = *deviceID
-	config.AuthorizationID = *authorizationID
-	config.TokenID = *tokenID
-	config.UpdateChannel = *channel
-	if err := config.ValidateRuntime(); err != nil {
-		return err
-	}
-	if err := SaveConfig(dir, config); err != nil {
-		return err
-	}
 	store := NewPlatformSecretStore(dir)
-	if _, _, err := LoadOrCreateIdentity(store); err != nil {
-		return err
-	}
-	if err := SetSessionToken(store, token); err != nil {
+	var config Config
+	if err := withConfigLock(dir, func() error {
+		current, err := loadConfigUnlocked(dir)
+		if err != nil {
+			return err
+		}
+		current.GatewayURL = *gatewayURL
+		current.CAFile = *caFile
+		current.DeviceID = *deviceID
+		current.AuthorizationID = *authorizationID
+		current.TokenID = *tokenID
+		current.UpdateChannel = *channel
+		if err := current.ValidateRuntime(); err != nil {
+			return err
+		}
+		if _, _, err := LoadOrCreateIdentity(store); err != nil {
+			return err
+		}
+		if err := saveConfigUnlocked(dir, current); err != nil {
+			return err
+		}
+		if err := SetSessionToken(store, token); err != nil {
+			return err
+		}
+		config = current
+		return nil
+	}); err != nil {
 		return err
 	}
 	return printResult(stdout, *jsonOutput, map[string]any{"configured": true, "device_id": config.DeviceID}, "configured device=%s\n", config.DeviceID)
@@ -177,12 +191,10 @@ func commandExpose(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		config, err := LoadConfig(dir)
-		if err != nil {
-			return err
-		}
-		config.SetEndpoint(Endpoint{ID: *id, Target: *target})
-		if err := SaveConfig(dir, config); err != nil {
+		if err := MutateConfig(dir, func(config *Config) error {
+			config.SetEndpoint(Endpoint{ID: *id, Target: *target})
+			return nil
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "exposed %s -> %s\n", *id, *target)
@@ -199,14 +211,12 @@ func commandExpose(args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		config, err := LoadConfig(dir)
-		if err != nil {
-			return err
-		}
-		if !config.RemoveEndpoint(*id) {
-			return errors.New("endpoint not found")
-		}
-		if err := SaveConfig(dir, config); err != nil {
+		if err := MutateConfig(dir, func(config *Config) error {
+			if !config.RemoveEndpoint(*id) {
+				return errors.New("endpoint not found")
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "removed %s\n", *id)
