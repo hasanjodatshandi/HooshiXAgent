@@ -21,8 +21,12 @@ func withConfigLock(stateDir string, operation func() error) error {
 	lockPath := filepath.Join(stateDir, configLockName)
 	deadline := time.Now().Add(configLockWait)
 	for {
-		err := os.Mkdir(lockPath, 0o700)
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
+			if closeErr := lockFile.Close(); closeErr != nil {
+				_ = os.Remove(lockPath)
+				return fmt.Errorf("close config lock: %w", closeErr)
+			}
 			defer os.Remove(lockPath)
 			return operation()
 		}
@@ -36,8 +40,8 @@ func withConfigLock(stateDir string, operation func() error) error {
 			}
 			return fmt.Errorf("inspect config lock: %w", statErr)
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return errors.New("config lock path is not a private directory")
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("config lock path is not a private regular file")
 		}
 		if time.Now().After(deadline) {
 			return errors.New("timed out waiting for config lock")

@@ -57,7 +57,6 @@ func TestLoadConfigRejectsTrailingJSONData(t *testing.T) {
 	}
 }
 
-
 func TestConfigFileSymlinkRejected(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation is not guaranteed on Windows CI")
@@ -200,7 +199,7 @@ func TestConfigLockRejectsUnsafeLockObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	lockPath := filepath.Join(dir, configLockName)
-	if err := os.WriteFile(lockPath, []byte("not-a-directory"), 0o600); err != nil {
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := MutateConfig(dir, func(*Config) error { return nil }); err == nil || !strings.Contains(err.Error(), "config lock path") {
