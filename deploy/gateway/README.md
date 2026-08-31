@@ -92,11 +92,11 @@ The metrics intentionally contain only aggregate session/stream/handshake/resour
 
 The Compose profile keeps the Gateway at `mem_limit: 256m` while the application-owned payload budgets are explicitly capped at 32 MiB of queued Agent→Gateway data plus a 32 MiB global public-ingress streaming-chunk budget. Public requests are not retained in full: the ingress budget is held only for bounded chunks while they are synchronously forwarded. These budgets are not preallocated; together they cap the explicit application payload reservations at 64 MiB and leave the remaining container memory for Go/runtime, WebSocket/TLS, metadata, stacks and ordinary request overhead. Each stream may queue at most 2 MiB and each Agent session at most 8 MiB, regardless of the existing frame-count/stream-count ceilings.
 
-The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims; R-12 owns evidence-based production capacity tuning.
+The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims. R-12 measured synthetic 100/500/1000 scenarios and retained the shipped defaults; any larger production envelope requires representative capacity evidence.
 
 ### R-10 container runtime envelope
 
-Both Gateway and Caddy now have explicit 256 MiB memory, 1 CPU and 256-PID safety ceilings. These are fail-safe deployment ceilings, not throughput claims or R-12 capacity results. Both root filesystems are read-only, `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs, `no-new-privileges` is mandatory, host PID/IPC/network namespaces and device passthrough are not used, and all ambient Linux capabilities are dropped.
+Both Gateway and Caddy have explicit 256 MiB memory, 1 CPU and 256-PID safety ceilings. These are fail-safe deployment ceilings, not throughput claims; R-12 synthetic results do not override this deployment envelope. Both root filesystems are read-only, `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs, `no-new-privileges` is mandatory, host PID/IPC/network namespaces and device passthrough are not used, and all ambient Linux capabilities are dropped.
 
 Gateway continues as UID/GID `10001:10001` with **no** added capability. Caddy also runs as UID/GID `10001:10001`; its sole added capability is `NET_BIND_SERVICE`, required to own public ports 80/443. Caddy's persistent `/data` and `/config` named volumes are its only writable persistent mounts.
 
@@ -115,7 +115,7 @@ For a source checkout deployment:
 5. run `./diagnose.sh`;
 6. if health/diagnostics fail, checkout the previous attested release and repeat build/up.
 
-Final destructive/network interruption rollback acceptance remains AG-8. AG-7 verifies the clean deployment and deterministic previous-version rollback procedure without claiming final release readiness.
+Clean deployment and deterministic previous-version rollback are verified by the packaging gate. AG-8 additionally verifies forced transport interruption/recovery, package rollback, release checksums and deliberate artifact-tamper rejection before a release-ready claim.
 
 ## TLS/certificate operations
 

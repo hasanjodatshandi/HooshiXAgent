@@ -13,7 +13,7 @@ HooshiXAgent runtime code may receive validated copies of four contract record t
 3. `revocation-signal` — disables/revokes an authorization, route assignment, or device;
 4. `gateway-status-signal` — bounded operational/traffic status emitted from the Gateway toward the external system.
 
-The concrete transport used to exchange these records is deliberately **not** defined in AG-3. A later runtime leaf may implement an adapter, but the adapter must consume these shapes rather than directly coupling the Gateway to a Control Panel database.
+The durable/live Control Panel transport used to exchange these records is deliberately outside this contract. The current Gateway implementation consumes these shapes through a read-only filesystem snapshot adapter; any future external transport adapter must preserve the same versioned records and must not couple the Gateway directly to a Control Panel database.
 
 ## 2. Device session authorization
 
@@ -48,7 +48,7 @@ The Gateway uses the assignment only for active runtime routing. It does not bec
 
 ## 4. Revocation
 
-Revocation signals identify the externally authoritative subject and effective time. A later Gateway runtime implementation must stop relying on revoked authorization/routing state according to its bounded shutdown/session lifecycle.
+Revocation signals identify the externally authoritative subject and effective time. The current Gateway indexes revocations and stops relying on effectively revoked authorization/routing state according to its bounded session/request lifecycle.
 
 Revocation is not implemented as local Control Panel CRUD or persistence.
 

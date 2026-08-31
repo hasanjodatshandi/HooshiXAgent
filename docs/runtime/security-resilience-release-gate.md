@@ -16,6 +16,7 @@ The final CI job `AG-8 final security / resilience / release gate` uses explicit
 - all three Agent platform jobs;
 - architecture fitness;
 - Gitleaks/Semgrep;
+- R-3 resource/DoS through R-12 performance/capacity focused gates;
 - real Agent↔Gateway E2E acceptance;
 - packaging/clean deployment/rollback;
 - executable runtime gate.
@@ -113,7 +114,7 @@ The final CI job uploads a small `AG8-EVIDENCE.txt` artifact tied to the Git com
 
 ## Completion boundary
 
-AG-8 completes this Durable Plan only when:
+The AG-8 release-acceptance leaf is considered complete only when:
 
 1. PR CI is fully green including the final dependency-chained release gate;
 2. the PR is merged to `main`;
