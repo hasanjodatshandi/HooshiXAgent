@@ -50,6 +50,9 @@ bash scripts/ci/agent-state-installer.sh
 # R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
 bash scripts/ci/infrastructure-runtime.sh
 
+# R-11 comprehensive test gate proves fuzz/scenario/race coverage without capacity claims.
+bash scripts/ci/comprehensive-tests.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
@@ -122,6 +125,7 @@ metadata_scalability_gate=Passed
 observability_writer_gate=Passed
 agent_state_installer_gate=Passed
 infrastructure_runtime_gate=Passed
+comprehensive_test_expansion_gate=Passed
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF

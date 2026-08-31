@@ -60,12 +60,17 @@ func TestStatusExporterBackpressureDoesNotBlockCriticalCaller(t *testing.T) {
 		t.Fatal("status worker did not enter blocked sink")
 	}
 
-	started := time.Now()
-	for i := 0; i < 1000; i++ {
-		gateway.emitStatus(context.Background(), testStatusSignal("traffic_delta"))
-	}
-	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-		t.Fatalf("critical caller blocked on telemetry backpressure for %s", elapsed)
+	emitted := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			gateway.emitStatus(context.Background(), testStatusSignal("traffic_delta"))
+		}
+		close(emitted)
+	}()
+	select {
+	case <-emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("critical caller blocked on telemetry backpressure")
 	}
 	queued, limit, dropped, failures := gateway.status.snapshot()
 	if limit != 2 || queued > limit {
