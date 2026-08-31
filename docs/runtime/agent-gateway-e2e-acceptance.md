@@ -1,6 +1,6 @@
 # Agent↔Gateway End-to-End Tunnel Acceptance — AG-6
 
-**Status:** Current integrated acceptance contract (origin AG-6; reconciled through R-13)
+**Status:** Current integrated acceptance contract (origin AG-6; lifecycle acceptance strengthened by RA-1)
 
 AG-6 does not add Control Panel business logic, packaging, deployment, installers, update delivery or release hardening. It proves the integrated behavior of the already-implemented Edge Agent, Tunnel Gateway and AG-3 external contract boundary.
 
@@ -41,7 +41,7 @@ The acceptance gate proves all of the following:
 5. a request for `demo.hooshix.test` reaches the configured approved loopback service;
 6. the local service response is returned through Agent → Gateway → public HTTPS client;
 7. an unknown public hostname returns `404`;
-8. after a Gateway process restart, the still-running Agent reconnects automatically and the same route works again;
+8. after an interrupt, the Gateway performs its bounded graceful drain and exits cleanly within the harness deadline; after the Gateway process is restarted, the still-running Agent reconnects automatically and the same route works again;
 9. after an Agent process restart using the same state directory, the persisted identity is unchanged and the route works again;
 10. stopping the Agent makes the route unavailable with `503` until it reconnects.
 

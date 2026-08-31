@@ -91,11 +91,13 @@ The Gateway:
 4. sends a fresh challenge/session ID;
 5. verifies the Ed25519 challenge signature with the externally supplied device public key;
 6. registers one current in-memory session per device;
-7. replaces stale session state on a successfully authenticated reconnect;
+7. atomically installs the successfully authenticated reconnect as the current device session, releases the global session-registry lock, and only then closes the replaced WebSocket so a slow close handshake cannot stall unrelated session lookup/registration;
 8. arms a local deadline for the establishing authorization `expires_at`, immediately removes an expired/invalid session from routing, and independently revalidates authorization freshness/revocation on each bounded heartbeat;
 9. enforces protocol sequence replay/order checks, heartbeat and resource bounds.
 
 Invalid TLS, token, signature, authorization freshness, protocol framing, replay/order, stream state or resource usage fails closed. Expired or effectively revoked session authorization is signaled with `session_revoked` before closure when the reason is authoritative; transient/unclassified metadata failures close the session without falsely asserting permanent revocation, allowing the Agent reconnect policy to retry safely.
+
+Gateway security-sensitive IDs/nonces are generated from an injected `io.Reader` whose production source is `crypto/rand.Reader`. Entropy failure returns a normal fail-closed operation error: authentication cannot complete without a fresh session ID/nonce, stream creation cannot complete without a request ID, and heartbeat entropy failure terminates that session. There is no weak-random fallback and no process-wide panic. Status telemetry ID generation failure drops only that telemetry signal and is logged because telemetry is not authentication/routing authority.
 
 ## Public ingress and multiplexing
 
@@ -122,6 +124,12 @@ The executable emits versioned JSON-lines `GatewayStatusSignal` records to stdou
 
 The Gateway-specific runtime check remains in place. Integrated real Agent↔Gateway acceptance, including restart/reconnect behavior, is defined separately in `docs/runtime/agent-gateway-e2e-acceptance.md`; release-level interruption/recovery acceptance is in `docs/runtime/security-resilience-release-gate.md`.
 
+
+## RA-1 Gateway drain and process shutdown
+
+On `SIGINT`/`SIGTERM`, the Gateway enters draining state before HTTP server shutdown. Draining makes `/readyz` fail with `503` and rejects new Agent handshakes and new public ingress with `503`, while `/healthz` continues to represent process liveness. The HTTP server is then given the existing bounded `shutdown timeout` to finish ordinary in-flight HTTP requests. Because Go HTTP shutdown does not own upgraded WebSocket connections, the Gateway separately snapshots and removes current Agent sessions from routing and concurrently sends WebSocket `GoingAway` closes outside the global session-registry lock. If graceful WebSocket close does not finish before the same shutdown context expires, the remaining connections are force-closed. Active stream waiters are failed with a shutdown error before session close. No shutdown timeout/default capacity value is increased by RA-1.
+
+The real Agent-to-Gateway E2E restart check now requires the Gateway process to exit cleanly after its interrupt within the harness deadline; the test no longer silently treats a forced kill as successful graceful shutdown. The already-running Agent must then reconnect to the restarted Gateway and restore the route.
 
 ## AG-7 deployment and operations
 

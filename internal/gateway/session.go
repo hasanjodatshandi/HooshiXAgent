@@ -36,7 +36,11 @@ type session struct {
 	queueBudget                *byteBudget
 	nextID                     uint32
 	done                       chan struct{}
+	doneOnce                   sync.Once
 	closeOnce                  sync.Once
+	forceCloseOnce             sync.Once
+	closeConn                  func(websocket.StatusCode, string) error
+	closeNowConn               func() error
 	authorizationTerminateOnce sync.Once
 }
 
@@ -60,6 +64,8 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	sess.writeMessage = func(ctx context.Context, frame []byte) error {
 		return conn.Write(ctx, websocket.MessageBinary, frame)
 	}
+	sess.closeConn = conn.Close
+	sess.closeNowConn = conn.CloseNow
 	sess.outbound.Store(lastOutbound)
 	sess.lastSeen.Store(time.Now().UnixNano())
 	sess.authorized.Store(true)
@@ -130,14 +136,20 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 				sess.close(websocket.StatusPolicyViolation, "idle timeout")
 				return
 			}
+			pingID, err := sess.gateway.newID("ping")
+			if err != nil {
+				sess.failAll(err)
+				sess.close(websocket.StatusInternalError, "heartbeat entropy unavailable")
+				return
+			}
 			ping := contractv1.Heartbeat{
 				ContractVersion: contractv1.ProtocolVersion,
 				MessageType:     "ping",
-				PingID:          newID("ping"),
+				PingID:          pingID,
 				SentAt:          time.Now().UTC().Format(time.RFC3339),
 			}
 			pingCtx, cancel := context.WithTimeout(ctx, sess.gateway.limits.WriteTimeout)
-			err := sess.sendControl(pingCtx, 0, ping)
+			err = sess.sendControl(pingCtx, 0, ping)
 			cancel()
 			if err != nil {
 				sess.failAll(err)
@@ -276,6 +288,10 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 }
 
 func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRouteAssignment) (*stream, error) {
+	requestID, err := sess.gateway.newID("request")
+	if err != nil {
+		return nil, fmt.Errorf("generate request ID: %w", err)
+	}
 	sess.mu.Lock()
 	if len(sess.streams) >= sess.gateway.limits.MaxStreamsPerSession {
 		sess.mu.Unlock()
@@ -304,7 +320,7 @@ func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRo
 		EndpointID:      route.EndpointID,
 		AssignmentID:    route.AssignmentID,
 		LocalEndpointID: route.LocalEndpointID,
-		RequestID:       newID("request"),
+		RequestID:       requestID,
 	}
 	if err := sess.sendControl(ctx, streamID, message); err != nil {
 		sess.finishStream(streamID, err)
@@ -486,11 +502,24 @@ func (sess *session) writeQueued(request sessionWriteRequest) {
 	request.result <- nil
 }
 
+func (sess *session) signalClosed() {
+	sess.doneOnce.Do(func() { close(sess.done) })
+}
+
 func (sess *session) close(status websocket.StatusCode, reason string) {
+	sess.signalClosed()
 	sess.closeOnce.Do(func() {
-		close(sess.done)
-		if sess.conn != nil {
-			_ = sess.conn.Close(status, reason)
+		if sess.closeConn != nil {
+			_ = sess.closeConn(status, reason)
+		}
+	})
+}
+
+func (sess *session) forceClose() {
+	sess.signalClosed()
+	sess.forceCloseOnce.Do(func() {
+		if sess.closeNowConn != nil {
+			_ = sess.closeNowConn()
 		}
 	})
 }

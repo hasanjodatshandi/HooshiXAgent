@@ -80,8 +80,9 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 		t.Fatalf("unknown host status=%d want=%d", unknownHostResponse.StatusCode, http.StatusNotFound)
 	}
 
-	// Gateway restart: keep the real Agent process running and prove its reconnect loop restores the route.
-	gateway.stop(t)
+	// Gateway restart: keep the real Agent process running, require a bounded graceful SIGINT drain,
+	// and prove the Agent reconnect loop restores the route without being restarted.
+	gateway.stopGracefully(t, 3*time.Second)
 	waitFor(t, 3*time.Second, func() bool {
 		_, err := client.Get(gatewayBaseURL + "/healthz")
 		return err != nil

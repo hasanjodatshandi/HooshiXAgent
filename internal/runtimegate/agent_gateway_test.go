@@ -210,6 +210,28 @@ func startProcess(t *testing.T, binary string, args ...string) *process {
 	return process
 }
 
+func (process *process) stopGracefully(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	if process == nil || process.cmd == nil || process.cmd.Process == nil || process.cmd.ProcessState != nil {
+		return
+	}
+	if err := process.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("signal process for graceful shutdown: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("process did not exit cleanly after interrupt: %v\nstderr=%s", err, process.stderr.String())
+		}
+	case <-time.After(timeout):
+		_ = process.cmd.Process.Kill()
+		<-done
+		t.Fatalf("process exceeded graceful shutdown deadline %s\nstderr=%s", timeout, process.stderr.String())
+	}
+}
+
 func (process *process) stop(t *testing.T) {
 	t.Helper()
 	if process == nil || process.cmd == nil || process.cmd.Process == nil || process.cmd.ProcessState != nil {
