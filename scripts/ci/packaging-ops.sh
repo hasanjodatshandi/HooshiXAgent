@@ -15,7 +15,7 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-if grep -n 'tls_insecure_skip_verify' deploy/gateway/Caddyfile deploy/gateway/docker-compose.yml; then
+if grep -n 'tls_insecure_skip_verify' deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static deploy/gateway/docker-compose.yml; then
   echo "insecure Caddy upstream TLS configuration is forbidden" >&2
   exit 1
 fi
@@ -23,15 +23,17 @@ if grep -R -n -E '(control[-_ ]?panel|postgres|mysql|mariadb|redis|kubernetes)' 
   echo "Gateway deployment bundle contains an out-of-scope service/infrastructure reference" >&2
   exit 1
 fi
-if ! grep -q 'header_up Host {host}' deploy/gateway/Caddyfile; then
-  echo "Caddy must preserve the original public Host for Gateway route lookup" >&2
-  exit 1
-fi
-if ! grep -q 'tls_trust_pool file /etc/caddy/gateway-ca.pem' deploy/gateway/Caddyfile || \
-   ! grep -q 'tls_server_name gateway' deploy/gateway/Caddyfile; then
-  echo "Caddy→Gateway certificate verification configuration is incomplete" >&2
-  exit 1
-fi
+for caddy_config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
+  if ! grep -q 'header_up Host {host}' "$caddy_config"; then
+    echo "Caddy must preserve the original public Host for Gateway route lookup: $caddy_config" >&2
+    exit 1
+  fi
+  if ! grep -q 'tls_trust_pool file /etc/caddy/gateway-ca.pem' "$caddy_config" || \
+     ! grep -q 'tls_server_name gateway' "$caddy_config"; then
+    echo "Caddy→Gateway certificate verification configuration is incomplete: $caddy_config" >&2
+    exit 1
+  fi
+done
 
 work="$(mktemp -d)"
 compose_started=false
@@ -43,6 +45,7 @@ cleanup() {
       HOOSHIX_HTTP_PORT=18080 \
       HOOSHIX_HTTPS_PORT=18443 \
       HOOSHIX_METADATA_MODE=static \
+      HOOSHIX_CADDYFILE=./Caddyfile.static \
       HOOSHIX_METADATA_DIR="$work/gateway/deploy/gateway/runtime/metadata" \
       HOOSHIX_TLS_DIR="$work/gateway/deploy/gateway/runtime/tls" \
         docker compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -86,13 +89,13 @@ chmod 755 bootstrap-internal-tls.sh diagnose.sh
 HOOSHIX_TLS_DIR="$PWD/runtime/tls" HOOSHIX_METADATA_DIR="$PWD/runtime/metadata" ./bootstrap-internal-tls.sh
 [[ -f runtime/tls/ca.key && -f runtime/tls/ca.crt && -f runtime/tls/gateway.crt && -f runtime/tls/gateway.key ]]
 
-services="$({ HOOSHIX_PUBLIC_HOST=localhost docker compose config --services; } | LC_ALL=C sort)"
+services="$({ HOOSHIX_PUBLIC_HOST=localhost HOOSHIX_CADDYFILE=./Caddyfile.static docker compose config --services; } | LC_ALL=C sort)"
 if [[ "$services" != $'caddy\ngateway' ]]; then
   echo "unexpected Compose services:" >&2
   printf '%s\n' "$services" >&2
   exit 1
 fi
-compose_rendered="$(HOOSHIX_PUBLIC_HOST=localhost docker compose config)"
+compose_rendered="$(HOOSHIX_PUBLIC_HOST=localhost HOOSHIX_CADDYFILE=./Caddyfile.static docker compose config)"
 if grep -qiE '(control[-_ ]?panel|postgres|mysql|mariadb|redis|kubernetes)' <<<"$compose_rendered"; then
   echo "rendered Compose unexpectedly contains out-of-scope services" >&2
   exit 1
@@ -106,6 +109,7 @@ HOOSHIX_PUBLIC_HOST=localhost \
 HOOSHIX_HTTP_PORT=18080 \
 HOOSHIX_HTTPS_PORT=18443 \
 HOOSHIX_METADATA_MODE=static \
+HOOSHIX_CADDYFILE=./Caddyfile.static \
 HOOSHIX_METADATA_DIR="$PWD/runtime/metadata" \
 HOOSHIX_TLS_DIR="$PWD/runtime/tls" \
   docker compose up -d --build

@@ -18,6 +18,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | Real Agent↔Gateway integration | `scripts/ci/e2e-acceptance.sh` | Agent↔Gateway E2E acceptance | Yes |
 | Cross-platform Agent/package behavior | platform tests/package smoke | Ubuntu/Windows/macOS Agent platform jobs | Yes |
 | Packaging/Compose deployment | `scripts/ci/packaging-ops.sh` | Packaging / clean deployment / rollback | Yes |
+| Dynamic multi-host public edge | `scripts/ci/multi-host-public-edge.sh` | RA-4 multi-host public edge gate | Yes |
 | Release security/resilience | `scripts/ci/release-gate.sh` | AG-8 final security / resilience / release gate | Yes |
 
 ## Hardening gate chain
@@ -30,6 +31,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | R-6 release / supply-chain gate | exact-commit policy, immutable pins, privilege separation, SBOM/scanning/provenance policy |
 | R-7 metadata scalability / determinism gate | typed/indexed metadata, duplicate rejection, readiness and large-index lookup behavior |
 | RA-3 live metadata lifecycle gate | immutable generations, atomic activation, freshness fail-closed/recovery and existing-session live revocation |
+| RA-4 multi-host public edge gate | restricted On-Demand TLS, simultaneous hostname routing, TLS/route authority separation, unknown-host denial and private operational endpoints |
 | R-8 observability / writer isolation gate | non-blocking bounded telemetry and single-writer control-priority scheduling |
 | R-9 Agent state / installer hardening gate | strict state/config, mutation lock, destructive-path and bootstrap safety |
 | R-10 infrastructure runtime hardening gate | hardened two-service Compose runtime and actual-container acceptance |
@@ -48,6 +50,8 @@ The `AG-8 final security / resilience / release gate` job currently depends on s
 - Gitleaks/Semgrep;
 - R-3 through R-12 focused gates;
 - Agent↔Gateway E2E acceptance;
+- RA-3 live metadata lifecycle acceptance;
+- RA-4 multi-host public-edge acceptance;
 - packaging/clean deployment/rollback;
 - executable runtime gate.
 

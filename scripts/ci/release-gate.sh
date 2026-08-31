@@ -53,6 +53,9 @@ bash scripts/ci/agent-state-installer.sh
 # R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
 bash scripts/ci/infrastructure-runtime.sh
 
+# RA-4 public-edge gate proves restricted dynamic TLS authority and simultaneous multi-host routing through real Caddy.
+bash scripts/ci/multi-host-public-edge.sh
+
 # R-11 comprehensive test gate proves fuzz/scenario/race coverage without capacity claims.
 bash scripts/ci/comprehensive-tests.sh
 
@@ -128,6 +131,8 @@ artifact_scope_secret_content=Passed
 release_attestation_workflow=Passed
 supply_chain_gate=required-by-needs
 metadata_scalability_gate=Passed
+live_metadata_lifecycle_gate=Passed
+multi_host_public_edge_gate=Passed
 observability_writer_gate=Passed
 agent_state_installer_gate=Passed
 infrastructure_runtime_gate=Passed

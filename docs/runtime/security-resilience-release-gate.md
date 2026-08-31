@@ -61,6 +61,10 @@ These tests intentionally use low deterministic limits rather than attempting un
 
 RA-3 adds a blocking real-process gate for the ADR-0012 live external metadata projection. The release chain now requires atomic higher-revision route activation without Gateway restart, fixed freshness expiry that cannot be extended by polling the same revision, fail-closed readiness/new routing during stale authority, recovery on a newer valid generation, and bounded termination of an existing authenticated session after a live effective revocation. The external publisher remains out of repository scope and no Control Panel business/database code is introduced.
 
+### Multi-host public edge
+
+RA-4 adds a blocking real Compose/Caddy acceptance for ADR-0011. The production/default Caddyfile must use restricted On-Demand TLS with an external `ask` permission URL and must fail configuration when that URL is absent rather than falling back to unrestricted issuance. The gate uses a test-only internal issuer and permission mock to avoid public CA traffic while preserving the production authorization structure. It proves two approved hostnames simultaneously reach two distinct Agent-owned local endpoints, a TLS-approved hostname with no Gateway route remains `404`, an unknown hostname cannot complete TLS or appear in certificate storage, public `/readyz` and `/metrics` remain `404`, and both dynamic and static compatibility configurations preserve certificate-verified Caddy→Gateway HTTPS. No Control Panel permission service or domain-ownership business logic is implemented in this repository.
+
 ### Network interruption
 
 A real TCP interruption proxy is inserted on the Agent→Gateway transport path while the Gateway and public ingress remain running. AG-8 proves:

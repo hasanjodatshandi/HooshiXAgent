@@ -15,19 +15,33 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-if grep -n 'tls_insecure_skip_verify' deploy/gateway/Caddyfile deploy/gateway/docker-compose.yml; then
+if grep -n 'tls_insecure_skip_verify' deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static deploy/gateway/docker-compose.yml; then
   echo "insecure Caddy upstream TLS configuration is forbidden" >&2
   exit 1
 fi
-if ! grep -q 'health_uri /readyz' deploy/gateway/Caddyfile; then
-  echo "Caddy upstream active health must use Gateway readiness" >&2
+if ! grep -q 'on_demand_tls {' deploy/gateway/Caddyfile || ! grep -q 'ask {$HOOSHIX_TLS_ASK_URL}' deploy/gateway/Caddyfile || ! grep -q '^[[:space:]]*on_demand$' deploy/gateway/Caddyfile; then
+  echo "production Caddyfile must use restricted On-Demand TLS with the external ask URL" >&2
   exit 1
 fi
-if ! grep -q 'tls_trust_pool file /etc/caddy/gateway-ca.pem' deploy/gateway/Caddyfile || \
-   ! grep -q 'tls_server_name gateway' deploy/gateway/Caddyfile; then
-  echo "Caddy→Gateway verified TLS configuration is incomplete" >&2
+if ! grep -q '^https:// {' deploy/gateway/Caddyfile; then
+  echo "production Caddyfile must use a dynamic HTTPS catch-all site" >&2
   exit 1
 fi
+for caddy_config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
+  if ! grep -q 'health_uri /readyz' "$caddy_config"; then
+    echo "Caddy upstream active health must use Gateway readiness: $caddy_config" >&2
+    exit 1
+  fi
+  if ! grep -q 'header_up Host {host}' "$caddy_config"; then
+    echo "Caddy must preserve public Host for Gateway route lookup: $caddy_config" >&2
+    exit 1
+  fi
+  if ! grep -q 'tls_trust_pool file /etc/caddy/gateway-ca.pem' "$caddy_config" || \
+     ! grep -q 'tls_server_name gateway' "$caddy_config"; then
+    echo "Caddy→Gateway verified TLS configuration is incomplete: $caddy_config" >&2
+    exit 1
+  fi
+done
 if ! grep -q '^USER 10001:10001$' deploy/gateway/Dockerfile; then
   echo "Gateway image must run as the dedicated non-root runtime UID/GID" >&2
   exit 1
