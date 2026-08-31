@@ -66,6 +66,14 @@ Caddy explicitly configures the upstream CA trust pool and TLS server name. `tls
 
 Caddy also preserves the original public `Host` header so Gateway route lookup continues to use the externally assigned public hostname rather than Docker service name.
 
+### R-10 runtime hardening
+
+The two-service Compose topology remains unchanged. Gateway and Caddy run as numeric UID/GID `10001:10001`, with read-only root filesystems, `no-new-privileges`, all capabilities dropped, bounded hardened `/tmp` tmpfs mounts, and explicit 256 MiB memory / 1 CPU / 256 PID ceilings. Gateway adds no capabilities; Caddy adds only `NET_BIND_SERVICE` for public ports 80/443. The Caddy `/data` and `/config` named volumes remain its only writable persistent mounts.
+
+Every host bind is read-only and refuses implicit source creation. The deployment CA private key remains host-only. The Gateway server private key is bind-mounted read-only only into Gateway from the host-private TLS directory; Caddy receives only `ca.crt`. Runtime acceptance inspects the actual containers to reject privilege, capability, namespace, writable-mount or resource-policy drift.
+
+These container limits are safety ceilings, not production capacity claims. Evidence-based throughput/capacity tuning remains R-12 work.
+
 ## Operational signals
 
 The Gateway internal listener exposes:
@@ -82,7 +90,7 @@ hooshix_gateway_active_streams
 hooshix_gateway_pending_handshakes
 ```
 
-Caddy returns `404` for public `/readyz` and `/metrics`; operators use the internal deployment network for diagnostics.
+Caddy returns `404` for public `/readyz` and `/metrics`; operators use the internal deployment network for diagnostics. Gateway's Compose healthcheck and Caddy's active upstream health probe both use `/readyz`, while Caddy's own container healthcheck exercises its local HTTPS edge path.
 
 Gateway logs remain structured JSON on stderr and GatewayStatusSignal records remain JSONL on stdout. Caddy access logs are JSON. Docker log rotation is bounded by file size/count.
 

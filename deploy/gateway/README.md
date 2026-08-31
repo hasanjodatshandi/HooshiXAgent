@@ -94,6 +94,16 @@ The Compose profile keeps the Gateway at `mem_limit: 256m` while the application
 
 The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims; R-12 owns evidence-based production capacity tuning.
 
+### R-10 container runtime envelope
+
+Both Gateway and Caddy now have explicit 256 MiB memory, 1 CPU and 256-PID safety ceilings. These are fail-safe deployment ceilings, not throughput claims or R-12 capacity results. Both root filesystems are read-only, `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs, `no-new-privileges` is mandatory, host PID/IPC/network namespaces and device passthrough are not used, and all ambient Linux capabilities are dropped.
+
+Gateway continues as UID/GID `10001:10001` with **no** added capability. Caddy also runs as UID/GID `10001:10001`; its sole added capability is `NET_BIND_SERVICE`, required to own public ports 80/443. Caddy's persistent `/data` and `/config` named volumes are its only writable persistent mounts.
+
+All host bind mounts are read-only and use `create_host_path: false`, so a missing metadata/TLS/Caddyfile source fails startup instead of being silently created by Compose. The host TLS directory remains mode `0700`; `ca.key` is never mounted. Gateway receives only its server key/certificate plus the CA certificate, and Caddy receives only the public CA certificate.
+
+Gateway's Compose healthcheck uses `/readyz`. Caddy waits for that health state and its active upstream probe also uses `/readyz`, so an alive-but-not-ready Gateway is not considered routable. Caddy has its own local HTTPS healthcheck through the configured public virtual host; `/readyz` and `/metrics` remain blocked on the public edge.
+
 ## Upgrade and rollback
 
 For a source checkout deployment:
