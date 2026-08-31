@@ -87,25 +87,165 @@ func (bucket *tokenBucket) allow(now time.Time) bool {
 	return true
 }
 
+type admissionRejectReason uint8
+
+const (
+	admissionAccepted admissionRejectReason = iota
+	admissionRejectedRate
+	admissionRejectedConcurrency
+)
+
+type keyedAdmissionState struct {
+	inFlight int
+	tokens   float64
+	last     time.Time
+}
+
+type keyedAdmissionLimiter struct {
+	mu               sync.Mutex
+	maxInFlight      int
+	fairMaxInFlight  int
+	rate             float64
+	fairRate         float64
+	burst            float64
+	fairBurst        float64
+	contentionWindow time.Duration
+	alwaysFair       bool
+	states           map[string]*keyedAdmissionState
+	recentKey        string
+	recentAt         time.Time
+	previousKey      string
+	previousAt       time.Time
+	rejected         atomic.Uint64
+}
+
+func fairnessShare(global int) int {
+	if global <= 1 {
+		return global
+	}
+	share := (global * 3) / 4
+	if share >= global {
+		share = global - 1
+	}
+	if share < 1 {
+		share = 1
+	}
+	return share
+}
+
+func newKeyedAdmissionLimiter(maxInFlight, rate, burst int) *keyedAdmissionLimiter {
+	return &keyedAdmissionLimiter{
+		maxInFlight:      maxInFlight,
+		fairMaxInFlight:  fairnessShare(maxInFlight),
+		rate:             float64(rate),
+		fairRate:         float64(fairnessShare(rate)),
+		burst:            float64(burst),
+		fairBurst:        float64(fairnessShare(burst)),
+		contentionWindow: 2 * time.Second,
+		states:           make(map[string]*keyedAdmissionState),
+	}
+}
+
+func newHardKeyedAdmissionLimiter(maxInFlight, rate, burst int) *keyedAdmissionLimiter {
+	limiter := newKeyedAdmissionLimiter(maxInFlight, rate, burst)
+	limiter.alwaysFair = true
+	return limiter
+}
+
+func (limiter *keyedAdmissionLimiter) tryAcquire(key string, now time.Time) admissionRejectReason {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	contended := limiter.alwaysFair || limiter.otherKeyRecentlySeen(key, now)
+	limiter.observeKey(key, now)
+	maxInFlight := limiter.maxInFlight
+	rate := limiter.rate
+	burst := limiter.burst
+	if contended {
+		maxInFlight = limiter.fairMaxInFlight
+		rate = limiter.fairRate
+		burst = limiter.fairBurst
+	}
+
+	state := limiter.states[key]
+	if state == nil {
+		state = &keyedAdmissionState{tokens: limiter.burst, last: now}
+		limiter.states[key] = state
+	}
+	if state.inFlight >= maxInFlight {
+		limiter.rejected.Add(1)
+		return admissionRejectedConcurrency
+	}
+	if now.Before(state.last) {
+		now = state.last
+	}
+	elapsed := now.Sub(state.last).Seconds()
+	state.tokens += elapsed * rate
+	if state.tokens > burst {
+		state.tokens = burst
+	}
+	state.last = now
+	if state.tokens < 1 {
+		limiter.rejected.Add(1)
+		return admissionRejectedRate
+	}
+	state.tokens--
+	state.inFlight++
+	return admissionAccepted
+}
+
+func (limiter *keyedAdmissionLimiter) otherKeyRecentlySeen(key string, now time.Time) bool {
+	cutoff := now.Add(-limiter.contentionWindow)
+	return (limiter.recentKey != "" && limiter.recentKey != key && !limiter.recentAt.Before(cutoff)) ||
+		(limiter.previousKey != "" && limiter.previousKey != key && !limiter.previousAt.Before(cutoff))
+}
+
+func (limiter *keyedAdmissionLimiter) observeKey(key string, now time.Time) {
+	if limiter.recentKey == key {
+		limiter.recentAt = now
+		return
+	}
+	limiter.previousKey = limiter.recentKey
+	limiter.previousAt = limiter.recentAt
+	limiter.recentKey = key
+	limiter.recentAt = now
+}
+
+func (limiter *keyedAdmissionLimiter) release(key string) {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	state := limiter.states[key]
+	if state == nil || state.inFlight <= 0 {
+		panic("gateway keyed admission underflow")
+	}
+	state.inFlight--
+}
+
 type gatewayResources struct {
-	queueBytes       *byteBudget
-	ingressBytes     *byteBudget
-	ingressSlots     chan struct{}
-	handshakeRate    *tokenBucket
-	ingressRate      *tokenBucket
-	queueRejects     atomic.Uint64
-	handshakeRejects atomic.Uint64
-	ingressRejects   atomic.Uint64
-	sessionRejects   atomic.Uint64
+	queueBytes               *byteBudget
+	ingressBytes             *byteBudget
+	ingressSlots             chan struct{}
+	handshakeRate            *tokenBucket
+	ingressRate              *tokenBucket
+	ingressRouteAdmission    *keyedAdmissionLimiter
+	ingressDeviceAdmission   *keyedAdmissionLimiter
+	handshakeDeviceAdmission *keyedAdmissionLimiter
+	queueRejects             atomic.Uint64
+	handshakeRejects         atomic.Uint64
+	ingressRejects           atomic.Uint64
+	sessionRejects           atomic.Uint64
 }
 
 func newGatewayResources(limits Limits) gatewayResources {
 	return gatewayResources{
-		queueBytes:    newByteBudget(limits.MaxGlobalQueueBytes),
-		ingressBytes:  newByteBudget(limits.MaxIngressInFlightBytes),
-		ingressSlots:  make(chan struct{}, limits.MaxIngressInFlight),
-		handshakeRate: newTokenBucket(limits.HandshakeRatePerSecond, limits.HandshakeRateBurst),
-		ingressRate:   newTokenBucket(limits.IngressRatePerSecond, limits.IngressRateBurst),
+		queueBytes:               newByteBudget(limits.MaxGlobalQueueBytes),
+		ingressBytes:             newByteBudget(limits.MaxIngressInFlightBytes),
+		ingressSlots:             make(chan struct{}, limits.MaxIngressInFlight),
+		handshakeRate:            newTokenBucket(limits.HandshakeRatePerSecond, limits.HandshakeRateBurst),
+		ingressRate:              newTokenBucket(limits.IngressRatePerSecond, limits.IngressRateBurst),
+		ingressRouteAdmission:    newKeyedAdmissionLimiter(limits.MaxIngressInFlight, limits.IngressRatePerSecond, limits.IngressRateBurst),
+		ingressDeviceAdmission:   newKeyedAdmissionLimiter(limits.MaxIngressInFlight, limits.IngressRatePerSecond, limits.IngressRateBurst),
+		handshakeDeviceAdmission: newHardKeyedAdmissionLimiter(limits.MaxPendingHandshakes, limits.HandshakeRatePerSecond, limits.HandshakeRateBurst),
 	}
 }
 
