@@ -33,6 +33,16 @@ if ! grep -q '^USER 10001:10001$' deploy/gateway/Dockerfile; then
   exit 1
 fi
 
+# Compose versions differ in whether explicit false bind options survive `config --format json`.
+# Verify fail-closed bind-source policy from the authoritative source YAML, then verify
+# all other mount/runtime properties from rendered Compose and actual containers.
+bind_mounts="$(grep -Ec '^[[:space:]]+- type: bind$' deploy/gateway/docker-compose.yml)"
+fail_closed_binds="$(grep -Ec '^[[:space:]]+create_host_path: false$' deploy/gateway/docker-compose.yml)"
+if [[ "$bind_mounts" != 6 || "$fail_closed_binds" != "$bind_mounts" ]]; then
+  echo "all six Gateway/Caddy bind mounts must set create_host_path: false" >&2
+  exit 1
+fi
+
 rendered="$(HOOSHIX_PUBLIC_HOST=localhost docker compose -f deploy/gateway/docker-compose.yml config --format json)"
 python3 - "$rendered" <<'PY'
 import json
@@ -80,7 +90,6 @@ for name, service in services.items():
         require("ca.key" not in source and "ca.key" not in target, "deployment CA private key must never be mounted")
         if mount.get("type") == "bind":
             require(mount.get("read_only") is True, f"{name} bind mount {target} must be read-only")
-            require(mount.get("bind", {}).get("create_host_path") is False, f"{name} bind mount {target} must fail if source is missing")
         if target in {"/data", "/config"}:
             require(name == "caddy" and mount.get("type") == "volume" and not mount.get("read_only", False), f"only Caddy named state volumes may be writable: {target}")
 
