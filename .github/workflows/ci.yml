@@ -292,6 +292,33 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  performance-capacity:
+    name: R-12 performance / capacity gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run performance and capacity gate
+        shell: bash
+        env:
+          HOOSHIX_R12_EVIDENCE_DIR: ${{ runner.temp }}/hooshix-r12-evidence
+        run: bash scripts/ci/performance-capacity.sh
+
+      - name: Upload R-12 performance evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: r12-performance-${{ github.sha }}
+          path: ${{ runner.temp }}/hooshix-r12-evidence
+          if-no-files-found: error
+          retention-days: 30
+
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
@@ -370,6 +397,7 @@ jobs:
       - agent-state-installer
       - infrastructure-runtime
       - comprehensive-tests
+      - performance-capacity
       - e2e-acceptance
       - packaging-ops
       - runtime-gate

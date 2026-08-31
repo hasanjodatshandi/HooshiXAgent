@@ -53,6 +53,9 @@ bash scripts/ci/infrastructure-runtime.sh
 # R-11 comprehensive test gate proves fuzz/scenario/race coverage without capacity claims.
 bash scripts/ci/comprehensive-tests.sh
 
+# R-12 performance/capacity gate proves reproducible scaling/soak/profile evidence.
+bash scripts/ci/performance-capacity.sh
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
@@ -126,6 +129,7 @@ observability_writer_gate=Passed
 agent_state_installer_gate=Passed
 infrastructure_runtime_gate=Passed
 comprehensive_test_expansion_gate=Passed
+performance_capacity_gate=Passed
 prerequisite_ci_jobs=required-by-needs
 control_panel_scope=Not applicable (external project)
 EOF
