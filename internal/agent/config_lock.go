@@ -35,7 +35,7 @@ func withConfigLock(stateDir string, operation func() error) error {
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 				return errors.New("config lock path is not a private regular file")
 			}
-		} else if !errors.Is(statErr, os.ErrNotExist) {
+		} else if !errors.Is(statErr, os.ErrNotExist) && !errors.Is(statErr, os.ErrPermission) {
 			return fmt.Errorf("inspect config lock: %w", statErr)
 		}
 		if time.Now().After(deadline) {
