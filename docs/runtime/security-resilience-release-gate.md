@@ -50,6 +50,7 @@ The release suite verifies:
 - strict control JSON/scope validation;
 - stream/request limits;
 - fail-closed pending-handshake capacity exhaustion;
+- RA-2 bounded pre-authentication slot recovery plus validated per-device handshake fairness, so a silent unauthenticated flood or one authorized device cannot indefinitely monopolize every pending-handshake slot;
 - bounded reconnect behavior from the existing Agent runtime tests.
 
 These tests intentionally use low deterministic limits rather than attempting uncontrolled host exhaustion.

@@ -167,37 +167,44 @@ func TestGatewayRateAndConcurrencyLimitsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/missing", nil))
-	if first.Code != http.StatusNotFound {
-		t.Fatalf("first ingress status=%d want=%d", first.Code, http.StatusNotFound)
+	for i := 0; i < 2; i++ {
+		recorder := httptest.NewRecorder()
+		gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/missing", nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("invalid ingress attempt %d status=%d want=%d", i+1, recorder.Code, http.StatusNotFound)
+		}
 	}
-	second := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(second, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/missing", nil))
-	if second.Code != http.StatusTooManyRequests {
-		t.Fatalf("ingress rate-limit status=%d want=%d", second.Code, http.StatusTooManyRequests)
+	gateway.resources.ingressRate.mu.Lock()
+	remainingIngressTokens := gateway.resources.ingressRate.tokens
+	gateway.resources.ingressRate.mu.Unlock()
+	if remainingIngressTokens != 1 {
+		t.Fatalf("invalid routes consumed global ingress rate budget: tokens=%v want=1", remainingIngressTokens)
+	}
+	if len(gateway.resources.ingressRouteAdmission.states) != 0 || len(gateway.resources.ingressDeviceAdmission.states) != 0 {
+		t.Fatal("invalid routes created route/device admission state")
 	}
 
-	gateway.resources.ingressRate = newTokenBucket(1000, 1000)
-	gateway.resources.ingressSlots <- struct{}{}
 	for len(gateway.resources.ingressSlots) < cap(gateway.resources.ingressSlots) {
 		gateway.resources.ingressSlots <- struct{}{}
 	}
 	blocked := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/missing", nil))
-	if blocked.Code != http.StatusServiceUnavailable {
-		t.Fatalf("ingress concurrency status=%d want=%d", blocked.Code, http.StatusServiceUnavailable)
+	if blocked.Code != http.StatusNotFound {
+		t.Fatalf("invalid route was blocked by tunnel concurrency before route lookup: status=%d want=%d", blocked.Code, http.StatusNotFound)
 	}
 	for len(gateway.resources.ingressSlots) > 0 {
 		<-gateway.resources.ingressSlots
 	}
 
-	agentOne := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(agentOne, httptest.NewRequest(http.MethodGet, "https://gateway.invalid"+agentPath, nil))
-	agentTwo := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(agentTwo, httptest.NewRequest(http.MethodGet, "https://gateway.invalid"+agentPath, nil))
-	if agentTwo.Code != http.StatusTooManyRequests {
-		t.Fatalf("handshake rate-limit status=%d want=%d", agentTwo.Code, http.StatusTooManyRequests)
+	for i := 0; i < 2; i++ {
+		recorder := httptest.NewRecorder()
+		gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://gateway.invalid"+agentPath, nil))
+	}
+	gateway.resources.handshakeRate.mu.Lock()
+	remainingHandshakeTokens := gateway.resources.handshakeRate.tokens
+	gateway.resources.handshakeRate.mu.Unlock()
+	if remainingHandshakeTokens != 1 {
+		t.Fatalf("non-WebSocket/unauthorized preface traffic consumed validated handshake rate budget: tokens=%v want=1", remainingHandshakeTokens)
 	}
 }
 

@@ -147,8 +147,8 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes_limit %d\n", ingressLimit)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queue_rejections_total counter\nhooshix_gateway_queue_rejections_total %d\n", gateway.resources.queueRejects.Load())
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load())
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load()+gateway.resources.handshakeDeviceAdmission.rejected.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load()+gateway.resources.ingressRouteAdmission.rejected.Load()+gateway.resources.ingressDeviceAdmission.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
 	statusQueued, statusLimit, statusDropped, statusFailures := gateway.status.snapshot()
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_status_queue_depth Current queued status signals waiting for asynchronous export.\n")
@@ -161,10 +161,6 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
 	if gateway.draining.Load() {
 		http.Error(w, "gateway is draining", http.StatusServiceUnavailable)
-		return
-	}
-	if !gateway.resources.handshakeRate.allow(time.Now()) {
-		http.Error(w, "agent handshake rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 	select {
@@ -193,9 +189,30 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	conn.SetReadLimit(contractv1.HeaderSize + contractv1.MaxDataPayload)
 
 	ctx, cancel := context.WithTimeout(request.Context(), gateway.limits.HandshakeTimeout)
-	sess, err := gateway.authenticate(ctx, conn)
-	cancel()
+	defer cancel()
+	prefaceCtx, prefaceCancel := context.WithTimeout(ctx, handshakePrefaceTimeout(gateway.limits.HandshakeTimeout))
+	candidate, err := gateway.readAuthorizedHello(prefaceCtx, conn)
+	prefaceCancel()
+	if err != nil {
+		gateway.logger.Warn("agent pre-authentication failed", "error", err)
+		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
+		return
+	}
+
+	now := time.Now()
+	if !gateway.resources.handshakeRate.allow(now) {
+		_ = conn.Close(websocket.StatusTryAgainLater, "agent handshake rate limit exceeded")
+		return
+	}
+	deviceAdmission := gateway.resources.handshakeDeviceAdmission.tryAcquire(candidate.record.DeviceID, now)
+	if deviceAdmission != admissionAccepted {
+		_ = conn.Close(websocket.StatusTryAgainLater, "device handshake admission limit exceeded")
+		return
+	}
+	sess, err := gateway.completeAuthentication(ctx, conn, candidate)
+	gateway.resources.handshakeDeviceAdmission.release(candidate.record.DeviceID)
 	releaseHandshakeSlot()
+	cancel()
 	if err != nil {
 		gateway.logger.Warn("agent authentication failed", "error", err)
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
@@ -228,35 +245,53 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	})
 }
 
-func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) (*session, error) {
-	var inbound contractv1.SequenceTracker
+type authorizedHandshake struct {
+	hello   contractv1.ClientHello
+	record  contractv1.DeviceSessionAuthorization
+	inbound contractv1.SequenceTracker
+}
 
+func handshakePrefaceTimeout(total time.Duration) time.Duration {
+	timeout := total / 4
+	if timeout <= 0 || timeout > 2*time.Second {
+		timeout = 2 * time.Second
+	}
+	if timeout > total {
+		return total
+	}
+	return timeout
+}
+
+func (gateway *Gateway) readAuthorizedHello(ctx context.Context, conn *websocket.Conn) (authorizedHandshake, error) {
+	var candidate authorizedHandshake
 	first, err := readProtocolFrame(ctx, conn)
 	if err != nil {
-		return nil, err
+		return candidate, err
 	}
-	if err := inbound.Accept(first.Sequence); err != nil {
-		return nil, err
+	if err := candidate.inbound.Accept(first.Sequence); err != nil {
+		return candidate, err
 	}
 	if first.Kind != contractv1.KindControl || first.StreamID != 0 {
-		return nil, errors.New("first frame must be session control")
+		return candidate, errors.New("first frame must be session control")
 	}
 	if err := contractv1.ValidateControlPayload(first.Payload, 0, time.Now().UTC()); err != nil {
-		return nil, err
+		return candidate, err
 	}
-	hello, err := contractv1.DecodeClientHello(first.Payload)
+	candidate.hello, err = contractv1.DecodeClientHello(first.Payload)
 	if err != nil {
-		return nil, err
+		return candidate, err
 	}
-
-	record, err := gateway.metadata.Authorization(ctx, hello.AuthorizationID, hello.DeviceID, hello.TokenID, time.Now().UTC())
+	candidate.record, err = gateway.metadata.Authorization(ctx, candidate.hello.AuthorizationID, candidate.hello.DeviceID, candidate.hello.TokenID, time.Now().UTC())
 	if err != nil {
-		return nil, fmt.Errorf("authorization lookup: %w", err)
+		return candidate, fmt.Errorf("authorization lookup: %w", err)
 	}
-	if !contractv1.MatchSessionToken(record, hello.SessionToken) {
-		return nil, errors.New("session token mismatch")
+	if !contractv1.MatchSessionToken(candidate.record, candidate.hello.SessionToken) {
+		return candidate, errors.New("session token mismatch")
 	}
+	return candidate, nil
+}
 
+func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake) (*session, error) {
 	sessionID, err := gateway.newID("session")
 	if err != nil {
 		return nil, fmt.Errorf("generate session ID: %w", err)
@@ -280,7 +315,7 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 	if err != nil {
 		return nil, err
 	}
-	if err := inbound.Accept(second.Sequence); err != nil {
+	if err := candidate.inbound.Accept(second.Sequence); err != nil {
 		return nil, err
 	}
 	if second.Kind != contractv1.KindControl || second.StreamID != 0 {
@@ -293,10 +328,10 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 	if err != nil {
 		return nil, err
 	}
-	if err := contractv1.VerifyClientAuthSignature(record.DevicePublicKey, hello, challenge, auth); err != nil {
+	if err := contractv1.VerifyClientAuthSignature(candidate.record.DevicePublicKey, candidate.hello, challenge, auth); err != nil {
 		return nil, err
 	}
-	authorizationExpiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+	authorizationExpiresAt, err := time.Parse(time.RFC3339, candidate.record.ExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("parse authorization expiry: %w", err)
 	}
@@ -312,7 +347,7 @@ func (gateway *Gateway) authenticate(ctx context.Context, conn *websocket.Conn) 
 		return nil, err
 	}
 
-	return newSession(gateway, conn, record.DeviceID, challenge.SessionID, record.AuthorizationID, record.TokenID, authorizationExpiresAt, inbound, 2), nil
+	return newSession(gateway, conn, candidate.record.DeviceID, challenge.SessionID, candidate.record.AuthorizationID, candidate.record.TokenID, authorizationExpiresAt, candidate.inbound, 2), nil
 }
 
 func (gateway *Gateway) registerSession(sess *session) error {
@@ -371,19 +406,6 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if !gateway.resources.ingressRate.allow(time.Now()) {
-		http.Error(w, "public ingress rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-	select {
-	case gateway.resources.ingressSlots <- struct{}{}:
-		defer func() { <-gateway.resources.ingressSlots }()
-	default:
-		gateway.resources.ingressRejects.Add(1)
-		http.Error(w, "public ingress capacity reached", http.StatusServiceUnavailable)
-		return
-	}
-
 	now := time.Now().UTC()
 	route, err := gateway.metadata.RouteByHostname(request.Context(), request.Host, now)
 	if err != nil {
@@ -393,6 +415,45 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	sess := gateway.sessionForDevice(route.DeviceID)
 	if sess == nil {
 		http.Error(w, "agent offline", http.StatusServiceUnavailable)
+		return
+	}
+
+	routeAdmission := gateway.resources.ingressRouteAdmission.tryAcquire(route.AssignmentID, now)
+	if routeAdmission != admissionAccepted {
+		status := http.StatusServiceUnavailable
+		message := "route ingress concurrency limit reached"
+		if routeAdmission == admissionRejectedRate {
+			status = http.StatusTooManyRequests
+			message = "route ingress rate limit exceeded"
+		}
+		http.Error(w, message, status)
+		return
+	}
+	defer gateway.resources.ingressRouteAdmission.release(route.AssignmentID)
+
+	deviceAdmission := gateway.resources.ingressDeviceAdmission.tryAcquire(route.DeviceID, now)
+	if deviceAdmission != admissionAccepted {
+		status := http.StatusServiceUnavailable
+		message := "device ingress concurrency limit reached"
+		if deviceAdmission == admissionRejectedRate {
+			status = http.StatusTooManyRequests
+			message = "device ingress rate limit exceeded"
+		}
+		http.Error(w, message, status)
+		return
+	}
+	defer gateway.resources.ingressDeviceAdmission.release(route.DeviceID)
+
+	if !gateway.resources.ingressRate.allow(now) {
+		http.Error(w, "public ingress rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	select {
+	case gateway.resources.ingressSlots <- struct{}{}:
+		defer func() { <-gateway.resources.ingressSlots }()
+	default:
+		gateway.resources.ingressRejects.Add(1)
+		http.Error(w, "public ingress capacity reached", http.StatusServiceUnavailable)
 		return
 	}
 
