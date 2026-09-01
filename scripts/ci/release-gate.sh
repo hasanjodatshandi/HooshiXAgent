@@ -41,6 +41,9 @@ bash scripts/ci/http-proxy-correctness.sh
 # R-7 metadata gate proves strict typed snapshot loading, indexed revocations and fail-closed readiness.
 bash scripts/ci/metadata-scalability.sh
 
+# RA-3 live metadata gate proves generation publication, bounded staleness/recovery and live revocation without restart.
+bash scripts/ci/live-metadata-lifecycle.sh
+
 # R-8 observability/writer gate proves bounded telemetry and control-priority single-writer scheduling.
 bash scripts/ci/observability-writer.sh
 

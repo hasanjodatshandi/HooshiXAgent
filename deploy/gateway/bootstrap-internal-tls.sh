@@ -10,9 +10,9 @@ if ! command -v openssl >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$tls_dir" "$metadata_dir/authorizations" "$metadata_dir/routes" "$metadata_dir/revocations"
+mkdir -p "$tls_dir" "$metadata_dir/authorizations" "$metadata_dir/routes" "$metadata_dir/revocations" "$metadata_dir/generations"
 chmod 700 "$tls_dir"
-chmod 755 "$metadata_dir" "$metadata_dir/authorizations" "$metadata_dir/routes" "$metadata_dir/revocations"
+chmod 755 "$metadata_dir" "$metadata_dir/authorizations" "$metadata_dir/routes" "$metadata_dir/revocations" "$metadata_dir/generations"
 
 ca_key="$tls_dir/ca.key"
 ca_cert="$tls_dir/ca.crt"
@@ -77,4 +77,4 @@ chmod 644 "$ca_cert" "$gateway_cert" "$gateway_key"
 
 echo "Gateway internal TLS initialized at $tls_dir"
 echo "Keep $ca_key private; it is not mounted into runtime containers."
-echo "External metadata snapshot directories initialized at $metadata_dir"
+echo "External metadata projection directories initialized at $metadata_dir"

@@ -26,7 +26,10 @@ func run() error {
 		listenAddr           = flag.String("listen", "127.0.0.1:8443", "HTTPS/WSS listen address")
 		tlsCert              = flag.String("tls-cert", "", "TLS certificate PEM path (required)")
 		tlsKey               = flag.String("tls-key", "", "TLS private key PEM path (required)")
-		metadataDir          = flag.String("metadata-dir", "", "read-only external metadata snapshot directory (required)")
+		metadataDir          = flag.String("metadata-dir", "", "read-only external metadata root directory (required)")
+		metadataMode         = flag.String("metadata-mode", "live", "external metadata mode: live or static compatibility")
+		metadataRefresh      = flag.Duration("metadata-refresh-interval", gateway.DefaultMetadataRefreshInterval, "live metadata current-manifest refresh interval")
+		metadataMaxAge       = flag.Duration("metadata-max-age", gateway.DefaultMetadataMaxSnapshotAge, "maximum accepted age of a live metadata generation")
 		maxAgentSessions     = flag.Int("max-agent-sessions", defaults.MaxAgentSessions, "maximum authenticated Agent sessions")
 		maxPendingHandshakes = flag.Int("max-pending-handshakes", defaults.MaxPendingHandshakes, "maximum concurrent Agent handshakes")
 		maxStreamQueueBytes  = flag.Int64("max-stream-queue-bytes", defaults.MaxStreamQueueBytes, "maximum queued Agent-to-Gateway bytes per stream")
@@ -48,10 +51,34 @@ func run() error {
 		return errors.New("-metadata-dir is required")
 	}
 
-	metadata, err := gateway.LoadSnapshotDirectory(*metadataDir)
-	if err != nil {
-		return fmt.Errorf("load external metadata snapshot: %w", err)
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var metadata gateway.MetadataSource
+	var closeMetadata func()
+	switch *metadataMode {
+	case "static":
+		staticMetadata, err := gateway.LoadSnapshotDirectory(*metadataDir)
+		if err != nil {
+			return fmt.Errorf("load external metadata snapshot: %w", err)
+		}
+		metadata = staticMetadata
+	case "live":
+		liveMetadata, err := gateway.NewLiveMetadata(*metadataDir, gateway.LiveMetadataOptions{
+			RefreshInterval: *metadataRefresh,
+			MaxSnapshotAge:  *metadataMaxAge,
+			Logger:          logger,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize live external metadata projection: %w", err)
+		}
+		metadata = liveMetadata
+		closeMetadata = func() { _ = liveMetadata.Close() }
+	default:
+		return fmt.Errorf("unsupported -metadata-mode %q; expected static or live", *metadataMode)
 	}
+	if closeMetadata != nil {
+		defer closeMetadata()
+	}
+
 	limits := defaults
 	limits.MaxAgentSessions = *maxAgentSessions
 	limits.MaxPendingHandshakes = *maxPendingHandshakes
@@ -64,7 +91,6 @@ func run() error {
 	limits.HandshakeRateBurst = *handshakeBurst
 	limits.IngressRatePerSecond = *ingressRate
 	limits.IngressRateBurst = *ingressBurst
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	serverGateway, err := gateway.New(metadata, gateway.NewJSONLineStatusSink(os.Stdout), limits, logger)
 	if err != nil {
 		return err
@@ -76,7 +102,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("gateway starting", "listen", *listenAddr)
+		logger.Info("gateway starting", "listen", *listenAddr, "metadata_mode", *metadataMode)
 		errCh <- server.ListenAndServeTLS(*tlsCert, *tlsKey)
 	}()
 

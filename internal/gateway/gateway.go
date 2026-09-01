@@ -156,6 +156,20 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_queue_limit gauge\nhooshix_gateway_status_queue_limit %d\n", statusLimit)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_dropped_total counter\nhooshix_gateway_status_dropped_total %d\n", statusDropped)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_export_failures_total counter\nhooshix_gateway_status_export_failures_total %d\n", statusFailures)
+	if metadataStats, ok := gateway.metadata.(interface {
+		MetadataStats(time.Time) LiveMetadataStats
+	}); ok {
+		stats := metadataStats.MetadataStats(time.Now().UTC())
+		fresh := 0
+		if stats.Fresh {
+			fresh = 1
+		}
+		_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_metadata_fresh Whether the active live metadata generation is within its freshness deadline.\n")
+		_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_metadata_fresh gauge\nhooshix_gateway_metadata_fresh %d\n", fresh)
+		_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_metadata_snapshot_age_seconds gauge\nhooshix_gateway_metadata_snapshot_age_seconds %.3f\n", stats.SnapshotAge.Seconds())
+		_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_metadata_refresh_successes_total counter\nhooshix_gateway_metadata_refresh_successes_total %d\n", stats.RefreshSuccesses)
+		_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_metadata_refresh_failures_total counter\nhooshix_gateway_metadata_refresh_failures_total %d\n", stats.RefreshFailures)
+	}
 }
 
 func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request) {
@@ -328,10 +342,21 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 	if err != nil {
 		return nil, err
 	}
-	if err := contractv1.VerifyClientAuthSignature(candidate.record.DevicePublicKey, candidate.hello, challenge, auth); err != nil {
+
+	// Live authorization can change while the challenge is in flight. Re-resolve the current
+	// authority immediately before creating a routable session so a revoked/disabled/rotated
+	// authorization cannot complete using the earlier client_hello snapshot.
+	currentRecord, err := gateway.metadata.Authorization(ctx, candidate.hello.AuthorizationID, candidate.hello.DeviceID, candidate.hello.TokenID, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("authorization changed during handshake: %w", err)
+	}
+	if !contractv1.MatchSessionToken(currentRecord, candidate.hello.SessionToken) {
+		return nil, errors.New("session token no longer matches current authorization")
+	}
+	if err := contractv1.VerifyClientAuthSignature(currentRecord.DevicePublicKey, candidate.hello, challenge, auth); err != nil {
 		return nil, err
 	}
-	authorizationExpiresAt, err := time.Parse(time.RFC3339, candidate.record.ExpiresAt)
+	authorizationExpiresAt, err := time.Parse(time.RFC3339, currentRecord.ExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("parse authorization expiry: %w", err)
 	}
@@ -347,7 +372,7 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 		return nil, err
 	}
 
-	return newSession(gateway, conn, candidate.record.DeviceID, challenge.SessionID, candidate.record.AuthorizationID, candidate.record.TokenID, authorizationExpiresAt, candidate.inbound, 2), nil
+	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2), nil
 }
 
 func (gateway *Gateway) registerSession(sess *session) error {

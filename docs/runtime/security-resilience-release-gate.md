@@ -4,7 +4,7 @@
 
 AG-8 is an acceptance/hardening leaf for the existing Edge Agent and Tunnel Gateway. It does not introduce the external HooshiX Control Panel, user/tenant authorization, quotas, billing, Control Panel persistence or Control Panel security testing.
 
-No new architecture decision is introduced by AG-8. Current ADR-0001 through ADR-0010 remain authority.
+No new architecture decision is introduced by AG-8. Current accepted ADRs through ADR-0012 remain authority.
 
 ## Release claim rule
 
@@ -56,6 +56,10 @@ The release suite verifies:
 These tests intentionally use low deterministic limits rather than attempting uncontrolled host exhaustion.
 
 ## Resilience acceptance
+
+### Live authorization metadata lifecycle
+
+RA-3 adds a blocking real-process gate for the ADR-0012 live external metadata projection. The release chain now requires atomic higher-revision route activation without Gateway restart, fixed freshness expiry that cannot be extended by polling the same revision, fail-closed readiness/new routing during stale authority, recovery on a newer valid generation, and bounded termination of an existing authenticated session after a live effective revocation. The external publisher remains out of repository scope and no Control Panel business/database code is introduced.
 
 ### Network interruption
 

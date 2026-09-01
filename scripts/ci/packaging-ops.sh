@@ -42,6 +42,7 @@ cleanup() {
       HOOSHIX_PUBLIC_HOST=localhost \
       HOOSHIX_HTTP_PORT=18080 \
       HOOSHIX_HTTPS_PORT=18443 \
+      HOOSHIX_METADATA_MODE=static \
       HOOSHIX_METADATA_DIR="$work/gateway/deploy/gateway/runtime/metadata" \
       HOOSHIX_TLS_DIR="$work/gateway/deploy/gateway/runtime/tls" \
         docker compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -104,6 +105,7 @@ fi
 HOOSHIX_PUBLIC_HOST=localhost \
 HOOSHIX_HTTP_PORT=18080 \
 HOOSHIX_HTTPS_PORT=18443 \
+HOOSHIX_METADATA_MODE=static \
 HOOSHIX_METADATA_DIR="$PWD/runtime/metadata" \
 HOOSHIX_TLS_DIR="$PWD/runtime/tls" \
   docker compose up -d --build

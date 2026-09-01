@@ -39,6 +39,7 @@ func TestNetworkInterruptionAndColdRestartRecovery(t *testing.T) {
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
+		"-metadata-mode", "static",
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
