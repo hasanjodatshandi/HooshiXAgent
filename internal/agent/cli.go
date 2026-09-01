@@ -72,22 +72,8 @@ func commandInit(args []string, stdout io.Writer) error {
 		return err
 	}
 	store := NewPlatformSecretStore(dir)
-	var publicKey []byte
-	if err := withConfigLock(dir, func() error {
-		config, err := loadConfigUnlocked(dir)
-		if err != nil {
-			return err
-		}
-		if err := saveConfigUnlocked(dir, config); err != nil {
-			return err
-		}
-		key, _, err := LoadOrCreateIdentity(store)
-		if err != nil {
-			return err
-		}
-		publicKey = append(publicKey[:0], key...)
-		return nil
-	}); err != nil {
+	publicKey, err := initializeAgentState(dir, store, stateMutationFaults{})
+	if err != nil {
 		return err
 	}
 	result := map[string]any{"state_dir": dir, "public_key": PublicKeyBase64(publicKey), "secret_store": store.Kind()}
@@ -135,33 +121,15 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	store := NewPlatformSecretStore(dir)
-	var config Config
-	if err := withConfigLock(dir, func() error {
-		current, err := loadConfigUnlocked(dir)
-		if err != nil {
-			return err
-		}
-		current.GatewayURL = *gatewayURL
-		current.CAFile = *caFile
-		current.DeviceID = *deviceID
-		current.AuthorizationID = *authorizationID
-		current.TokenID = *tokenID
-		current.UpdateChannel = *channel
-		if err := current.ValidateRuntime(); err != nil {
-			return err
-		}
-		if _, _, err := LoadOrCreateIdentity(store); err != nil {
-			return err
-		}
-		if err := saveConfigUnlocked(dir, current); err != nil {
-			return err
-		}
-		if err := SetSessionToken(store, token); err != nil {
-			return err
-		}
-		config = current
-		return nil
-	}); err != nil {
+	config, err := configureAgentState(dir, store, Config{
+		GatewayURL:      *gatewayURL,
+		CAFile:          *caFile,
+		DeviceID:        *deviceID,
+		AuthorizationID: *authorizationID,
+		TokenID:         *tokenID,
+		UpdateChannel:   *channel,
+	}, token, stateMutationFaults{})
+	if err != nil {
 		return err
 	}
 	return printResult(stdout, *jsonOutput, map[string]any{"configured": true, "device_id": config.DeviceID}, "configured device=%s\n", config.DeviceID)
@@ -266,7 +234,7 @@ func commandStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	store := NewPlatformSecretStore(dir)
-	publicKey, _, err := LoadOrCreateIdentity(store)
+	publicKey, _, err := LoadIdentity(store)
 	if err != nil {
 		return err
 	}
@@ -307,7 +275,7 @@ func commandDoctor(args []string, stdout io.Writer) error {
 		return err
 	}
 	store := NewPlatformSecretStore(dir)
-	if _, _, err := LoadOrCreateIdentity(store); err != nil {
+	if _, _, err := LoadIdentity(store); err != nil {
 		return err
 	}
 	if _, err := LoadSessionToken(store); err != nil {

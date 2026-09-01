@@ -50,6 +50,9 @@ bash scripts/ci/observability-writer.sh
 # R-9 Agent state/installer gate proves strict state parsing, locking and destructive-path safety.
 bash scripts/ci/agent-state-installer.sh
 
+# RA-5 Agent state transaction gate proves atomic config/secret mutation, crash recovery, read-only diagnostics and retry/redaction behavior.
+bash scripts/ci/agent-state-transaction.sh
+
 # R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
 bash scripts/ci/infrastructure-runtime.sh
 
@@ -135,6 +138,7 @@ live_metadata_lifecycle_gate=Passed
 multi_host_public_edge_gate=Passed
 observability_writer_gate=Passed
 agent_state_installer_gate=Passed
+agent_state_transaction_gate=Passed
 infrastructure_runtime_gate=Passed
 comprehensive_test_expansion_gate=Passed
 performance_capacity_gate=Passed

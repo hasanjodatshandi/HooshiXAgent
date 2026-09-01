@@ -22,12 +22,45 @@ type SecretStore interface {
 	Kind() string
 }
 
+type secretMutationStore interface {
+	PrepareMutation() error
+	LoadForMutation() (SecretState, error)
+}
+
+func prepareSecretMutation(store SecretStore) error {
+	if preparer, ok := store.(secretMutationStore); ok {
+		return preparer.PrepareMutation()
+	}
+	return nil
+}
+
+func loadSecretForMutation(store SecretStore) (SecretState, error) {
+	if mutationStore, ok := store.(secretMutationStore); ok {
+		return mutationStore.LoadForMutation()
+	}
+	return store.Load()
+}
+
 func LoadOrCreateIdentity(store SecretStore) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	return loadOrCreateIdentity(store, rand.Reader)
 }
 
-func loadOrCreateIdentity(store SecretStore, entropy io.Reader) (ed25519.PublicKey, ed25519.PrivateKey, error) {
+func LoadIdentity(store SecretStore) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	state, err := store.Load()
+	if err != nil {
+		return nil, nil, err
+	}
+	if state.Seed == "" {
+		return nil, nil, errors.New("Agent identity is not initialized")
+	}
+	return identityFromSeed(state.Seed)
+}
+
+func loadOrCreateIdentity(store SecretStore, entropy io.Reader) (ed25519.PublicKey, ed25519.PrivateKey, error) {
+	if err := prepareSecretMutation(store); err != nil {
+		return nil, nil, err
+	}
+	state, err := loadSecretForMutation(store)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -41,7 +74,11 @@ func loadOrCreateIdentity(store SecretStore, entropy io.Reader) (ed25519.PublicK
 			return nil, nil, err
 		}
 	}
-	seed, err := base64.RawURLEncoding.DecodeString(state.Seed)
+	return identityFromSeed(state.Seed)
+}
+
+func identityFromSeed(encoded string) (ed25519.PublicKey, ed25519.PrivateKey, error) {
+	seed, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil || len(seed) != ed25519.SeedSize {
 		return nil, nil, errors.New("stored Ed25519 seed is invalid")
 	}
@@ -55,7 +92,10 @@ func PublicKeyBase64(publicKey ed25519.PublicKey) string {
 }
 
 func SetSessionToken(store SecretStore, token string) error {
-	state, err := store.Load()
+	if err := prepareSecretMutation(store); err != nil {
+		return err
+	}
+	state, err := loadSecretForMutation(store)
 	if err != nil {
 		return err
 	}

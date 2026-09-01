@@ -30,14 +30,25 @@ var (
 	localFree          = kernel32DLL.NewProc("LocalFree")
 )
 
+func platformSecretPath(stateDir string) string { return stateRelativePath(stateDir, "secrets.dpapi") }
+
 func NewPlatformSecretStore(stateDir string) SecretStore {
-	return &dpapiSecretStore{stateDir: stateDir, path: stateRelativePath(stateDir, "secrets.dpapi")}
+	return &dpapiSecretStore{stateDir: stateDir, path: platformSecretPath(stateDir)}
 }
 
 func (store *dpapiSecretStore) Kind() string { return "windows-dpapi-current-user" }
 
+func (store *dpapiSecretStore) PrepareMutation() error { return ensurePrivateDir(store.stateDir) }
+
 func (store *dpapiSecretStore) Load() (SecretState, error) {
-	if err := ensurePrivateDir(store.stateDir); err != nil {
+	if err := ensureStateReadable(store.stateDir); err != nil {
+		return SecretState{}, err
+	}
+	return store.LoadForMutation()
+}
+
+func (store *dpapiSecretStore) LoadForMutation() (SecretState, error) {
+	if err := inspectPrivateDir(store.stateDir); err != nil {
 		return SecretState{}, err
 	}
 	info, err := os.Lstat(store.path)

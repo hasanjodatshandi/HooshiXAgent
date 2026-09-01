@@ -13,6 +13,28 @@ const stateMarkerName = ".hooshix-agent-state"
 
 var stateMarkerContents = []byte("hooshix-agent-state-v1\n")
 
+func inspectPrivateDir(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect private state directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("state directory must be a real directory")
+	}
+	markerPath := filepath.Join(path, stateMarkerName)
+	marker, err := readStateFile(markerPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("Agent state marker is missing; run init or configure to initialize/adopt state")
+		}
+		return fmt.Errorf("read Agent state marker: %w", err)
+	}
+	if !bytes.Equal(marker, stateMarkerContents) {
+		return errors.New("Agent state marker contents are invalid")
+	}
+	return nil
+}
+
 func ensurePrivateDir(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {

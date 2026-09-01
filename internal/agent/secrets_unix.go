@@ -13,14 +13,25 @@ type fileSecretStore struct {
 	path     string
 }
 
+func platformSecretPath(stateDir string) string { return stateRelativePath(stateDir, "secrets.json") }
+
 func NewPlatformSecretStore(stateDir string) SecretStore {
-	return &fileSecretStore{stateDir: stateDir, path: stateRelativePath(stateDir, "secrets.json")}
+	return &fileSecretStore{stateDir: stateDir, path: platformSecretPath(stateDir)}
 }
 
 func (store *fileSecretStore) Kind() string { return "private-file" }
 
+func (store *fileSecretStore) PrepareMutation() error { return ensurePrivateDir(store.stateDir) }
+
 func (store *fileSecretStore) Load() (SecretState, error) {
-	if err := ensurePrivateDir(store.stateDir); err != nil {
+	if err := ensureStateReadable(store.stateDir); err != nil {
+		return SecretState{}, err
+	}
+	return store.LoadForMutation()
+}
+
+func (store *fileSecretStore) LoadForMutation() (SecretState, error) {
+	if err := inspectPrivateDir(store.stateDir); err != nil {
 		return SecretState{}, err
 	}
 	info, err := os.Lstat(store.path)
