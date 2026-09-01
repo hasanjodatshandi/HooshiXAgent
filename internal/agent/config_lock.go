@@ -31,6 +31,7 @@ func withConfigLock(stateDir string, operation func() error) error {
 	}
 	lockPath := filepath.Join(stateDir, configLockName)
 	deadline := time.Now().Add(configLockWait)
+	lastObservation := ""
 	for {
 		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -67,12 +68,19 @@ func withConfigLock(stateDir string, operation func() error) error {
 				return fmt.Errorf("inspect config lock after create failure: %w", inspectErr)
 			}
 		}
-		reclaimed, inspectErr := reclaimStaleConfigLock(lockPath, time.Now().UTC())
+		now := time.Now().UTC()
+		reclaimed, observation, inspectErr := inspectConfigLockWithProcessCheck(lockPath, now, processAlive)
 		if inspectErr != nil {
 			return inspectErr
 		}
 		if reclaimed {
 			continue
+		}
+		// The bounded wait measures a stuck owner, not total queue depth. A new
+		// owner record proves forward progress and safely renews the wait window.
+		if observation != lastObservation {
+			lastObservation = observation
+			deadline = time.Now().Add(configLockWait)
 		}
 		if time.Now().After(deadline) {
 			return errors.New("timed out waiting for live config lock")
@@ -82,44 +90,53 @@ func withConfigLock(stateDir string, operation func() error) error {
 }
 
 func reclaimStaleConfigLock(lockPath string, now time.Time) (bool, error) {
-	return reclaimStaleConfigLockWithProcessCheck(lockPath, now, processAlive)
+	reclaimed, _, err := inspectConfigLockWithProcessCheck(lockPath, now, processAlive)
+	return reclaimed, err
 }
 
 func reclaimStaleConfigLockWithProcessCheck(lockPath string, now time.Time, alive func(int) bool) (bool, error) {
+	reclaimed, _, err := inspectConfigLockWithProcessCheck(lockPath, now, alive)
+	return reclaimed, err
+}
+
+func inspectConfigLockWithProcessCheck(lockPath string, now time.Time, alive func(int) bool) (bool, string, error) {
 	info, err := os.Lstat(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
+		return true, "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("inspect config lock: %w", err)
+		return false, "", fmt.Errorf("inspect config lock: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return false, errors.New("config lock path is not a private regular file")
+		return false, "", errors.New("config lock path is not a private regular file")
 	}
 	data, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
+		return true, "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read config lock: %w", err)
+		return false, "", fmt.Errorf("read config lock: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		if now.Sub(info.ModTime()) < legacyLockStaleAfter {
-			return false, nil
+			return false, fmt.Sprintf("legacy:%d:%d", info.ModTime().UnixNano(), info.Size()), nil
 		}
-		return removeUnchangedLock(lockPath, data, info.ModTime())
+		reclaimed, err := removeUnchangedLock(lockPath, data, info.ModTime())
+		return reclaimed, "", err
 	}
 	record, err := decodeConfigLockRecord(data)
 	if err != nil {
-		return false, fmt.Errorf("invalid config lock metadata: %w", err)
+		return false, "", fmt.Errorf("invalid config lock metadata: %w", err)
 	}
 	// Contention between goroutines in this process is unquestionably live and should
 	// not perform an expensive platform process query on every poll. This also avoids
 	// Windows handle churn under high local mutation concurrency.
+	observation := string(data)
 	if record.PID == os.Getpid() || alive(record.PID) {
-		return false, nil
+		return false, observation, nil
 	}
-	return removeUnchangedLock(lockPath, data, info.ModTime())
+	reclaimed, err := removeUnchangedLock(lockPath, data, info.ModTime())
+	return reclaimed, "", err
 }
 
 func decodeConfigLockRecord(data []byte) (configLockRecord, error) {
