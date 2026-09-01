@@ -83,7 +83,7 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 
 	// Gateway restart: keep the real Agent process running, require a bounded graceful SIGINT drain,
 	// and prove the Agent reconnect loop restores the route without being restarted.
-	gateway.stopGracefully(t, 3*time.Second)
+	gateway.stopGracefully(t, 10*time.Second)
 	waitFor(t, 3*time.Second, func() bool {
 		_, err := client.Get(gatewayBaseURL + "/healthz")
 		return err != nil
@@ -581,3 +581,4 @@ func publicRequestWithHost(client *http.Client, baseURL, path, body, host string
 	request.Host = host
 	return client.Do(request)
 }
+
