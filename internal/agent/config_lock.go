@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -25,7 +26,42 @@ type configLockRecord struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type processConfigLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var processConfigLocks = struct {
+	sync.Mutex
+	byStateDir map[string]*processConfigLockEntry
+}{byStateDir: make(map[string]*processConfigLockEntry)}
+
+func acquireProcessConfigLock(stateDir string) func() {
+	processConfigLocks.Lock()
+	entry := processConfigLocks.byStateDir[stateDir]
+	if entry == nil {
+		entry = &processConfigLockEntry{}
+		processConfigLocks.byStateDir[stateDir] = entry
+	}
+	entry.refs++
+	processConfigLocks.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		processConfigLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(processConfigLocks.byStateDir, stateDir)
+		}
+		processConfigLocks.Unlock()
+	}
+}
+
 func withConfigLock(stateDir string, operation func() error) error {
+	releaseProcessLock := acquireProcessConfigLock(stateDir)
+	defer releaseProcessLock()
+
 	if err := ensurePrivateDir(stateDir); err != nil {
 		return err
 	}
@@ -51,11 +87,22 @@ func withConfigLock(stateDir string, operation func() error) error {
 				_ = os.Remove(lockPath)
 				return fmt.Errorf("initialize config lock: %w", encodeErr)
 			}
-			defer os.Remove(lockPath)
 			if err := recoverStateTransaction(stateDir); err != nil {
+				releaseErr := releaseOwnedConfigLock(lockPath, data)
+				if releaseErr != nil {
+					return errors.Join(err, releaseErr)
+				}
 				return err
 			}
-			return operation()
+			operationErr := operation()
+			releaseErr := releaseOwnedConfigLock(lockPath, data)
+			if operationErr != nil && releaseErr != nil {
+				return errors.Join(operationErr, releaseErr)
+			}
+			if operationErr != nil {
+				return operationErr
+			}
+			return releaseErr
 		}
 		if !errors.Is(err, os.ErrExist) {
 			// Windows can report an existing directory or another incompatible lock object
@@ -84,6 +131,28 @@ func withConfigLock(stateDir string, operation func() error) error {
 		}
 		if time.Now().After(deadline) {
 			return errors.New("timed out waiting for live config lock")
+		}
+		time.Sleep(configLockPoll)
+	}
+}
+
+func releaseOwnedConfigLock(lockPath string, expected []byte) error {
+	deadline := time.Now().Add(configLockWait)
+	for {
+		current, err := os.ReadFile(lockPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read owned config lock before release: %w", err)
+		}
+		if !bytes.Equal(current, expected) {
+			return errors.New("config lock ownership changed before release")
+		}
+		if err := os.Remove(lockPath); err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if time.Now().After(deadline) {
+			return fmt.Errorf("release config lock: %w", err)
 		}
 		time.Sleep(configLockPoll)
 	}
