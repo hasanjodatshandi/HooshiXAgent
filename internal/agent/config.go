@@ -254,15 +254,8 @@ func NormalizeStateDir(stateDir string) (string, error) {
 			return "", errors.New("state directory must not be the user home directory")
 		}
 	}
-	if info, err := os.Lstat(absolute); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("state directory must not be a symlink")
-		}
-		if !info.IsDir() {
-			return "", errors.New("state directory path is not a directory")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect state directory: %w", err)
+	if err := validateStateDirectoryPath(absolute, true); err != nil {
+		return "", fmt.Errorf("validate state directory path: %w", err)
 	}
 	return absolute, nil
 }

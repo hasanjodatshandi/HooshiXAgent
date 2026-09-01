@@ -88,6 +88,9 @@ func NewSnapshotMetadata() *SnapshotMetadata {
 }
 
 func LoadSnapshotDirectory(root string) (*SnapshotMetadata, error) {
+	if err := validateTrustedMetadataDirectory(root, false); err != nil {
+		return nil, fmt.Errorf("validate metadata root: %w", err)
+	}
 	source := NewSnapshotMetadata()
 	for _, spec := range []struct {
 		dir string
@@ -98,6 +101,9 @@ func LoadSnapshotDirectory(root string) (*SnapshotMetadata, error) {
 		{dir: "revocations", fn: source.addRevocationJSON},
 	} {
 		dir := filepath.Join(root, spec.dir)
+		if err := validateTrustedMetadataDirectory(dir, true); err != nil {
+			return nil, fmt.Errorf("validate metadata directory %s: %w", dir, err)
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -106,10 +112,13 @@ func LoadSnapshotDirectory(root string) (*SnapshotMetadata, error) {
 			return nil, fmt.Errorf("read metadata directory %s: %w", dir, err)
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			if !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("metadata JSON entry %s must be a regular non-symlink file", entry.Name())
+			}
+			data, err := readTrustedMetadataFile(filepath.Join(dir, entry.Name()), maxMetadataRecordBytes)
 			if err != nil {
 				return nil, fmt.Errorf("read metadata file %s: %w", entry.Name(), err)
 			}

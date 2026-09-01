@@ -14,12 +14,8 @@ const stateMarkerName = ".hooshix-agent-state"
 var stateMarkerContents = []byte("hooshix-agent-state-v1\n")
 
 func inspectPrivateDir(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
+	if err := validateStateDirectoryPath(path, false); err != nil {
 		return fmt.Errorf("inspect private state directory: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("state directory must be a real directory")
 	}
 	markerPath := filepath.Join(path, stateMarkerName)
 	marker, err := readStateFile(markerPath)
@@ -36,27 +32,16 @@ func inspectPrivateDir(path string) error {
 }
 
 func ensurePrivateDir(path string) error {
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("state directory must not be a symlink")
-		}
-		if !info.IsDir() {
-			return errors.New("state directory path is not a directory")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect private state directory: %w", err)
+	if err := validateStateDirectoryPath(path, true); err != nil {
+		return fmt.Errorf("validate private state directory: %w", err)
 	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("create private state directory: %w", err)
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect private state directory: %w", err)
+	if err := validateStateDirectoryPath(path, false); err != nil {
+		return fmt.Errorf("validate created private state directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("state directory must be a real directory")
-	}
-	if err := os.Chmod(path, 0o700); err != nil && !errors.Is(err, os.ErrPermission) {
+	if err := protectPrivateDirectory(path); err != nil {
 		return fmt.Errorf("protect private state directory: %w", err)
 	}
 	if err := ensureStateMarker(path); err != nil {
@@ -110,28 +95,15 @@ func ensureStateMarker(stateDir string) error {
 }
 
 func readStateFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("refusing symlink file: %s", path)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("state file is not a regular file: %s", path)
-	}
-	return os.ReadFile(path)
+	data, _, err := readTrustedStateFile(path)
+	return data, err
 }
 
 func writePrivateFile(stateDir, path string, data []byte) error {
 	if err := ensurePrivateDir(stateDir); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing symlink file: %s", path)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if _, _, err := readTrustedStateFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect private file: %w", err)
 	}
 	temp, err := os.CreateTemp(stateDir, ".tmp-hooshix-*")
@@ -158,7 +130,7 @@ func writePrivateFile(stateDir, path string, data []byte) error {
 	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("replace private file: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrPermission) {
+	if err := protectPrivateStateFile(path); err != nil {
 		return fmt.Errorf("protect private file: %w", err)
 	}
 	return nil

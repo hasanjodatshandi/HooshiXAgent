@@ -51,18 +51,11 @@ func (store *dpapiSecretStore) LoadForMutation() (SecretState, error) {
 	if err := inspectPrivateDir(store.stateDir); err != nil {
 		return SecretState{}, err
 	}
-	info, err := os.Lstat(store.path)
+	protected, _, err := readTrustedStateFile(store.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return SecretState{}, nil
 		}
-		return SecretState{}, fmt.Errorf("inspect DPAPI secret file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return SecretState{}, errors.New("DPAPI secret file must not be a symlink")
-	}
-	protected, err := os.ReadFile(store.path)
-	if err != nil {
 		return SecretState{}, fmt.Errorf("read DPAPI secret file: %w", err)
 	}
 	plain, err := dpapiUnprotect(protected)

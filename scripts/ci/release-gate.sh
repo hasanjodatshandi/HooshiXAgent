@@ -53,6 +53,9 @@ bash scripts/ci/agent-state-installer.sh
 # RA-5 Agent state transaction gate proves atomic config/secret mutation, crash recovery, read-only diagnostics and retry/redaction behavior.
 bash scripts/ci/agent-state-transaction.sh
 
+# RA-6 filesystem/installer gate proves no-follow file trust, parent path hardening and Unix package safety; native Windows rollback is a blocking CI prerequisite.
+bash scripts/ci/filesystem-installer-hardening.sh
+
 # R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
 bash scripts/ci/infrastructure-runtime.sh
 
@@ -139,6 +142,7 @@ multi_host_public_edge_gate=Passed
 observability_writer_gate=Passed
 agent_state_installer_gate=Passed
 agent_state_transaction_gate=Passed
+filesystem_installer_hardening_gate=Passed
 infrastructure_runtime_gate=Passed
 comprehensive_test_expansion_gate=Passed
 performance_capacity_gate=Passed

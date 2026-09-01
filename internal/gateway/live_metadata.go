@@ -90,12 +90,8 @@ func NewLiveMetadata(root string, options LiveMetadataOptions) (*LiveMetadata, e
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("live metadata root is required")
 	}
-	info, err := os.Lstat(root)
-	if err != nil {
-		return nil, fmt.Errorf("stat live metadata root: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, errors.New("live metadata root must be a real directory")
+	if err := validateTrustedMetadataDirectory(root, false); err != nil {
+		return nil, fmt.Errorf("validate live metadata root: %w", err)
 	}
 	if options.RefreshInterval <= 0 {
 		options.RefreshInterval = DefaultMetadataRefreshInterval
@@ -221,6 +217,9 @@ func (source *LiveMetadata) refreshAt(now time.Time) error {
 	source.refreshMu.Lock()
 	defer source.refreshMu.Unlock()
 
+	if err := validateTrustedMetadataDirectory(source.root, false); err != nil {
+		return source.recordRefreshFailure(fmt.Errorf("validate live metadata root: %w", err))
+	}
 	manifest, err := loadMetadataManifest(filepath.Join(source.root, "current.json"), now, source.maxSnapshotAge)
 	if err != nil {
 		return source.recordRefreshFailure(err)
@@ -321,12 +320,8 @@ func loadMetadataManifest(path string, now time.Time, maxSnapshotAge time.Durati
 
 func loadLiveGeneration(root string) (*SnapshotMetadata, [sha256.Size]byte, error) {
 	var zero [sha256.Size]byte
-	info, err := os.Lstat(root)
-	if err != nil {
-		return nil, zero, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, zero, errors.New("generation path must be a real directory")
+	if err := validateTrustedMetadataDirectory(root, false); err != nil {
+		return nil, zero, fmt.Errorf("validate generation path: %w", err)
 	}
 
 	source := NewSnapshotMetadata()
@@ -342,12 +337,8 @@ func loadLiveGeneration(root string) (*SnapshotMetadata, [sha256.Size]byte, erro
 		{category: "revocations", add: source.addRevocationJSON},
 	} {
 		dir := filepath.Join(root, spec.category)
-		dirInfo, err := os.Lstat(dir)
-		if err != nil {
-			return nil, zero, fmt.Errorf("read required category %s: %w", spec.category, err)
-		}
-		if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
-			return nil, zero, fmt.Errorf("metadata category %s must be a real directory", spec.category)
+		if err := validateTrustedMetadataDirectory(dir, false); err != nil {
+			return nil, zero, fmt.Errorf("validate metadata category %s: %w", spec.category, err)
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -389,24 +380,7 @@ func loadLiveGeneration(root string) (*SnapshotMetadata, [sha256.Size]byte, erro
 }
 
 func readRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, errors.New("metadata path must be a regular non-symlink file")
-	}
-	if info.Size() > maxBytes {
-		return nil, fmt.Errorf("metadata file exceeds %d bytes", maxBytes)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("metadata file exceeds %d bytes", maxBytes)
-	}
-	return data, nil
+	return readTrustedMetadataFile(path, maxBytes)
 }
 
 func validGenerationName(value string) bool {
