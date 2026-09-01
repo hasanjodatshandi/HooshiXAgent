@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
 
@@ -64,6 +65,9 @@ func validateStateDirectoryPath(path string, allowMissing bool) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			if runtime.GOOS == "darwin" && current == "/var" && info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
 			return fmt.Errorf("state directory path component must be a real directory: %s", current)
 		}
 	}
