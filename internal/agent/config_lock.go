@@ -57,7 +57,15 @@ func withConfigLock(stateDir string, operation func() error) error {
 			return operation()
 		}
 		if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("create config lock: %w", err)
+			// Windows can report an existing directory or another incompatible lock object
+			// as a generic OpenFile error instead of os.ErrExist. If the path now exists,
+			// route it through the same fail-closed inspection used for normal contention.
+			if _, inspectErr := os.Lstat(lockPath); inspectErr != nil {
+				if errors.Is(inspectErr, os.ErrNotExist) {
+					return fmt.Errorf("create config lock: %w", err)
+				}
+				return fmt.Errorf("inspect config lock after create failure: %w", inspectErr)
+			}
 		}
 		reclaimed, inspectErr := reclaimStaleConfigLock(lockPath, time.Now().UTC())
 		if inspectErr != nil {
@@ -105,7 +113,10 @@ func reclaimStaleConfigLockWithProcessCheck(lockPath string, now time.Time, aliv
 	if err != nil {
 		return false, fmt.Errorf("invalid config lock metadata: %w", err)
 	}
-	if alive(record.PID) {
+	// Contention between goroutines in this process is unquestionably live and should
+	// not perform an expensive platform process query on every poll. This also avoids
+	// Windows handle churn under high local mutation concurrency.
+	if record.PID == os.Getpid() || alive(record.PID) {
 		return false, nil
 	}
 	return removeUnchangedLock(lockPath, data, info.ModTime())
