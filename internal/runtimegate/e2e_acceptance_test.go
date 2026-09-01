@@ -581,4 +581,3 @@ func publicRequestWithHost(client *http.Client, baseURL, path, body, host string
 	request.Host = host
 	return client.Do(request)
 }
-
