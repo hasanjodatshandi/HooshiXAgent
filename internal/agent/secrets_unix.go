@@ -34,22 +34,15 @@ func (store *fileSecretStore) LoadForMutation() (SecretState, error) {
 	if err := inspectPrivateDir(store.stateDir); err != nil {
 		return SecretState{}, err
 	}
-	info, err := os.Lstat(store.path)
+	data, mode, err := readTrustedStateFile(store.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return SecretState{}, nil
 		}
-		return SecretState{}, fmt.Errorf("inspect secret file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return SecretState{}, errors.New("secret file must not be a symlink")
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return SecretState{}, fmt.Errorf("secret file permissions are too broad: %04o", info.Mode().Perm())
-	}
-	data, err := os.ReadFile(store.path)
-	if err != nil {
 		return SecretState{}, fmt.Errorf("read secret file: %w", err)
+	}
+	if mode.Perm()&0o077 != 0 {
+		return SecretState{}, fmt.Errorf("secret file permissions are too broad: %04o", mode.Perm())
 	}
 	return decodeSecretState(data)
 }

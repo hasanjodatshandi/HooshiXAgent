@@ -20,6 +20,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | Packaging/Compose deployment | `scripts/ci/packaging-ops.sh` | Packaging / clean deployment / rollback | Yes |
 | Dynamic multi-host public edge | `scripts/ci/multi-host-public-edge.sh` | RA-4 multi-host public edge gate | Yes |
 | Agent state transactions / retry safety | `scripts/ci/agent-state-transaction.sh` | RA-5 Agent state transaction hardening gate | Yes |
+| Filesystem / installer trust | `scripts/ci/filesystem-installer-hardening.sh` + Windows native matrix | RA-6 filesystem / installer hardening | Yes |
 | Release security/resilience | `scripts/ci/release-gate.sh` | AG-8 final security / resilience / release gate | Yes |
 
 ## Hardening gate chain
@@ -36,6 +37,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | R-8 observability / writer isolation gate | non-blocking bounded telemetry and single-writer control-priority scheduling |
 | R-9 Agent state / installer hardening gate | strict state/config, mutation lock, destructive-path and bootstrap safety |
 | RA-5 Agent state transaction hardening gate | config+secret rollback/recovery, read-only diagnostics, stale-lock ownership, terminal permanent errors and credential redaction |
+| RA-6 filesystem / installer hardening gate | handle-based no-follow metadata/state reads, parent symlink/reparse rejection, Unix private-mode enforcement and transactional Windows rollback fault safety |
 | R-10 infrastructure runtime hardening gate | hardened two-service Compose runtime and actual-container acceptance |
 | R-11 comprehensive test expansion gate | fuzz/race/reconnect/slow-path scenarios and informational coverage artifact |
 | R-12 performance / capacity gate | reproducible 100/500/1000 synthetic capacity, soak, benchmark and CPU/heap/block/mutex evidence |
@@ -55,6 +57,7 @@ The `AG-8 final security / resilience / release gate` job currently depends on s
 - RA-3 live metadata lifecycle acceptance;
 - RA-4 multi-host public-edge acceptance;
 - RA-5 Agent state transaction/recovery acceptance;
+- RA-6 filesystem/installer trust acceptance, including native Windows rollback fault injection;
 - packaging/clean deployment/rollback;
 - executable runtime gate.
 

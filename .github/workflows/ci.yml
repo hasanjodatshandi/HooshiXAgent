@@ -271,6 +271,35 @@ jobs:
         shell: bash
         run: bash scripts/ci/agent-state-transaction.sh
 
+  filesystem-installer-hardening:
+    name: RA-6 filesystem / installer hardening (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Run Unix filesystem / installer hardening gate
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/ci/filesystem-installer-hardening.sh
+
+      - name: Run Windows filesystem / installer hardening gate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go test -count=5 ./internal/agent ./internal/gateway -run '^TestRA6'
+          ./scripts/ci/agent-install-smoke.ps1
+
   infrastructure-runtime:
     name: R-10 infrastructure runtime hardening gate
     runs-on: ubuntu-latest
@@ -447,6 +476,7 @@ jobs:
       - observability-writer
       - agent-state-installer
       - agent-state-transaction
+      - filesystem-installer-hardening
       - infrastructure-runtime
       - comprehensive-tests
       - performance-capacity
