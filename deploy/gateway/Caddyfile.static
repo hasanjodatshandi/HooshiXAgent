@@ -1,15 +1,8 @@
 {
 	admin off
-	on_demand_tls {
-		ask {$HOOSHIX_TLS_ASK_URL}
-	}
 }
 
-https:// {
-	tls {
-		on_demand
-	}
-
+{$HOOSHIX_PUBLIC_HOST:localhost} {
 	@internal_ops path /readyz /metrics
 	respond @internal_ops 404
 

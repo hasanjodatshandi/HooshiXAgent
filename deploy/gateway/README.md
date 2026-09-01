@@ -1,6 +1,6 @@
 # HooshiX Tunnel Gateway Deployment
 
-This directory is the AG-7 Docker Compose deployment package for the Tunnel Gateway and Caddy public TLS edge only.
+This directory is the Docker Compose deployment package for the Tunnel Gateway and Caddy public TLS edge only, reconciled through RA-4 multi-host public edge.
 
 It intentionally does **not** contain the external HooshiX Control Panel, a database, users/tenants/quotas, Redis, Kubernetes or any other control-plane service.
 
@@ -29,7 +29,11 @@ Copy the environment example:
 cp .env.example .env
 ```
 
-Set `HOOSHIX_PUBLIC_HOST` to a DNS name whose A/AAAA record points at the deployment host. Caddy performs public certificate automation for that name.
+Production/default Caddy uses the ADR-0011 restricted On-Demand TLS model. Set `HOOSHIX_TLS_ASK_URL` to the external permission endpoint supplied by the Control Panel integration. Caddy appends the requested `domain` query parameter and may manage a certificate only when that endpoint returns `200 OK`. The permission authority must perform exact canonical-hostname authorization and fail closed for unknown, disabled, expired, malformed or unavailable authority; DNS resolution or suffix membership alone is not authorization.
+
+`HOOSHIX_PUBLIC_HOST` remains the explicit static-compatibility/local edge-health hostname. In a dynamic production deployment, choose a currently approved hostname for this health probe. `HOOSHIX_CADDYFILE=./Caddyfile` is the production dynamic configuration. `HOOSHIX_CADDYFILE=./Caddyfile.static` is the explicit single-host compatibility mode and requires `HOOSHIX_PUBLIC_HOST`. Static compatibility must not be used to claim RA-4 multi-host behavior.
+
+The default dynamic Caddyfile is intentionally fail-closed if `HOOSHIX_TLS_ASK_URL` is empty or invalid; there is no unrestricted On-Demand TLS fallback.
 
 `HOOSHIX_METADATA_DIR` is a read-only projection supplied by the external Control Panel integration flow. The Compose default is `HOOSHIX_METADATA_MODE=live`, with a 1-second refresh interval and 30-second maximum generation age. Production live layout is:
 
@@ -85,7 +89,8 @@ Inspect status:
 - `/healthz` is the Gateway liveness endpoint.
 - `/readyz` is an internal readiness endpoint and fails closed when live metadata has no fresh validated generation.
 - `/metrics` emits low-cardinality aggregate Prometheus text metrics, including live metadata freshness/refresh health.
-- Caddy blocks `/readyz` and `/metrics` on the public edge.
+- Caddy blocks `/readyz` and `/metrics` on the public edge for every hostname.
+- TLS permission is independent from Gateway route authorization: a hostname may be certificate-approved yet still receive Gateway 404 when no current route assignment exists.
 - Gateway structured logs go to stderr.
 - Gateway integration/status JSONL goes to stdout.
 - Caddy access logs are structured JSON on stdout.
@@ -103,11 +108,11 @@ The same profile bounds public ingress to 32 concurrent requests with a global 2
 
 Both Gateway and Caddy have explicit 256 MiB memory, 1 CPU and 256-PID safety ceilings. These are fail-safe deployment ceilings, not throughput claims; R-12 synthetic results do not override this deployment envelope. Both root filesystems are read-only, `/tmp` is a bounded `noexec,nosuid,nodev` tmpfs, `no-new-privileges` is mandatory, host PID/IPC/network namespaces and device passthrough are not used, and all ambient Linux capabilities are dropped.
 
-Gateway continues as UID/GID `10001:10001` with **no** added capability. Caddy also runs as UID/GID `10001:10001`; its sole added capability is `NET_BIND_SERVICE`, required to own public ports 80/443. Caddy's persistent `/data` and `/config` named volumes are its only writable persistent mounts.
+Gateway continues as UID/GID `10001:10001` with **no** added capability. Caddy also runs as UID/GID `10001:10001`; its sole added capability is `NET_BIND_SERVICE`, required to own public ports 80/443. Caddy's persistent `/data` and `/config` named volumes are its only writable persistent mounts. Dynamic certificates for approved hostnames remain in `/data`; an unapproved hostname must never appear there as a result of On-Demand TLS.
 
 All host bind mounts are read-only and use `create_host_path: false`, so a missing metadata/TLS/Caddyfile source fails startup instead of being silently created by Compose. The host TLS directory remains mode `0700`; `ca.key` is never mounted. Gateway receives only its server key/certificate plus the CA certificate, and Caddy receives only the public CA certificate.
 
-Gateway's Compose healthcheck uses `/readyz`. Caddy waits for that health state and its active upstream probe also uses `/readyz`, so an alive-but-not-ready Gateway is not considered routable. Caddy has its own local HTTPS healthcheck through the configured public virtual host; `/readyz` and `/metrics` remain blocked on the public edge.
+Gateway's Compose healthcheck uses `/readyz`. Caddy waits for that health state and its active upstream probe also uses `/readyz`, so an alive-but-not-ready Gateway is not considered routable. Caddy has its own local HTTPS healthcheck through `HOOSHIX_PUBLIC_HOST`; in dynamic mode that health hostname must therefore be included in the external certificate-permission authority. `/readyz` and `/metrics` remain blocked on the public edge.
 
 ## Upgrade and rollback
 
@@ -124,7 +129,7 @@ Clean deployment and deterministic previous-version rollback are verified by the
 
 ## TLS/certificate operations
 
-Public certificate lifecycle is owned by Caddy. The internal Gateway certificate is intentionally shorter lived than the deployment CA. Rotate it by rerunning `bootstrap-internal-tls.sh` and restarting the two services. Keep `ca.key` host-private and backed up according to operator secret-management policy.
+Public certificate lifecycle is owned by Caddy, but first-time dynamic certificate authority is restricted by `HOOSHIX_TLS_ASK_URL`. The external permission service is not bundled in this repository and no Control Panel CRUD/database/business logic is added here. Cached approved certificates may continue to terminate TLS if the permission service later becomes unavailable, while Gateway still independently enforces current route metadata for every request. The internal Gateway certificate is intentionally shorter lived than the deployment CA. Rotate it by rerunning `bootstrap-internal-tls.sh` and restarting the two services. Keep `ca.key` host-private and backed up according to operator secret-management policy.
 
 ## Shutdown
 

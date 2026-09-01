@@ -1,6 +1,6 @@
 # Agent/Gateway Packaging and Operations — AG-7
 
-**Status:** Current packaging/operations contract (origin AG-7; reconciled through RA-3)
+**Status:** Current packaging/operations contract (origin AG-7; reconciled through RA-4)
 
 AG-7 packages and operates the existing Edge Agent and Tunnel Gateway. It does not add the separate HooshiX Control Panel, a Control Panel database, tenant/user management, quotas, billing, Kubernetes, Redis or unrelated infrastructure.
 
@@ -57,7 +57,9 @@ No Control Panel service, API, database, durable Gateway datastore, broker or ca
 
 ### TLS topology
 
-Caddy owns public TLS/certificate automation. Caddy forwards to the Gateway over a second verified HTTPS connection.
+Caddy owns public TLS/certificate automation. RA-4 makes the production/default edge a dynamic `https://` catch-all with restricted On-Demand TLS. The global `on_demand_tls { ask ... }` permission URL is supplied by the external Control Panel integration boundary and is deny-by-default; HooshiXAgent does not implement domain ownership, endpoint CRUD or the permission service itself. `Caddyfile.static` preserves the old one-host model only as explicit compatibility/test/migration mode.
+
+Certificate permission and routing are independent checks. A permission-approved hostname can complete TLS but still receives Gateway `404` when no current route assignment exists. An unknown/unapproved hostname must fail On-Demand TLS authorization and must not enter Caddy certificate storage. Caddy forwards accepted HTTPS traffic to the Gateway over a second verified HTTPS connection.
 
 `bootstrap-internal-tls.sh` creates a deployment-local CA and a Gateway certificate for Docker service DNS name `gateway`. Runtime secret distribution is deliberately narrow:
 
@@ -67,7 +69,7 @@ Caddy owns public TLS/certificate automation. Caddy forwards to the Gateway over
 
 Caddy explicitly configures the upstream CA trust pool and TLS server name. `tls_insecure_skip_verify` is forbidden.
 
-Caddy also preserves the original public `Host` header so Gateway route lookup continues to use the externally assigned public hostname rather than Docker service name.
+Caddy also preserves the original public `Host` header so Gateway route lookup continues to use the externally assigned public hostname rather than Docker service name. The dynamic config can therefore serve independently assigned hostnames without per-host Caddy reloads.
 
 ### R-10 runtime hardening
 
@@ -93,7 +95,7 @@ hooshix_gateway_active_streams
 hooshix_gateway_pending_handshakes
 ```
 
-Caddy returns `404` for public `/readyz` and `/metrics`; operators use the internal deployment network for diagnostics. Gateway's Compose healthcheck and Caddy's active upstream health probe both use `/readyz`, while Caddy's own container healthcheck exercises its local HTTPS edge path.
+Caddy returns `404` for public `/readyz` and `/metrics` on every approved hostname; operators use the internal deployment network for diagnostics. Gateway's Compose healthcheck and Caddy's active upstream health probe both use `/readyz`, while Caddy's own container healthcheck exercises its local HTTPS edge path.
 
 Gateway logs remain structured JSON on stderr and GatewayStatusSignal records remain JSONL on stdout. Caddy access logs are JSON. Docker log rotation is bounded by file size/count.
 
@@ -145,6 +147,7 @@ The current packaging/operations gate provides:
 - a blocking packaging/operations CI job;
 - deterministic release archive/checksum construction;
 - a clean Docker Compose Gateway+Caddy deployment test;
+- RA-4 real Compose/Caddy multi-host acceptance with two simultaneous hostnames, approved-without-route separation and unknown-host TLS denial;
 - real Caddy→Gateway verified TLS;
 - public/private operational endpoint checks;
 - release-attestation workflow trust checks.
