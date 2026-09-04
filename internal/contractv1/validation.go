@@ -243,6 +243,9 @@ func ParseRevocationSignal(data []byte) (RevocationSignal, error) {
 
 func ParseGatewayStatusSignal(data []byte) (GatewayStatusSignal, error) {
 	var signal GatewayStatusSignal
+	if err := validateStrictJSONObject(data); err != nil {
+		return signal, err
+	}
 	if err := decodeStrict(data, &signal); err != nil {
 		return signal, err
 	}

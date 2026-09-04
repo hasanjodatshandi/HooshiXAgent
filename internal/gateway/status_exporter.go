@@ -19,6 +19,7 @@ type statusExporter struct {
 
 	dropped  atomic.Uint64
 	failures atomic.Uint64
+	timedOut atomic.Bool
 
 	done      chan struct{}
 	stopped   chan struct{}
@@ -48,9 +49,13 @@ func (exporter *statusExporter) enqueue(signal contractv1.GatewayStatusSignal) {
 	if exporter == nil || exporter.disabled {
 		return
 	}
+	if exporter.timedOut.Load() {
+		exporter.dropped.Add(1)
+		return
+	}
 	exporter.stateMu.RLock()
 	defer exporter.stateMu.RUnlock()
-	if exporter.closed {
+	if exporter.closed || exporter.timedOut.Load() {
 		exporter.dropped.Add(1)
 		return
 	}
@@ -65,28 +70,56 @@ func (exporter *statusExporter) run() {
 	defer close(exporter.stopped)
 	for {
 		select {
+		case <-exporter.done:
+			exporter.dropQueued()
+			return
+		default:
+		}
+		select {
+		case <-exporter.done:
+			exporter.dropQueued()
+			return
 		case signal := <-exporter.queue:
 			exporter.emit(signal)
-		case <-exporter.done:
-			for {
-				select {
-				case signal := <-exporter.queue:
-					exporter.emit(signal)
-				default:
-					return
-				}
-			}
 		}
 	}
 }
 
 func (exporter *statusExporter) emit(signal contractv1.GatewayStatusSignal) {
+	if exporter.timedOut.Load() {
+		exporter.dropped.Add(1)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), exporter.emitTimeout)
-	err := exporter.sink.Emit(ctx, signal)
-	cancel()
-	if err != nil {
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- exporter.sink.Emit(ctx, signal)
+	}()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			exporter.failures.Add(1)
+			exporter.logger.Warn("status sink failed", "error", err, "kind", signal.Kind)
+		}
+	case <-ctx.Done():
 		exporter.failures.Add(1)
-		exporter.logger.Warn("status sink failed", "error", err, "kind", signal.Kind)
+		exporter.timedOut.Store(true)
+		exporter.logger.Warn("status sink timed out; exporter disabled", "error", ctx.Err(), "kind", signal.Kind)
+	}
+}
+
+func (exporter *statusExporter) dropQueued() {
+	for {
+		select {
+		case <-exporter.queue:
+			exporter.dropped.Add(1)
+		default:
+			return
+		}
 	}
 }
 

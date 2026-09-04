@@ -217,15 +217,37 @@ func (sess *session) revalidateAuthorization(ctx context.Context, now time.Time)
 		{"device_session_authorization", sess.authorizationID},
 		{"device", sess.deviceID},
 	} {
+		if reasonSource, ok := sess.gateway.metadata.(interface {
+			RevocationReason(context.Context, string, string, time.Time) (string, bool, error)
+		}); ok {
+			reason, revoked, revokeErr := reasonSource.RevocationReason(ctx, subject.kind, subject.id, now)
+			if revokeErr != nil {
+				return "", fmt.Errorf("authorization revocation lookup failed: %w", revokeErr)
+			}
+			if revoked {
+				return sessionRevocationReason(reason), fmt.Errorf("session authorization revoked (%s): %w", reason, err)
+			}
+			continue
+		}
+
 		revoked, revokeErr := sess.gateway.metadata.Revoked(ctx, subject.kind, subject.id, now)
 		if revokeErr != nil {
-			return "", fmt.Errorf("authorization revalidation failed: %w", err)
+			return "", fmt.Errorf("authorization revocation lookup failed: %w", revokeErr)
 		}
 		if revoked {
 			return "credential_revoked", fmt.Errorf("session authorization revoked: %w", err)
 		}
 	}
 	return "", fmt.Errorf("session authorization invalid or unavailable: %w", err)
+}
+
+func sessionRevocationReason(reason string) string {
+	switch reason {
+	case "disabled", "credential_revoked", "security_hold", "expired":
+		return reason
+	default:
+		return "credential_revoked"
+	}
 }
 func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) error {
 	if err := contractv1.ValidateControlPayload(frame.Payload, frame.StreamID, time.Now().UTC()); err != nil {

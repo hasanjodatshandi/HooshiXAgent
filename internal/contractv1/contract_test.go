@@ -161,6 +161,31 @@ func TestExternalContractRejectsExpiredAuthorizationAndRawLocalTarget(t *testing
 	}
 }
 
+func TestGatewayStatusSignalUsesStrictJSONObjectSemantics(t *testing.T) {
+	t.Parallel()
+
+	valid := `{"contract_version":1,"event_id":"status-001","observed_at":"2026-08-29T12:00:00Z","kind":"session_connected","device_id":"device-001","session_id":"session-001"}`
+	if _, err := ParseGatewayStatusSignal([]byte(valid)); err != nil {
+		t.Fatalf("valid gateway status signal rejected: %v", err)
+	}
+
+	duplicate := `{"contract_version":1,"event_id":"status-001","event_id":"status-002","observed_at":"2026-08-29T12:00:00Z","kind":"session_connected","device_id":"device-001"}`
+	if _, err := ParseGatewayStatusSignal([]byte(duplicate)); err == nil {
+		t.Fatal("gateway status duplicate JSON member must be rejected")
+	}
+
+	invalidUTF8 := append([]byte(`{"contract_version":1,"event_id":"status-001","observed_at":"2026-08-29T12:00:00Z","kind":"session_connected","device_id":"`), byte(0xff))
+	invalidUTF8 = append(invalidUTF8, []byte(`"}`)...)
+	if _, err := ParseGatewayStatusSignal(invalidUTF8); err == nil {
+		t.Fatal("gateway status invalid UTF-8 must be rejected")
+	}
+
+	trailing := valid + ` {}`
+	if _, err := ParseGatewayStatusSignal([]byte(trailing)); err == nil {
+		t.Fatal("gateway status trailing JSON value must be rejected")
+	}
+}
+
 func TestHandshakeFixtureAndEd25519Proof(t *testing.T) {
 	t.Parallel()
 

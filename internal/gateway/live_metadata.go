@@ -182,6 +182,14 @@ func (source *LiveMetadata) Revoked(ctx context.Context, subjectKind, subjectID 
 	return active.Revoked(ctx, subjectKind, subjectID, at)
 }
 
+func (source *LiveMetadata) RevocationReason(ctx context.Context, subjectKind, subjectID string, at time.Time) (string, bool, error) {
+	active, err := source.activeSnapshot(at)
+	if err != nil {
+		return "", false, err
+	}
+	return active.RevocationReason(ctx, subjectKind, subjectID, at)
+}
+
 func (source *LiveMetadata) activeSnapshot(at time.Time) (*SnapshotMetadata, error) {
 	if source == nil {
 		return nil, ErrMetadataUnavailable
