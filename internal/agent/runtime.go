@@ -14,9 +14,12 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent/tunnelstates"
 )
 
 var (
@@ -70,6 +73,12 @@ type Runner struct {
 	limits   Limits
 	logger   *slog.Logger
 	attempt  func(context.Context) error
+
+	// health carries the connection health state machine and reconnect
+	// counter required by the tunnel reliability phase. It is observational
+	// only and never authorization authority.
+	health     *tunnelstates.Machine
+	reconnects atomic.Int64
 }
 
 func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, error) {
@@ -83,34 +92,61 @@ func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, er
 	if logger == nil {
 		logger = slog.Default()
 	}
-	runner := &Runner{stateDir: normalized, limits: limits, logger: logger}
+	runner := &Runner{stateDir: normalized, limits: limits, logger: logger, health: tunnelstates.New()}
 	runner.attempt = runner.runOnce
 	return runner, nil
+}
+
+// HealthState returns the current connection health state name and whether
+// it is terminal. Exposed for status/diagnostics only.
+func (runner *Runner) HealthState() (string, bool) {
+	return runner.health.Observability()
+}
+
+// ReconnectCount returns the number of completed reconnect cycles since
+// process start. Exposed for status/diagnostics only.
+func (runner *Runner) ReconnectCount() int64 {
+	return runner.reconnects.Load()
 }
 
 func (runner *Runner) Run(ctx context.Context) error {
 	backoff := runner.limits.ReconnectMin
 	for {
 		if err := ctx.Err(); err != nil {
+			_ = runner.health.Transition(tunnelstates.Shutdown)
 			return nil
+		}
+		if err := runner.health.Transition(tunnelstates.Connecting); err != nil {
+			runner.logger.Warn("agent health transition rejected", "error", err)
 		}
 		sessionStarted := time.Now()
 		err := runner.attempt(ctx)
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			_ = runner.health.Transition(tunnelstates.Shutdown)
 			return nil
 		}
 		if errors.Is(err, ErrSessionRevoked) || errors.Is(err, ErrPermanentAgentFailure) {
+			if errors.Is(err, ErrSessionRevoked) {
+				_ = runner.health.Transition(tunnelstates.Revoked)
+			} else {
+				_ = runner.health.Transition(tunnelstates.Shutdown)
+			}
 			return err
 		}
 		if time.Since(sessionStarted) >= 10*time.Second {
 			backoff = runner.limits.ReconnectMin
 		}
-		runner.logger.Warn("agent session ended; reconnecting", "error", sanitizedError(err), "retry_in", backoff.String())
+		runner.reconnects.Add(1)
+		if err := runner.health.Transition(tunnelstates.Reconnecting); err != nil {
+			runner.logger.Warn("agent health transition rejected", "error", err)
+		}
+		runner.logger.Warn("agent session ended; reconnecting", "error", sanitizedError(err), "retry_in", backoff.String(), "reconnects", runner.ReconnectCount())
 		delay := jittered(backoff)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			_ = runner.health.Transition(tunnelstates.Shutdown)
 			return nil
 		case <-timer.C:
 		}
@@ -179,7 +215,13 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 		}
 		return err
 	}
-	runner.logger.Info("agent session authenticated", "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind())
+	if err := runner.health.Transition(tunnelstates.Connected); err != nil {
+		runner.logger.Warn("agent health transition rejected", "error", err)
+	}
+	if runner.ReconnectCount() > 0 {
+		sess.observeReconnect()
+	}
+	runner.logger.Info("agent session authenticated", "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", runner.health.Current().String())
 	err = protectError(sess.run(ctx), token)
 	if errors.Is(err, ErrSessionRevoked) {
 		return err

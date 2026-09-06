@@ -263,6 +263,23 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 	switch envelope.MessageType {
 	case "pong":
 		return nil
+	case "health_report":
+		var report contractv1.HealthReport
+		if err := json.Unmarshal(frame.Payload, &report); err != nil {
+			return err
+		}
+		// Health reports are bounded operational telemetry only: they
+		// refresh liveness observation and are never authorization,
+		// routing, or revocation authority. Validation already happened
+		// in ValidateControlPayload above.
+		sess.lastSeen.Store(time.Now().UnixNano())
+		sess.gateway.resources.healthReports.Add(1)
+		sess.gateway.logger.Debug("agent health report received",
+			"device_id", sess.deviceID,
+			"active_streams", report.ActiveStreams,
+			"queued_frames", report.QueuedFrames,
+			"reconnect_count", report.ReconnectCount)
+		return nil
 	case "ping":
 		var ping contractv1.Heartbeat
 		if err := json.Unmarshal(frame.Payload, &ping); err != nil {

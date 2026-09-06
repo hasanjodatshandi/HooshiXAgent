@@ -20,5 +20,6 @@ Normative lifecycle and stable-ID rules are defined in `docs/governance/authorit
 | ADR-0010 | Agent Packaging, Gateway Deployment and Release Trust | Accepted | 2026-08-29 | Yes | — | — | `docs/adr/ADR-0010-packaging-deployment-and-release-trust.md` |
 | ADR-0011 | Authorized On-Demand Public TLS for Dynamic Hostnames | Accepted | 2026-08-31 | Yes | — | — | `docs/adr/ADR-0011-authorized-on-demand-public-tls.md` |
 | ADR-0012 | Live External Metadata Snapshot Projection | Accepted | 2026-08-31 | Yes | — | — | `docs/adr/ADR-0012-live-external-metadata-snapshot-projection.md` |
+| ADR-0013 | Clean Architecture Layering for the Tunnel Upgrade | Accepted | 2026-09-06 | Yes | — | — | `docs/adr/ADR-0013-clean-architecture-tunnel-upgrade.md` |
 
-ADR IDs are stable and monotonic. The next unused ID is `ADR-0013`; allocated IDs must never be reused or renumbered.
+ADR IDs are stable and monotonic. The next unused ID is `ADR-0014`; allocated IDs must never be reused or renumbered.

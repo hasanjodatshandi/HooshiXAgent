@@ -9,6 +9,7 @@
     { "$ref": "#/$defs/session_ready" },
     { "$ref": "#/$defs/ping" },
     { "$ref": "#/$defs/pong" },
+    { "$ref": "#/$defs/health_report" },
     { "$ref": "#/$defs/stream_open" },
     { "$ref": "#/$defs/stream_close" },
     { "$ref": "#/$defs/stream_error" },
@@ -114,6 +115,22 @@
         "message_type": { "const": "pong" },
         "ping_id": { "$ref": "#/$defs/id" },
         "received_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+      },
+      "additionalProperties": false
+    },
+    "health_report": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "report_id", "generated_at", "active_streams", "queued_frames", "reconnect_count"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "health_report" },
+        "report_id": { "$ref": "#/$defs/id" },
+        "generated_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+        "active_streams": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "queued_frames": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "reconnect_count": { "type": "integer", "minimum": 0 },
+        "last_reconnect_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+        "agent_version": { "type": "string", "maxLength": 64 }
       },
       "additionalProperties": false
     },

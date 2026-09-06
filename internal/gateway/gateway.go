@@ -150,6 +150,8 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load()+gateway.resources.handshakeDeviceAdmission.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load()+gateway.resources.ingressRouteAdmission.rejected.Load()+gateway.resources.ingressDeviceAdmission.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_health_reports_total Total bounded Agent health_report control messages accepted.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_health_reports_total counter\nhooshix_gateway_health_reports_total %d\n", gateway.resources.healthReports.Load())
 	statusQueued, statusLimit, statusDropped, statusFailures := gateway.status.snapshot()
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_status_queue_depth Current queued status signals waiting for asynchronous export.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_queue_depth gauge\nhooshix_gateway_status_queue_depth %d\n", statusQueued)

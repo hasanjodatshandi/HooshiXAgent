@@ -19,6 +19,15 @@ import (
 
 const MaxTrafficDeltaBytes = 1024 * 1024 * 1024
 
+// Health-report contract bounds. A health_report must stay small and strictly
+// bounded so a misbehaving Agent cannot use it as a resource-exhaustion
+// channel.
+const (
+	MaxStreamsPerSessionBound = 4096
+	MaxQueuedFramesBound      = 65536
+	MaxHealthReconnectCount   = 1 << 31 - 1
+)
+
 var (
 	idPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 	tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
@@ -329,6 +338,22 @@ type Heartbeat struct {
 	ReceivedAt      string `json:"received_at,omitempty"`
 }
 
+// HealthReport is the Agent→Gateway periodic health observation required by
+// the tunnel implementation plan. It carries only bounded runtime counters;
+// it never carries authorization, routing authority, secrets, or identifiers
+// beyond the opaque report correlation.
+type HealthReport struct {
+	ContractVersion    int    `json:"contract_version"`
+	MessageType        string `json:"message_type"`
+	ReportID           string `json:"report_id"`
+	GeneratedAt        string `json:"generated_at"`
+	ActiveStreams      int    `json:"active_streams"`
+	QueuedFrames       int    `json:"queued_frames"`
+	ReconnectCount     int    `json:"reconnect_count"`
+	LastReconnectAt    string `json:"last_reconnect_at,omitempty"`
+	AgentVersion       string `json:"agent_version,omitempty"`
+}
+
 type StreamOpen struct {
 	ContractVersion int    `json:"contract_version"`
 	MessageType     string `json:"message_type"`
@@ -463,6 +488,41 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		}
 		_, err := parseUTCTime("received_at", heartbeat.ReceivedAt)
 		return err
+	case "health_report":
+		if err := sessionScope(); err != nil {
+			return err
+		}
+		var report HealthReport
+		if err := decodeControlStrict(data, &report); err != nil {
+			return err
+		}
+		if report.MessageType != "health_report" || report.ContractVersion != ProtocolVersion {
+			return errors.New("invalid health_report envelope")
+		}
+		if err := validateID("report_id", report.ReportID); err != nil {
+			return err
+		}
+		if _, err := parseUTCTime("generated_at", report.GeneratedAt); err != nil {
+			return err
+		}
+		if report.ActiveStreams < 0 || report.ActiveStreams > MaxStreamsPerSessionBound {
+			return errors.New("health_report active_streams outside contract bounds")
+		}
+		if report.QueuedFrames < 0 || report.QueuedFrames > MaxQueuedFramesBound {
+			return errors.New("health_report queued_frames outside contract bounds")
+		}
+		if report.ReconnectCount < 0 {
+			return errors.New("health_report reconnect_count must not be negative")
+		}
+		if report.LastReconnectAt != "" {
+			if _, err := parseUTCTime("last_reconnect_at", report.LastReconnectAt); err != nil {
+				return err
+			}
+		}
+		if len(report.AgentVersion) > 64 {
+			return errors.New("health_report agent_version outside contract length")
+		}
+		return nil
 	case "stream_open":
 		if err := streamScope(); err != nil {
 			return err
