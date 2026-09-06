@@ -37,6 +37,20 @@ func (failingStatusSink) Emit(context.Context, contractv1.GatewayStatusSignal) e
 	return errors.New("status exporter test failure")
 }
 
+type nonCooperativeStatusSink struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func (sink *nonCooperativeStatusSink) Emit(context.Context, contractv1.GatewayStatusSignal) error {
+	sink.calls.Add(1)
+	sink.once.Do(func() { close(sink.started) })
+	<-sink.release
+	return nil
+}
+
 func TestStatusExporterBackpressureDoesNotBlockCriticalCaller(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxStatusQueueSignals = 2
@@ -101,6 +115,77 @@ func TestStatusExporterAccountsFailures(t *testing.T) {
 		_, _, _, failures := gateway.status.snapshot()
 		return failures == 1
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := gateway.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatusExporterBoundsNonCooperativeSinkAndShutdown(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxStatusQueueSignals = 4
+	limits.StatusEmitTimeout = 50 * time.Millisecond
+	sink := &nonCooperativeStatusSink{started: make(chan struct{}), release: make(chan struct{})}
+	gateway, err := New(NewSnapshotMetadata(), sink, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(sink.release)
+
+	gateway.emitStatus(context.Background(), testStatusSignal("session_connected"))
+	select {
+	case <-sink.started:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative sink did not start")
+	}
+	for i := 0; i < 32; i++ {
+		gateway.emitStatus(context.Background(), testStatusSignal("traffic_delta"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := gateway.Close(ctx); err != nil {
+		t.Fatalf("Gateway.Close remained blocked by telemetry sink: %v", err)
+	}
+	if sink.calls.Load() != 1 {
+		t.Fatalf("non-cooperative sink calls=%d want=1 bounded call", sink.calls.Load())
+	}
+	_, _, dropped, failures := gateway.status.snapshot()
+	if failures != 1 {
+		t.Fatalf("status timeout failures=%d want=1", failures)
+	}
+	if dropped == 0 {
+		t.Fatal("queued telemetry was not accounted as dropped during bounded shutdown")
+	}
+}
+
+func TestStatusMetricsRemainAggregateLowCardinality(t *testing.T) {
+	limits := DefaultLimits()
+	gateway, err := New(NewSnapshotMetadata(), failingStatusSink{}, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		signal := testStatusSignal("traffic_delta")
+		signal.DeviceID = fmt.Sprintf("device-cardinality-%d", i)
+		signal.SessionID = fmt.Sprintf("session-cardinality-%d", i)
+		signal.EndpointID = fmt.Sprintf("endpoint-cardinality-%d", i)
+		gateway.emitStatus(context.Background(), signal)
+	}
+	waitFor(t, time.Second, func() bool {
+		_, _, _, failures := gateway.status.snapshot()
+		return failures > 0
+	})
+
+	recorder := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics := recorder.Body.String()
+	for _, forbidden := range []string{"device-cardinality-", "session-cardinality-", "endpoint-cardinality-"} {
+		if strings.Contains(metrics, forbidden) {
+			t.Fatalf("status metrics exposed high-cardinality identifier %q: %s", forbidden, metrics)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := gateway.Close(ctx); err != nil {

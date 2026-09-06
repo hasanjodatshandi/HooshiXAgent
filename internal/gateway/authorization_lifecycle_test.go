@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,6 +267,44 @@ func TestAuthorizationRevalidationClassifiesEffectiveRevocation(t *testing.T) {
 	}
 	if reasonCode != "credential_revoked" {
 		t.Fatalf("revocation reason=%q want=credential_revoked", reasonCode)
+	}
+}
+
+func TestAuthorizationRevalidationPreservesSecurityHoldRevocationReason(t *testing.T) {
+	identity := newTestIdentity(t)
+	base := testMetadata(t, identity, testRouteHost)
+	now := time.Now().UTC()
+	revocationJSON, err := json.Marshal(contractv1.RevocationSignal{
+		ContractVersion: contractv1.ProtocolVersion,
+		EventID:         "revoke-auth-security-hold-001",
+		SubjectKind:     "device",
+		SubjectID:       identity.deviceID,
+		EffectiveAt:     now.Add(-time.Second).Format(time.RFC3339),
+		ReasonCode:      "security_hold",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := base.addRevocationJSON(revocationJSON); err != nil {
+		t.Fatal(err)
+	}
+	sess := &session{
+		gateway:                &Gateway{metadata: base},
+		deviceID:               identity.deviceID,
+		authorizationID:        identity.authorizationID,
+		tokenID:                identity.tokenID,
+		authorizationExpiresAt: now.Add(time.Hour),
+	}
+
+	reasonCode, err := sess.revalidateAuthorization(context.Background(), now)
+	if err == nil {
+		t.Fatal("security-hold revocation unexpectedly remained authorized")
+	}
+	if reasonCode != "security_hold" {
+		t.Fatalf("revocation reason=%q want=security_hold", reasonCode)
+	}
+	if !strings.Contains(err.Error(), "security_hold") {
+		t.Fatalf("revocation diagnostic lost source reason: %v", err)
 	}
 }
 

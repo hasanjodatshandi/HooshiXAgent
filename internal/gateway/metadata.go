@@ -73,17 +73,19 @@ type revocationSubject struct {
 }
 
 type SnapshotMetadata struct {
-	authorizations map[string]authorizationSnapshot
-	routes         map[string]routeSnapshot
-	revocations    map[revocationSubject]time.Time
-	readyErr       error
+	authorizations    map[string]authorizationSnapshot
+	routes            map[string]routeSnapshot
+	revocations       map[revocationSubject]time.Time
+	revocationReasons map[revocationSubject]string
+	readyErr          error
 }
 
 func NewSnapshotMetadata() *SnapshotMetadata {
 	return &SnapshotMetadata{
-		authorizations: make(map[string]authorizationSnapshot),
-		routes:         make(map[string]routeSnapshot),
-		revocations:    make(map[revocationSubject]time.Time),
+		authorizations:    make(map[string]authorizationSnapshot),
+		routes:            make(map[string]routeSnapshot),
+		revocations:       make(map[revocationSubject]time.Time),
+		revocationReasons: make(map[revocationSubject]string),
 	}
 }
 
@@ -211,6 +213,7 @@ func (source *SnapshotMetadata) addRevocationJSON(data []byte) error {
 	subject := revocationSubject{kind: signal.SubjectKind, id: signal.SubjectID}
 	if current, exists := source.revocations[subject]; !exists || effectiveAt.Before(current) {
 		source.revocations[subject] = effectiveAt
+		source.revocationReasons[subject] = signal.ReasonCode
 	}
 	return nil
 }
@@ -266,6 +269,18 @@ func (source *SnapshotMetadata) RouteByHostname(_ context.Context, hostname stri
 
 func (source *SnapshotMetadata) Revoked(_ context.Context, subjectKind, subjectID string, at time.Time) (bool, error) {
 	return source.revokedAt(revocationSubject{kind: subjectKind, id: subjectID}, at), nil
+}
+
+func (source *SnapshotMetadata) RevocationReason(_ context.Context, subjectKind, subjectID string, at time.Time) (string, bool, error) {
+	subject := revocationSubject{kind: subjectKind, id: subjectID}
+	if !source.revokedAt(subject, at) {
+		return "", false, nil
+	}
+	reason := source.revocationReasons[subject]
+	if reason == "" {
+		reason = "credential_revoked"
+	}
+	return reason, true, nil
 }
 
 func (source *SnapshotMetadata) revokedAt(subject revocationSubject, at time.Time) bool {
