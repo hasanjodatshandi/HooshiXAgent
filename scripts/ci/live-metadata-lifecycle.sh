@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,6 +20,6 @@ go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  go test -count=1 -run 'TestAgentGatewayLiveMetadataRouteStaleRecovery|TestAgentGatewayLiveMetadataRevocationTerminatesSession' ./internal/runtimegate
+  go test -count=1 -run 'TestAgentGatewayLiveMetadataRouteStaleRecovery|TestAgentGatewayLiveMetadataRevocationTerminatesSession' ./tests/integration
 
 echo "RA-3 live metadata lifecycle gate: PASSED - real Gateway/Agent binaries applied atomic route generations, failed closed on stale authority, recovered on a newer generation, and terminated an existing session after live revocation without Gateway restart."

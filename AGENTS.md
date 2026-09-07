@@ -1,4 +1,4 @@
-# HooshiXAgent Agent Instructions
+﻿# HooshiXAgent Agent Instructions
 
 This repository is governed by Durable Project `hooshix-agent` and Durable Plan `plan-c410eb3d212345bb9ed1c4285bca4b64`.
 
@@ -72,7 +72,7 @@ Repository/CI foundation is implemented by AG-2 in:
 - `go.mod` — module baseline targeting Go `1.27.0`;
 - `internal/agent/` and `internal/gateway/` — product implementation boundaries without AG-2 runtime behavior;
 - `contracts/` — reserved language-neutral contract boundary; concrete schemas remain AG-3 work;
-- `internal/architecture/` — architecture fitness tests;
+- `tests/architecture/` — architecture fitness tests;
 - `scripts/ci/go-quality.sh` — Go format/import/module/vet/test/race/vulnerability/build baseline;
 - `scripts/ci/security.sh` — Gitleaks + Semgrep baseline;
 - `scripts/ci/runtime-gate.sh` — fail-closed executable-runtime guard;
@@ -89,7 +89,7 @@ AG-4 Gateway runtime authority is implemented in `cmd/gateway`, `internal/gatewa
 AG-5 Edge Agent runtime authority is implemented in `cmd/agent`, `internal/agent/`, `docs/runtime/agent.md`, and ADR-0009. The Agent owns its unique Ed25519 private identity, protected local secret state, loopback-only endpoint mappings, WSS/TLS client and local proxy. Public/Gateway input never selects a raw local target. External Control Panel credentials are consumed only as runtime inputs and no Control Panel server/business logic is embedded. `scripts/ci/runtime-gate.sh` executes real Agent+Gateway processes; installer/service installation, signed update delivery, staging acceptance and release hardening remain later leaves.
 
 
-AG-6 integrated acceptance authority is `internal/runtimegate/e2e_acceptance_test.go`, `scripts/ci/e2e-acceptance.sh`, and `docs/runtime/agent-gateway-e2e-acceptance.md`. It is acceptance-only: do not add Control Panel implementation, deployment packaging, installer/update delivery, or AG-8 release-hardening scope under AG-6.
+AG-6 integrated acceptance authority is `tests/integration/e2e_acceptance_test.go`, `scripts/ci/e2e-acceptance.sh`, and `docs/runtime/agent-gateway-e2e-acceptance.md`. It is acceptance-only: do not add Control Panel implementation, deployment packaging, installer/update delivery, or AG-8 release-hardening scope under AG-6.
 
 
 AG-7 packaging/operations authority is `docs/adr/ADR-0010-packaging-deployment-and-release-trust.md` plus `docs/runtime/packaging-and-operations.md`. Agent persistence must remain within the accepted per-user secret ownership model; Gateway deployment is Docker Compose with Caddy and verified upstream TLS only; no Control Panel service/database, Kubernetes, Redis, or AG-8 final release-hardening belongs in AG-7.

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -76,7 +76,7 @@ go build -o "$work/bin/hooshix-agent" ./cmd/agent
 go build -o "$work/bin/hooshix-gateway" ./cmd/gateway
 HOOSHIX_AGENT_BINARY="$work/bin/hooshix-agent" \
 HOOSHIX_GATEWAY_BINARY="$work/bin/hooshix-gateway" \
-  go test -count=1 -timeout=60s ./internal/runtimegate -run '^TestNetworkInterruptionAndColdRestartRecovery$'
+  go test -count=1 -timeout=60s ./tests/integration -run '^TestNetworkInterruptionAndColdRestartRecovery$'
 
 # Build the exact release artifact shapes and verify the manifest before any tamper test.
 bash scripts/release/build-release.sh v0.0.0-ag8 "$work/release"

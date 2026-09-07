@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,6 +20,6 @@ go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives' ./internal/runtimegate
+  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives' ./tests/integration
 
 echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, large-body streaming, authorization-expiry fail-closed behavior, offline/error behavior and security negatives were exercised."

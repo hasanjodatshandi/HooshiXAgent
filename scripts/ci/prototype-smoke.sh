@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -13,4 +13,4 @@ go build -o "$WORK/hooshix-gateway" ./cmd/gateway
 export HOOSHIX_AGENT_BINARY="$WORK/hooshix-agent"
 export HOOSHIX_GATEWAY_BINARY="$WORK/hooshix-gateway"
 
-go test -count=1 -run '^TestFirstPrototypeSmoke$' -v ./internal/runtimegate
+go test -count=1 -run '^TestFirstPrototypeSmoke$' -v ./tests/integration
