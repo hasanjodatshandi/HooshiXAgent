@@ -31,8 +31,15 @@ type Gateway struct {
 	entropy  io.Reader
 	draining atomic.Bool
 
+	// mu guards the per-device session tables. Phase-3 HA allows one device
+	// to hold multiple concurrent tunnels: tunnels holds every live session
+	// keyed by device ID (primary plus bounded extra tunnels), while
+	// primaries maps the device to the tunnel that currently owns the
+	// routing stream-ID space. Replacement semantics (reconnect/resume)
+	// replace per-tunnel, not per-device.
 	mu             sync.RWMutex
-	sessions       map[string]*session
+	tunnels        map[string]map[string]*session
+	primaries      map[string]*session
 	handshakeSlots chan struct{}
 	resources      gatewayResources
 }
@@ -55,7 +62,8 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 		limits:         limits,
 		logger:         logger,
 		entropy:        rand.Reader,
-		sessions:       make(map[string]*session),
+		tunnels:        make(map[string]map[string]*session),
+		primaries:      make(map[string]*session),
 		handshakeSlots: make(chan struct{}, limits.MaxPendingHandshakes),
 		resources:      newGatewayResources(limits),
 	}
@@ -99,9 +107,11 @@ func (gateway *Gateway) handleReady(w http.ResponseWriter, _ *http.Request) {
 
 func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	gateway.mu.RLock()
-	sessions := make([]*session, 0, len(gateway.sessions))
-	for _, sess := range gateway.sessions {
-		sessions = append(sessions, sess)
+	sessions := make([]*session, 0)
+	for _, deviceTunnels := range gateway.tunnels {
+		for _, sess := range deviceTunnels {
+			sessions = append(sessions, sess)
+		}
 	}
 	gateway.mu.RUnlock()
 
@@ -125,6 +135,9 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_agent_sessions %d\n", len(sessions))
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_agent_sessions_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_agent_sessions_limit %d\n", gateway.limits.MaxAgentSessions)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_active_tunnels Current live Agent tunnel connections (one agent may hold multiple bounded tunnels for HA failover).\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_active_tunnels gauge\n")
+	_, _ = fmt.Fprintf(w, "hooshix_gateway_active_tunnels %d\n", len(sessions))
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_active_streams Current active tunnel streams.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_active_streams gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_active_streams %d\n", activeStreams)
@@ -387,9 +400,9 @@ func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn
 // session).
 func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume contractv1.ResumeSession) (*session, error) {
 	gateway.mu.RLock()
-	existing := gateway.sessions[resume.DeviceID]
+	existing := gateway.tunnels[resume.DeviceID][resume.SessionID]
 	gateway.mu.RUnlock()
-	if existing == nil || !existing.authorized.Load() || existing.sessionID != resume.SessionID {
+	if existing == nil || !existing.authorized.Load() {
 		return nil, errResumeUnavailable
 	}
 	if existing.deviceID != resume.DeviceID || existing.authorizationID != resume.AuthorizationID || existing.tokenID != resume.TokenID {
@@ -513,45 +526,120 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2), nil
 }
 
+// registerSession admits a tunnel session under the Phase-3 HA model. A
+// device may hold multiple bounded tunnels (MaxTunnelsPerDevice): a resume
+// replaces its own tunnel in place, and a fresh full handshake from a device
+// that already owns a dead primary takes over routing. Extra tunnels beyond
+// the routing primary are standby capacity; the bounded device budget fails
+// closed instead of evicting the routing primary.
 func (gateway *Gateway) registerSession(sess *session) error {
 	gateway.mu.Lock()
 	if gateway.draining.Load() {
 		gateway.mu.Unlock()
 		return errors.New("gateway is draining")
 	}
-	current := gateway.sessions[sess.deviceID]
-	if current == nil && len(gateway.sessions) >= gateway.limits.MaxAgentSessions {
+	deviceTunnels := gateway.tunnels[sess.deviceID]
+	primary := gateway.primaries[sess.deviceID]
+	replaced, hasReplaced := deviceTunnels[sess.sessionID]
+	totalSessions := 0
+	for _, tunnels := range gateway.tunnels {
+		totalSessions += len(tunnels)
+	}
+	isReconnect := replaced != nil && replaced != sess
+	isNewTunnel := !hasReplaced
+	if primary == nil && len(deviceTunnels) == 0 && totalSessions >= gateway.limits.MaxAgentSessions {
 		gateway.resources.sessionRejects.Add(1)
 		gateway.mu.Unlock()
 		return errors.New("agent session capacity reached")
 	}
-	if current != nil && current != sess {
-		// A reconnect (fresh handshake or resume) replaced a live session:
-		// count it as an agent-driven reconnect for aggregate telemetry.
-		gateway.resources.reconnects.Add(1)
-		sess.reconnected.Store(true)
+	if isNewTunnel && len(deviceTunnels) >= gateway.limits.MaxTunnelsPerDevice {
+		// The device HA budget is exhausted: recycle the oldest standby
+		// tunnel. The routing primary is never evicted by a standby arrival;
+		// when only the primary remains, fail closed so the Agent's bounded
+		// reconnect schedule retries.
+		victim := oldestStandby(deviceTunnels, primary)
+		if victim == nil {
+			gateway.resources.sessionRejects.Add(1)
+			gateway.mu.Unlock()
+			return errors.New("device tunnel capacity reached")
+		}
+		replaced = victim
+		isReconnect = false
 	}
-	gateway.sessions[sess.deviceID] = sess
+	if deviceTunnels == nil {
+		deviceTunnels = make(map[string]*session)
+		gateway.tunnels[sess.deviceID] = deviceTunnels
+	}
+	deviceTunnels[sess.sessionID] = sess
+	if primary == nil || (isReconnect && primary == replaced) {
+		// Either the first tunnel owns routing for the device, or the
+		// replaced tunnel was the routing primary (reconnect/resume keeps
+		// routing continuity with the session identity).
+		gateway.primaries[sess.deviceID] = sess
+	}
 	gateway.mu.Unlock()
 
-	if current != nil && current != sess {
-		current.failAll(errors.New("agent session replaced by reconnect"))
-		current.close(websocket.StatusNormalClosure, "replaced by reconnect")
+	if replaced != nil && replaced != sess {
+		if isReconnect {
+			// A reconnect (fresh handshake or resume) replaced a live
+			// tunnel: count it as an agent-driven reconnect.
+			gateway.resources.reconnects.Add(1)
+			sess.reconnected.Store(true)
+		}
+		replaced.failAll(errors.New("agent session replaced by reconnect"))
+		replaced.close(websocket.StatusNormalClosure, "replaced by reconnect")
 	}
 	return nil
 }
 
-func (gateway *Gateway) unregisterSession(sess *session) {
-	gateway.mu.Lock()
-	defer gateway.mu.Unlock()
-	if current, ok := gateway.sessions[sess.deviceID]; ok && current == sess {
-		delete(gateway.sessions, sess.deviceID)
+// oldestStandby returns the tunnel that is neither the routing primary nor
+// the newest arrival; a device with only its primary returns nil.
+func oldestStandby(deviceTunnels map[string]*session, primary *session) *session {
+	var victim *session
+	for _, candidate := range deviceTunnels {
+		if candidate == primary {
+			continue
+		}
+		if victim == nil || candidate.lastSeen.Load() < victim.lastSeen.Load() {
+			victim = candidate
+		}
 	}
+	return victim
 }
 
+func (gateway *Gateway) unregisterSession(sess *session) {
+	gateway.mu.Lock()
+	deviceTunnels := gateway.tunnels[sess.deviceID]
+	if deviceTunnels == nil {
+		gateway.mu.Unlock()
+		return
+	}
+	if current, ok := deviceTunnels[sess.sessionID]; !ok || current != sess {
+		gateway.mu.Unlock()
+		return
+	}
+	delete(deviceTunnels, sess.sessionID)
+	if len(deviceTunnels) == 0 {
+		delete(gateway.tunnels, sess.deviceID)
+	}
+	if gateway.primaries[sess.deviceID] == sess {
+		delete(gateway.primaries, sess.deviceID)
+		// Promote the oldest surviving tunnel so device routing survives the
+		// primary transport loss without a fresh handshake.
+		for _, candidate := range deviceTunnels {
+			if gateway.primaries[sess.deviceID] == nil || candidate.lastSeen.Load() < gateway.primaries[sess.deviceID].lastSeen.Load() {
+				gateway.primaries[sess.deviceID] = candidate
+			}
+		}
+	}
+	gateway.mu.Unlock()
+}
+
+// sessionForDevice returns the routing-primary tunnel for the device: an
+// authorized, unexpired session whose stream space owns ingress routing.
 func (gateway *Gateway) sessionForDevice(deviceID string) *session {
 	gateway.mu.RLock()
-	sess := gateway.sessions[deviceID]
+	sess := gateway.primaries[deviceID]
 	gateway.mu.RUnlock()
 	if sess == nil || !sess.authorized.Load() {
 		return nil
@@ -731,11 +819,14 @@ func (gateway *Gateway) Close(ctx context.Context) error {
 	gateway.BeginDrain()
 
 	gateway.mu.Lock()
-	sessions := make([]*session, 0, len(gateway.sessions))
-	for _, sess := range gateway.sessions {
-		sessions = append(sessions, sess)
+	sessions := make([]*session, 0)
+	for _, deviceTunnels := range gateway.tunnels {
+		for _, sess := range deviceTunnels {
+			sessions = append(sessions, sess)
+		}
 	}
-	gateway.sessions = make(map[string]*session)
+	gateway.tunnels = make(map[string]map[string]*session)
+	gateway.primaries = make(map[string]*session)
 	gateway.mu.Unlock()
 
 	for _, sess := range sessions {

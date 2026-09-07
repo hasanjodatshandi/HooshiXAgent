@@ -17,6 +17,14 @@ func NewAggregate(machines ...*Machine) *Aggregate {
 	return &Aggregate{machines: append([]*Machine(nil), machines...)}
 }
 
+// Attach adds a transport machine to the aggregate view. It is safe to call
+// before the aggregate is shared with the supervisor.
+func (aggregate *Aggregate) Attach(machine *Machine) {
+	aggregate.mu.Lock()
+	defer aggregate.mu.Unlock()
+	aggregate.machines = append(aggregate.machines, machine)
+}
+
 // State returns the best available aggregate state:
 //
 //   - Connected when any transport is Connected;

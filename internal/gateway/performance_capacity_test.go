@@ -101,7 +101,10 @@ func TestAuthenticatedSessionReleasesPendingHandshakeSlot(t *testing.T) {
 	defer second.close()
 	waitFor(t, time.Second, func() bool {
 		gateway.mu.RLock()
-		count := len(gateway.sessions)
+		count := 0
+		for _, deviceTunnels := range gateway.tunnels {
+			count += len(deviceTunnels)
+		}
 		gateway.mu.RUnlock()
 		return count == 2 && len(gateway.handshakeSlots) == 0
 	})
@@ -175,7 +178,10 @@ func TestGatewayResidentSessionCapacity(t *testing.T) {
 			}
 			waitFor(t, 5*time.Second, func() bool {
 				gateway.mu.RLock()
-				resident := len(gateway.sessions)
+				resident := 0
+				for _, deviceTunnels := range gateway.tunnels {
+					resident += len(deviceTunnels)
+				}
 				gateway.mu.RUnlock()
 				return resident == level
 			})
@@ -188,7 +194,10 @@ func TestGatewayResidentSessionCapacity(t *testing.T) {
 			}
 			waitFor(t, 10*time.Second, func() bool {
 				gateway.mu.RLock()
-				count := len(gateway.sessions)
+				count := 0
+				for _, deviceTunnels := range gateway.tunnels {
+					count += len(deviceTunnels)
+				}
 				gateway.mu.RUnlock()
 				return count == 0
 			})

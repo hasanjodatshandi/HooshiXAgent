@@ -27,6 +27,9 @@ type Limits struct {
 	HeartbeatInterval       time.Duration
 	IdleTimeout             time.Duration
 	ShutdownTimeout         time.Duration
+	// MaxTunnelsPerDevice bounds the Phase-3 HA concurrent tunnels one
+	// device may hold on this gateway (primary plus standby tunnels).
+	MaxTunnelsPerDevice int
 }
 
 func DefaultLimits() Limits {
@@ -55,6 +58,7 @@ func DefaultLimits() Limits {
 		HeartbeatInterval:       15 * time.Second,
 		IdleTimeout:             45 * time.Second,
 		ShutdownTimeout:         10 * time.Second,
+		MaxTunnelsPerDevice:     2,
 	}
 }
 
@@ -81,5 +85,6 @@ func (limits Limits) valid() bool {
 		limits.HeartbeatInterval >= 5*time.Second && limits.HeartbeatInterval <= 60*time.Second &&
 		limits.IdleTimeout >= 15*time.Second && limits.IdleTimeout <= 300*time.Second &&
 		limits.IdleTimeout >= 2*limits.HeartbeatInterval &&
-		limits.ShutdownTimeout > 0
+		limits.ShutdownTimeout > 0 &&
+		limits.MaxTunnelsPerDevice > 0
 }

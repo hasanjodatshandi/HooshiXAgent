@@ -24,8 +24,9 @@ func (reader failingEntropyReader) Read([]byte) (int, error) {
 
 func TestRegisterSessionDoesNotHoldGatewayMutexDuringPreviousSessionClose(t *testing.T) {
 	gateway := &Gateway{
-		limits:   DefaultLimits(),
-		sessions: make(map[string]*session),
+		limits:    DefaultLimits(),
+		tunnels:   make(map[string]map[string]*session),
+		primaries: make(map[string]*session),
 	}
 	deviceID := "device-ra1-lock"
 	closeStarted := make(chan struct{})
@@ -44,17 +45,22 @@ func TestRegisterSessionDoesNotHoldGatewayMutexDuringPreviousSessionClose(t *tes
 		},
 	}
 	old.authorized.Store(true)
-	gateway.sessions[deviceID] = old
+	old.lastSeen.Store(time.Now().UnixNano())
+	gateway.tunnels[deviceID] = map[string]*session{old.sessionID: old}
+	gateway.primaries[deviceID] = old
 
+	// The replacement reuses the same session ID (the reconnect/resume
+	// path), so it takes over the routing primary role for the device.
 	next := &session{
 		gateway:                gateway,
 		deviceID:               deviceID,
-		sessionID:              "session-new",
+		sessionID:              old.sessionID,
 		authorizationExpiresAt: time.Now().Add(time.Hour),
 		streams:                make(map[uint32]*stream),
 		done:                   make(chan struct{}),
 	}
 	next.authorized.Store(true)
+	next.lastSeen.Store(time.Now().UnixNano())
 
 	registered := make(chan error, 1)
 	go func() { registered <- gateway.registerSession(next) }()
@@ -153,8 +159,9 @@ func TestGatewayBeginDrainRejectsNewWorkButKeepsLiveness(t *testing.T) {
 
 func TestGatewayCloseIsBoundedAndForceClosesStuckWebSocket(t *testing.T) {
 	gateway := &Gateway{
-		limits:   DefaultLimits(),
-		sessions: make(map[string]*session),
+		limits:    DefaultLimits(),
+		tunnels:   make(map[string]map[string]*session),
+		primaries: make(map[string]*session),
 	}
 	blocked := make(chan struct{})
 	var unblock sync.Once
@@ -177,7 +184,8 @@ func TestGatewayCloseIsBoundedAndForceClosesStuckWebSocket(t *testing.T) {
 		},
 	}
 	sess.authorized.Store(true)
-	gateway.sessions[sess.deviceID] = sess
+	gateway.tunnels[sess.deviceID] = map[string]*session{sess.sessionID: sess}
+	gateway.primaries[sess.deviceID] = sess
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

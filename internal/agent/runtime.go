@@ -17,6 +17,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,9 @@ type Limits struct {
 	IdleTimeout          time.Duration
 	ReconnectMin         time.Duration
 	ReconnectMax         time.Duration
+	// MaxTunnels bounds the Phase-3 HA concurrent outbound tunnels (one
+	// pinned worker per configured gateway candidate).
+	MaxTunnels int
 }
 
 func DefaultLimits() Limits {
@@ -62,6 +66,7 @@ func DefaultLimits() Limits {
 		IdleTimeout:          60 * time.Second,
 		ReconnectMin:         time.Second,
 		ReconnectMax:         30 * time.Second,
+		MaxTunnels:           2,
 	}
 }
 
@@ -69,7 +74,8 @@ func (limits Limits) valid() bool {
 	return limits.MaxStreams > 0 && limits.MaxQueueFrames > 0 &&
 		limits.MaxStreamQueueBytes > 0 && limits.MaxSessionQueueBytes >= limits.MaxStreamQueueBytes && limits.DialTimeout > 0 &&
 		limits.HandshakeTimeout > 0 && limits.WriteTimeout > 0 && limits.IdleTimeout > 0 &&
-		limits.ReconnectMin > 0 && limits.ReconnectMax >= limits.ReconnectMin
+		limits.ReconnectMin > 0 && limits.ReconnectMax >= limits.ReconnectMin &&
+		limits.MaxTunnels > 0
 }
 
 type Runner struct {
@@ -81,7 +87,8 @@ type Runner struct {
 	// health carries the connection health state machine and reconnect
 	// counter required by the tunnel reliability phase. It is observational
 	// only and never authorization authority. The aggregate derives the
-	// combined multi-tunnel view (Phase 3 HA) from this machine today.
+	// combined multi-tunnel view (Phase 3 HA) from this machine plus every
+	// pinned HA worker machine.
 	health     *tunnelstates.Machine
 	aggregate  *tunnelstates.Aggregate
 	reconnects atomic.Int64
@@ -96,6 +103,10 @@ type Runner struct {
 	// failover schedule. It advances only on dial failure so a healthy
 	// primary never rotates.
 	failoverIndex atomic.Int32
+
+	// pinnedAttempt is the injectable per-worker attempt hook (tests replace
+	// it; production always uses runPinnedAttempt).
+	pinnedAttempt func(context.Context, int) error
 }
 
 func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, error) {
@@ -112,6 +123,7 @@ func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, er
 	runner := &Runner{stateDir: normalized, limits: limits, logger: logger, health: tunnelstates.New()}
 	runner.aggregate = tunnelstates.NewAggregate(runner.health)
 	runner.attempt = runner.runOnce
+	runner.pinnedAttempt = runner.runPinnedAttempt
 	return runner, nil
 }
 
@@ -148,6 +160,149 @@ func (runner *Runner) ReconnectCount() int64 {
 }
 
 func (runner *Runner) Run(ctx context.Context) error {
+	// Phase-3 HA: with several gateway candidates the supervisor starts one
+	// pinned worker per candidate (bounded by MaxTunnels). Each worker owns
+	// an independent reconnect/backoff loop and health machine; the first
+	// connected tunnel wins routing and later workers are standby capacity.
+	// A terminal error from any worker (revocation, permanent failure) stops
+	// the whole supervisor so the process surfaces the failure.
+	workerCount := 1
+	if config, err := LoadConfig(runner.stateDir); err == nil {
+		if candidates := len(config.GatewayCandidates()); candidates > 1 {
+			workerCount = candidates
+		}
+	}
+	if workerCount > runner.limits.MaxTunnels {
+		workerCount = runner.limits.MaxTunnels
+	}
+	if workerCount <= 1 {
+		return runner.runPrimary(ctx)
+	}
+
+	supervisorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	terminal := make(chan error, workerCount)
+	var wg sync.WaitGroup
+	for index := 0; index < workerCount; index++ {
+		index := index
+		health := tunnelstates.New()
+		runner.aggregate.Attach(health)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			terminal <- runner.runPinnedWorker(supervisorCtx, index, health)
+		}()
+	}
+	// The supervisor returns on the first terminal worker error; otherwise
+	// it blocks until the caller cancels the context.
+	var result error
+	select {
+	case err := <-terminal:
+		result = err
+		cancel()
+	case <-ctx.Done():
+		result = nil
+	}
+	wg.Wait()
+	_ = runner.health.Transition(tunnelstates.Shutdown)
+	return result
+}
+
+// runPinnedWorker runs the bounded reconnect loop for one pinned HA worker.
+// Worker 0 is the primary worker: it dials with failover across candidates
+// so the persisted primary gateway stays preferred. Workers beyond the first
+// are pinned to a single distinct candidate (never the primary's current
+// one) so a gateway outage always leaves a standby path on another host.
+func (runner *Runner) runPinnedWorker(ctx context.Context, index int, health *tunnelstates.Machine) error {
+	backoff := runner.limits.ReconnectMin
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = health.Transition(tunnelstates.Shutdown)
+			return nil
+		}
+		if err := health.Transition(tunnelstates.Connecting); err != nil {
+			runner.logger.Warn("agent health transition rejected", "worker", index, "error", err)
+		}
+		sessionStarted := time.Now()
+		var err error
+		if index == 0 {
+			// Worker 0 keeps the sequential-failover dialer so the persisted
+			// primary gateway stays preferred under the HA supervisor.
+			err = runner.attempt(ctx)
+		} else {
+			err = runner.pinnedAttempt(ctx, index)
+		}
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			_ = health.Transition(tunnelstates.Shutdown)
+			return nil
+		}
+		if errors.Is(err, ErrSessionRevoked) || errors.Is(err, ErrPermanentAgentFailure) {
+			if errors.Is(err, ErrSessionRevoked) {
+				_ = health.Transition(tunnelstates.Revoked)
+			} else {
+				_ = health.Transition(tunnelstates.Shutdown)
+			}
+			return err
+		}
+		if time.Since(sessionStarted) >= 10*time.Second {
+			backoff = runner.limits.ReconnectMin
+		}
+		if errors.Is(err, errResumeRejected) {
+			// The Gateway rejected the resume fast path and closed the
+			// transport: retry immediately with a full handshake instead of
+			// waiting out a reconnect backoff.
+			runner.reconnects.Add(1)
+			if transitionErr := health.Transition(tunnelstates.Reconnecting); transitionErr != nil {
+				runner.logger.Warn("agent health transition rejected", "worker", index, "error", transitionErr)
+			}
+			continue
+		}
+		runner.reconnects.Add(1)
+		if transitionErr := health.Transition(tunnelstates.Reconnecting); transitionErr != nil {
+			runner.logger.Warn("agent health transition rejected", "worker", index, "error", transitionErr)
+		}
+		runner.logger.Warn("agent tunnel session ended; reconnecting", "worker", index, "error", sanitizedError(err), "retry_in", backoff.String(), "reconnects", runner.ReconnectCount())
+		delay := jittered(backoff)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = health.Transition(tunnelstates.Shutdown)
+			return nil
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > runner.limits.ReconnectMax {
+			backoff = runner.limits.ReconnectMax
+		}
+	}
+}
+
+// runPinnedAttempt runs one connection attempt for the given worker index.
+// Only worker 0 keeps the sequential-failover dialer; other workers are
+// pinned to candidate[index] and never dial the primary's current gateway.
+func (runner *Runner) runPinnedAttempt(ctx context.Context, index int) error {
+	config, err := LoadConfig(runner.stateDir)
+	if err != nil {
+		return permanentAgentFailure(err)
+	}
+	if err := config.ValidateRuntime(); err != nil {
+		return permanentAgentFailure(err)
+	}
+	if index == 0 {
+		return runner.runOnce(ctx)
+	}
+	candidates := config.GatewayCandidates()
+	if index >= len(candidates) {
+		return permanentAgentFailure(fmt.Errorf("HA worker %d has no pinned candidate", index))
+	}
+	pinned := candidates[index]
+	return runner.runOncePinned(ctx, config, pinned)
+}
+
+// runPrimary is the single-tunnel path used when no HA aliases exist.
+func (runner *Runner) runPrimary(ctx context.Context) error {
 	backoff := runner.limits.ReconnectMin
 	for {
 		if err := ctx.Err(); err != nil {
@@ -256,6 +411,39 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	if err := config.ValidateRuntime(); err != nil {
 		return permanentAgentFailure(err)
 	}
+	return runner.runOnceWithDialer(ctx, config, func(ctx context.Context, httpClient *http.Client) (string, *websocket.Conn, *http.Response, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
+		defer cancel()
+		return runner.dialWithFailover(dialCtx, config, httpClient)
+	}, runner.health, true)
+}
+
+// runOncePinned is the pinned HA-worker attempt: it dials exactly one
+// configured candidate (never the primary schedule) and reports health on the
+// worker's own machine. The standby worker never uses the resume fast path.
+func (runner *Runner) runOncePinned(ctx context.Context, config Config, candidate string) error {
+	return runner.runOnceWithDialer(ctx, config, func(ctx context.Context, httpClient *http.Client) (string, *websocket.Conn, *http.Response, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
+		defer cancel()
+		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
+			HTTPClient:      httpClient,
+			CompressionMode: websocket.CompressionDisabled,
+		})
+		if err != nil {
+			return "", nil, response, fmt.Errorf("dial Gateway WSS %s: %w", candidate, err)
+		}
+		return candidate, conn, nil, nil
+	}, nil, false)
+}
+
+// runOnceWithDialer is the shared tunnel attempt path: load identity and
+// token, dial through the supplied dialer, authenticate (or resume), and run
+// the session. health may be nil for non-primary workers that own their own
+// machine; the primary path passes the runner machine for compatibility.
+func (runner *Runner) runOnceWithDialer(ctx context.Context, config Config, dial func(context.Context, *http.Client) (string, *websocket.Conn, *http.Response, error), health *tunnelstates.Machine, primary bool) error {
+	if health == nil {
+		health = runner.health
+	}
 	store := NewPlatformSecretStore(runner.stateDir)
 	_, privateKey, err := LoadIdentity(store)
 	if err != nil {
@@ -282,9 +470,7 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 		},
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
-	gatewayURL, conn, response, err := runner.dialWithFailover(dialCtx, config, httpClient)
-	cancel()
+	gatewayURL, conn, response, err := dial(ctx, httpClient)
 	if err != nil {
 		err = protectError(err, token)
 		if permanentDialError(err, response) {
@@ -294,7 +480,7 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	}
 	conn.SetReadLimit(24 + 1024*1024)
 
-	sess, err := runner.authenticateOrResume(ctx, conn, config, privateKey, token)
+	sess, err := runner.authenticateOrResume(ctx, conn, config, privateKey, token, primary)
 	if err != nil {
 		conn.CloseNow()
 		if errors.Is(err, errResumeRejected) {
@@ -312,14 +498,19 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 		}
 		return err
 	}
-	if err := runner.health.Transition(tunnelstates.Connected); err != nil {
+	if err := health.Transition(tunnelstates.Connected); err != nil {
 		runner.logger.Warn("agent health transition rejected", "error", err)
 	}
 	if runner.ReconnectCount() > 0 {
 		sess.observeReconnect()
 	}
-	runner.storeResumable(sess.sessionID)
-	runner.logger.Info("agent session authenticated", "gateway", gatewayURL, "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", runner.health.Current().String())
+	if primary {
+		// Only the primary worker owns the resumable session ID: standby
+		// tunnel sessions are gateway-local and must not poison the
+		// primary's resume fast path.
+		runner.storeResumable(sess.sessionID)
+	}
+	runner.logger.Info("agent session authenticated", "gateway", gatewayURL, "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", health.Current().String())
 	err = protectError(sess.run(ctx), token)
 	if errors.Is(err, ErrSessionRevoked) {
 		return err
@@ -338,8 +529,14 @@ var errResumeRejected = errors.New("agent session resume rejected")
 // previous session ID is available, then falls back to the caller for a full
 // handshake on rejection. A successful resume inherits the previous session
 // ID and continues the outbound sequence without a challenge round trip.
-func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.Conn, config Config, privateKey ed25519.PrivateKey, token string) (*agentSession, error) {
-	previous := runner.ResumableSessionID()
+// Standby HA workers skip the resume fast path entirely: the resumable
+// session belongs to the primary worker's gateway, and a standby tunnel on
+// another gateway must establish its own session.
+func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.Conn, config Config, privateKey ed25519.PrivateKey, token string, primary bool) (*agentSession, error) {
+	previous := ""
+	if primary {
+		previous = runner.ResumableSessionID()
+	}
 	if previous == "" {
 		return authenticateAgent(ctx, conn, config, privateKey, token, runner.limits, runner.logger)
 	}

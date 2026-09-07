@@ -92,8 +92,9 @@ func TestGatewayOperationalMetricsExposure(t *testing.T) {
 	}
 }
 
-// TestGatewayReconnectCounterIncrements proves a session replacement (the
-// Agent reconnect path) increments the reconnect counter exactly once.
+// TestGatewayReconnectCounterIncrements proves a resume replacing a live
+// tunnel (the Agent reconnect path) increments the reconnect counter
+// exactly once and collapses the replaced pair in active_tunnels.
 func TestGatewayReconnectCounterIncrements(t *testing.T) {
 	identity := newTestIdentity(t)
 	metadata := testMetadata(t, identity, testRouteHost)
@@ -109,23 +110,26 @@ func TestGatewayReconnectCounterIncrements(t *testing.T) {
 	first := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
 	defer first.close()
 	waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
-	firstSession := gateway.sessionForDevice(identity.deviceID)
+	original := gateway.sessionForDevice(identity.deviceID)
+	originalID := original.sessionID
 
 	if got := gateway.resources.reconnects.Load(); got != 0 {
 		t.Fatalf("initial reconnects=%d want 0", got)
 	}
 
-	second := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
-	defer second.close()
-	waitFor(t, 2*time.Second, func() bool {
-		current := gateway.sessionForDevice(identity.deviceID)
-		return current != nil && current != firstSession
-	})
+	resumer, ok := connectResumingMockAgent(t, tlsServer, identity, originalID, local.URL)
+	defer resumer.close()
+	if !ok {
+		t.Fatal("resume of a live session was rejected")
+	}
 	waitFor(t, 2*time.Second, func() bool { return gateway.resources.reconnects.Load() == 1 })
 
 	metrics := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_reconnects_total 1") {
 		t.Fatalf("reconnect metric missing:\n%s", metrics.Body.String())
+	}
+	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_active_tunnels 1\n") {
+		t.Fatalf("active tunnels must collapse the replaced pair:\n%s", metrics.Body.String())
 	}
 }
