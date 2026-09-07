@@ -13,7 +13,9 @@
     { "$ref": "#/$defs/stream_open" },
     { "$ref": "#/$defs/stream_close" },
     { "$ref": "#/$defs/stream_error" },
-    { "$ref": "#/$defs/session_revoked" }
+    { "$ref": "#/$defs/session_revoked" },
+    { "$ref": "#/$defs/resume_session" },
+    { "$ref": "#/$defs/session_resumed" }
   ],
   "$defs": {
     "id": {
@@ -177,6 +179,33 @@
         "message_type": { "const": "session_revoked" },
         "authorization_id": { "$ref": "#/$defs/id" },
         "reason_code": { "enum": ["disabled", "credential_revoked", "security_hold", "expired"] }
+      },
+      "additionalProperties": false
+    },
+    "resume_session": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_id", "resume_nonce", "signature"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "resume_session" },
+        "device_id": { "$ref": "#/$defs/id" },
+        "authorization_id": { "$ref": "#/$defs/id" },
+        "token_id": { "$ref": "#/$defs/id" },
+        "session_id": { "$ref": "#/$defs/id" },
+        "resume_nonce": { "$ref": "#/$defs/nonce32" },
+        "signature": { "$ref": "#/$defs/signature64" }
+      },
+      "additionalProperties": false
+    },
+    "session_resumed": {
+      "type": "object",
+      "required": ["contract_version", "message_type", "session_id", "next_sequence", "resumed_at"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "session_resumed" },
+        "session_id": { "$ref": "#/$defs/id" },
+        "next_sequence": { "type": "integer", "minimum": 1 },
+        "resumed_at": { "type": "string", "format": "date-time", "maxLength": 35 }
       },
       "additionalProperties": false
     }

@@ -62,12 +62,12 @@ var ErrIllegalTransition = errors.New("illegal tunnel state transition")
 
 // legalTransitions is the authoritative transition table.
 var legalTransitions = map[State][]State{
-	Init:        {Connecting, Shutdown},
-	Connecting:  {Connected, Reconnecting, Revoked, Shutdown},
-	Connected:   {Degraded, Reconnecting, Revoked, Shutdown},
-	Degraded:    {Connected, Reconnecting, Revoked, Shutdown},
+	Init:         {Connecting, Shutdown},
+	Connecting:   {Connected, Reconnecting, Revoked, Shutdown},
+	Connected:    {Degraded, Reconnecting, Revoked, Shutdown},
+	Degraded:     {Connected, Reconnecting, Revoked, Shutdown},
 	Reconnecting: {Connecting, Revoked, Shutdown},
-	Revoked:     {},
+	Revoked:      {},
 	Shutdown:     {},
 }
 

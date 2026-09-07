@@ -188,6 +188,54 @@ The Gateway may send `session_revoked` on stream ID `0` after it consumes a vali
 
 A revoked session must stop opening new streams and terminate according to the later runtime implementation's bounded shutdown procedure. This message does not create Control Panel ownership inside the Gateway; it is the runtime consequence of an external authority signal.
 
+## 11a. Health report
+
+`health_report` is an Agent→Gateway session-level control message on stream ID `0` carrying bounded operational counters only:
+
+- `report_id` — opaque correlation identifier;
+- `generated_at` — RFC3339 UTC generation time;
+- `active_streams` — current registered streams (bounded by contract);
+- `queued_frames` — queued inbound frames across live streams (bounded by contract);
+- `reconnect_count` — completed reconnect cycles since Agent process start;
+- `last_reconnect_at` — optional RFC3339 UTC timestamp of the last reconnect;
+- `agent_version` — optional bounded version string.
+
+Health reports are telemetry only. They refresh liveness observation on the Gateway but never carry or imply authorization, routing, revocation, or target authority. The Gateway counts them in aggregate low-cardinality metrics and never exposes identifiers as metric labels.
+
+## 11b. Session resume
+
+`resume_session` is an Agent→Gateway session-level fast-path request on stream ID `0` sent as the first control frame of a new WebSocket connection after a transport interruption:
+
+- `device_id`, `authorization_id`, `token_id` — the same externally issued identity triple used by `client_hello`;
+- `session_id` — the previously authenticated session being resumed;
+- `resume_nonce` — 32 fresh random bytes base64url without padding;
+- `signature` — 64-byte Ed25519 signature over the exact transcript:
+
+```text
+HXT1-RESUME\x00
+|| device_id || \x00
+|| authorization_id || \x00
+|| token_id || \x00
+|| session_id || \x00
+|| resume_nonce
+```
+
+The Gateway accepts the resume only when **all** of the following hold:
+
+1. the referenced session is currently live and authorized for that exact device;
+2. the current external authorization record matches the resume subject, is active, unexpired, and not revoked;
+3. the signature verifies against the externally registered device public key.
+
+On success the Gateway replies `session_resumed` with the same `session_id`, a `next_sequence` value, and a `resumed_at` timestamp. Sequence numbering restarts independently on each new transport per Section 3: the resume reply itself is sequence `1` in the Gateway→Agent direction and the resume request is sequence `1` in the Agent→Gateway direction; `next_sequence` advertises the exact following value so the Agent can arm its inbound tracker deterministically.
+
+Any rejection fails closed:
+
+- unknown/expired/replaced session, authorization change, signature failure, or revocation reject the resume;
+- a rejected resume closes the connection with `TryAgainLater` semantics so the Agent falls back to a full `client_hello` handshake on its next bounded reconnect attempt;
+- a resume may never bypass authentication, authorization freshness, or revocation enforcement.
+
+Session resume does not transfer stream state: streams were bound to the lost transport and are re-established by ordinary traffic. Existing sessions terminate through the same lifecycle as a reconnect replacement.
+
 ## 12. Unknown / malformed input
 
 The receiver rejects:

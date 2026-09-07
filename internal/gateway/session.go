@@ -73,6 +73,44 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	return sess
 }
 
+// resumeInto binds this session's identity to a replacement WebSocket after
+// a successful resume_session. The stream table starts empty (streams were
+// bound to the lost transport); sequence numbering restarts on the new
+// connection per ADR-0007's independent per-direction rule, so the resumed
+// control writer continues from the fresh handshake frame. It returns nil
+// when the original session is no longer resumable.
+func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.SequenceTracker) *session {
+	if sess == nil || !sess.authorized.Load() {
+		return nil
+	}
+	resumed := &session{
+		gateway:                sess.gateway,
+		conn:                   conn,
+		deviceID:               sess.deviceID,
+		sessionID:              sess.sessionID,
+		authorizationID:        sess.authorizationID,
+		tokenID:                sess.tokenID,
+		authorizationExpiresAt: sess.authorizationExpiresAt,
+		inbound:                inbound,
+		streams:                make(map[uint32]*stream),
+		queueBudget:            newByteBudget(sess.gateway.limits.MaxSessionQueueBytes),
+		nextID:                 sess.nextID,
+		done:                   make(chan struct{}),
+		controlWrites:          make(chan sessionWriteRequest, 32),
+		dataWrites:             make(chan sessionWriteRequest, 2),
+	}
+	resumed.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
+	}
+	resumed.closeConn = conn.Close
+	resumed.closeNowConn = conn.CloseNow
+	resumed.outbound.Store(0)
+	resumed.lastSeen.Store(time.Now().UnixNano())
+	resumed.authorized.Store(true)
+	go resumed.writeLoop()
+	return resumed
+}
+
 func (sess *session) run(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

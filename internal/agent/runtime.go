@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent/tunnelstates"
+	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 var (
@@ -79,6 +83,12 @@ type Runner struct {
 	// only and never authorization authority.
 	health     *tunnelstates.Machine
 	reconnects atomic.Int64
+
+	// resumable holds the last authenticated session ID for the Phase-2
+	// resume fast path. It is only set after a fully authenticated session
+	// and cleared whenever resume is rejected so the Agent falls back to a
+	// full handshake.
+	resumable atomic.Value // string
 }
 
 func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, error) {
@@ -95,6 +105,19 @@ func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, er
 	runner := &Runner{stateDir: normalized, limits: limits, logger: logger, health: tunnelstates.New()}
 	runner.attempt = runner.runOnce
 	return runner, nil
+}
+
+// ResumableSessionID returns the session ID eligible for the resume fast
+// path, or "" after resume was rejected or no session was established.
+func (runner *Runner) ResumableSessionID() string {
+	if value, ok := runner.resumable.Load().(string); ok {
+		return value
+	}
+	return ""
+}
+
+func (runner *Runner) storeResumable(sessionID string) {
+	runner.resumable.Store(sessionID)
 }
 
 // HealthState returns the current connection health state name and whether
@@ -206,14 +229,26 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	}
 	conn.SetReadLimit(24 + 1024*1024)
 
-	sess, err := authenticateAgent(ctx, conn, config, privateKey, token, runner.limits, runner.logger)
+	sess, err := runner.authenticateOrResume(ctx, conn, config, privateKey, token)
 	if err != nil {
 		conn.CloseNow()
 		err = protectError(err, token)
-		if permanentRemoteSessionError(err) {
-			return permanentAgentFailure(err)
+		if errors.Is(err, errResumeRejected) {
+			// Resume was rejected (session gone, key rotated, authorization
+			// changed): retry once immediately with a full handshake before
+			// surfacing any failure to the reconnect loop.
+			runner.storeResumable("")
+			runner.logger.Info("agent resume rejected; falling back to full handshake")
+			sess, err = authenticateAgent(ctx, conn, config, privateKey, token, runner.limits, runner.logger)
 		}
-		return err
+		if err != nil {
+			conn.CloseNow()
+			err = protectError(err, token)
+			if permanentRemoteSessionError(err) {
+				return permanentAgentFailure(err)
+			}
+			return err
+		}
 	}
 	if err := runner.health.Transition(tunnelstates.Connected); err != nil {
 		runner.logger.Warn("agent health transition rejected", "error", err)
@@ -221,6 +256,7 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	if runner.ReconnectCount() > 0 {
 		sess.observeReconnect()
 	}
+	runner.storeResumable(sess.sessionID)
 	runner.logger.Info("agent session authenticated", "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", runner.health.Current().String())
 	err = protectError(sess.run(ctx), token)
 	if errors.Is(err, ErrSessionRevoked) {
@@ -230,6 +266,75 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 		return permanentAgentFailure(err)
 	}
 	return err
+}
+
+// errResumeRejected signals the Gateway declined the resume fast path and
+// the Agent must fall back to the full client_hello handshake.
+var errResumeRejected = errors.New("agent session resume rejected")
+
+// authenticateOrResume tries the Phase-2 resume fast path first when a
+// previous session ID is available, then falls back to the caller for a full
+// handshake on rejection. A successful resume inherits the previous session
+// ID and continues the outbound sequence without a challenge round trip.
+func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.Conn, config Config, privateKey ed25519.PrivateKey, token string) (*agentSession, error) {
+	previous := runner.ResumableSessionID()
+	if previous == "" {
+		return authenticateAgent(ctx, conn, config, privateKey, token, runner.limits, runner.logger)
+	}
+
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	resume := contractv1.ResumeSession{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "resume_session",
+		DeviceID:        config.DeviceID,
+		AuthorizationID: config.AuthorizationID,
+		TokenID:         config.TokenID,
+		SessionID:       previous,
+		ResumeNonce:     nonce,
+	}
+	signature := ed25519.Sign(privateKey, contractv1.ResumeTranscript(resume))
+	resume.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	if err := writeInitialControl(ctx, conn, 1, resume); err != nil {
+		return nil, err
+	}
+
+	var inbound contractv1.SequenceTracker
+	reply, err := readAgentFrame(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if err := inbound.Accept(reply.Sequence); err != nil {
+		return nil, err
+	}
+	if reply.Sequence != 1 || reply.Kind != contractv1.KindControl || reply.StreamID != 0 {
+		return nil, errors.New("invalid resume reply frame")
+	}
+	if err := contractv1.ValidateControlPayload(reply.Payload, 0, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	var envelope struct {
+		MessageType string `json:"message_type"`
+	}
+	if err := json.Unmarshal(reply.Payload, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.MessageType != "session_resumed" {
+		return nil, errResumeRejected
+	}
+	var resumed contractv1.SessionResumed
+	if err := json.Unmarshal(reply.Payload, &resumed); err != nil {
+		return nil, err
+	}
+	if resumed.SessionID != previous {
+		return nil, errors.New("session_resumed ID mismatch")
+	}
+
+	sess := newResumedAgentSession(conn, config, runner.limits, runner.logger, previous, inbound, resumed.NextSequence-1)
+	runner.logger.Info("agent session resumed", "device_id", config.DeviceID, "session_id", previous, "next_sequence", resumed.NextSequence)
+	return sess, nil
 }
 
 func tlsConfigForAgent(config Config) (*tls.Config, error) {

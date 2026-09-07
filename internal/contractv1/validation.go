@@ -25,7 +25,7 @@ const MaxTrafficDeltaBytes = 1024 * 1024 * 1024
 const (
 	MaxStreamsPerSessionBound = 4096
 	MaxQueuedFramesBound      = 65536
-	MaxHealthReconnectCount   = 1 << 31 - 1
+	MaxHealthReconnectCount   = 1<<31 - 1
 )
 
 var (
@@ -343,15 +343,15 @@ type Heartbeat struct {
 // it never carries authorization, routing authority, secrets, or identifiers
 // beyond the opaque report correlation.
 type HealthReport struct {
-	ContractVersion    int    `json:"contract_version"`
-	MessageType        string `json:"message_type"`
-	ReportID           string `json:"report_id"`
-	GeneratedAt        string `json:"generated_at"`
-	ActiveStreams      int    `json:"active_streams"`
-	QueuedFrames       int    `json:"queued_frames"`
-	ReconnectCount     int    `json:"reconnect_count"`
-	LastReconnectAt    string `json:"last_reconnect_at,omitempty"`
-	AgentVersion       string `json:"agent_version,omitempty"`
+	ContractVersion int    `json:"contract_version"`
+	MessageType     string `json:"message_type"`
+	ReportID        string `json:"report_id"`
+	GeneratedAt     string `json:"generated_at"`
+	ActiveStreams   int    `json:"active_streams"`
+	QueuedFrames    int    `json:"queued_frames"`
+	ReconnectCount  int    `json:"reconnect_count"`
+	LastReconnectAt string `json:"last_reconnect_at,omitempty"`
+	AgentVersion    string `json:"agent_version,omitempty"`
 }
 
 type StreamOpen struct {
@@ -382,6 +382,33 @@ type SessionRevoked struct {
 	MessageType     string `json:"message_type"`
 	AuthorizationID string `json:"authorization_id"`
 	ReasonCode      string `json:"reason_code"`
+}
+
+// ResumeSession is the Agent→Gateway request to resume a previously
+// authenticated session after a transport interruption. The Agent proves
+// continued ownership of the device identity by signing the resume
+// transcript; the Gateway accepts only while the original session is still
+// live, the authorization is still valid, and no revocation applies.
+type ResumeSession struct {
+	ContractVersion int    `json:"contract_version"`
+	MessageType     string `json:"message_type"`
+	DeviceID        string `json:"device_id"`
+	AuthorizationID string `json:"authorization_id"`
+	TokenID         string `json:"token_id"`
+	SessionID       string `json:"session_id"`
+	ResumeNonce     string `json:"resume_nonce"`
+	Signature       string `json:"signature"`
+}
+
+// SessionResumed is the Gateway→Agent confirmation that the previously
+// authenticated session resumed without a full challenge handshake. The
+// outbound sequence continues from the pre-interruption value.
+type SessionResumed struct {
+	ContractVersion int    `json:"contract_version"`
+	MessageType     string `json:"message_type"`
+	SessionID       string `json:"session_id"`
+	NextSequence    uint64 `json:"next_sequence"`
+	ResumedAt       string `json:"resumed_at"`
 }
 
 func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
@@ -579,9 +606,89 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			return errors.New("invalid session_revoked reason_code")
 		}
 		return nil
+	case "resume_session":
+		if err := sessionScope(); err != nil {
+			return err
+		}
+		var message ResumeSession
+		if err := decodeControlStrict(data, &message); err != nil {
+			return err
+		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "resume_session" {
+			return errors.New("invalid resume_session envelope")
+		}
+		for name, value := range map[string]string{
+			"device_id":        message.DeviceID,
+			"authorization_id": message.AuthorizationID,
+			"token_id":         message.TokenID,
+			"session_id":       message.SessionID,
+		} {
+			if err := validateID(name, value); err != nil {
+				return err
+			}
+		}
+		if err := validateRawBase64Length("resume_nonce", message.ResumeNonce, 32); err != nil {
+			return err
+		}
+		if err := validateRawBase64Length("signature", message.Signature, ed25519.SignatureSize); err != nil {
+			return err
+		}
+		return nil
+	case "session_resumed":
+		if err := sessionScope(); err != nil {
+			return err
+		}
+		var message SessionResumed
+		if err := decodeControlStrict(data, &message); err != nil {
+			return err
+		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "session_resumed" {
+			return errors.New("invalid session_resumed envelope")
+		}
+		if err := validateID("session_id", message.SessionID); err != nil {
+			return err
+		}
+		if message.NextSequence == 0 {
+			return errors.New("session_resumed next_sequence must be positive")
+		}
+		if _, err := parseUTCTime("resumed_at", message.ResumedAt); err != nil {
+			return err
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown control message_type: %q", envelope.MessageType)
 	}
+}
+
+// ResumeTranscript is the exact signed byte sequence for resume_session.
+// Identifier patterns prohibit NUL bytes, so the delimiter is unambiguous.
+func ResumeTranscript(resume ResumeSession) []byte {
+	parts := []string{
+		"HXT1-RESUME",
+		resume.DeviceID,
+		resume.AuthorizationID,
+		resume.TokenID,
+		resume.SessionID,
+		resume.ResumeNonce,
+	}
+	return []byte(strings.Join(parts, "\x00"))
+}
+
+// VerifyResumeSignature verifies the resume_session signature against the
+// externally registered device public key.
+func VerifyResumeSignature(publicKeyBase64 string, resume ResumeSession) error {
+	publicKey, err := base64.RawURLEncoding.DecodeString(publicKeyBase64)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return errors.New("invalid Ed25519 public key")
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(resume.Signature)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return errors.New("invalid Ed25519 signature")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), ResumeTranscript(resume), signature) {
+		return errors.New("resume signature verification failed")
+	}
+	return nil
 }
 
 func DecodeClientHello(data []byte) (ClientHello, error) {

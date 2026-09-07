@@ -163,6 +163,32 @@ func authenticateAgent(
 	return sess, nil
 }
 
+// newResumedAgentSession builds an Agent session after a Gateway-confirmed
+// session_resumed reply. It skips the challenge round trip and continues the
+// outbound sequence from lastOutbound.
+func newResumedAgentSession(conn *websocket.Conn, config Config, limits Limits, logger *slog.Logger, sessionID string, inbound contractv1.SequenceTracker, lastOutbound uint64) *agentSession {
+	sess := &agentSession{
+		conn:          conn,
+		config:        config,
+		limits:        limits,
+		logger:        logger,
+		sessionID:     sessionID,
+		inbound:       inbound,
+		streams:       make(map[uint32]*agentStream),
+		queueBudget:   newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:        make(chan struct{}),
+		controlWrites: make(chan agentWriteRequest, 32),
+		dataWrites:    make(chan agentWriteRequest, 2),
+	}
+	sess.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
+	}
+	sess.outbound.Store(lastOutbound)
+	sess.limits.IdleTimeout = limits.IdleTimeout
+	go sess.writeLoop()
+	return sess
+}
+
 func (sess *agentSession) run(parent context.Context) error {
 	defer sess.shutdown()
 	ctx, cancel := context.WithCancel(parent)
