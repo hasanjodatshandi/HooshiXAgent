@@ -28,6 +28,14 @@ type session struct {
 	lastSeen   atomic.Int64
 	authorized atomic.Bool
 
+	// Observability counters (Phase 5). Bounded aggregate telemetry only:
+	// never authorization, routing, or business authority.
+	agentBytes  atomic.Uint64 // data-frame bytes received from the Agent
+	publicBytes atomic.Uint64 // data-frame bytes sent toward the Agent
+	pingLatency atomic.Int64  // last heartbeat round-trip in nanoseconds
+	reconnected atomic.Bool   // session replaced a previous live session
+	pendingPing atomic.Value  // time.Time of the last outbound ping
+
 	controlWrites              chan sessionWriteRequest
 	dataWrites                 chan sessionWriteRequest
 	writeMessage               func(context.Context, []byte) error
@@ -194,6 +202,8 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 				sess.close(websocket.StatusInternalError, "heartbeat write failed")
 				return
 			}
+			// Arm the latency observation window for the matching pong.
+			sess.pendingPing.Store(time.Now())
 		}
 	}
 }
@@ -300,6 +310,17 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 
 	switch envelope.MessageType {
 	case "pong":
+		var pong contractv1.Heartbeat
+		if err := json.Unmarshal(frame.Payload, &pong); err != nil {
+			return err
+		}
+		// Record the bounded heartbeat round-trip for aggregate latency
+		// telemetry. The ping send time is tracked per session; a missed or
+		// stale pong simply leaves the last observation in place.
+		if sent, ok := sess.pendingPing.Load().(time.Time); ok && !sent.IsZero() {
+			sess.pingLatency.Store(time.Since(sent).Nanoseconds())
+			sess.pendingPing.Store(time.Time{})
+		}
 		return nil
 	case "health_report":
 		var report contractv1.HealthReport
@@ -357,6 +378,8 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
+	// Bounded aggregate tunnel-byte telemetry: Agent→Gateway data frames.
+	sess.agentBytes.Add(uint64(len(frame.Payload)))
 	if err := stream.enqueue(frame.Payload); err != nil {
 		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
 		return nil
@@ -453,6 +476,8 @@ func (sess *session) failAll(err error) {
 }
 
 func (sess *session) sendBytes(ctx context.Context, streamID uint32, payload []byte) error {
+	// Bounded aggregate tunnel-byte telemetry: Gateway→Agent data frames.
+	sess.publicBytes.Add(uint64(len(payload)))
 	for len(payload) > 0 {
 		size := len(payload)
 		if size > contractv1.MaxDataPayload {
