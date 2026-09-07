@@ -38,6 +38,12 @@ type agentSession struct {
 	maxStreamID uint32
 	closed      chan struct{}
 	closeOnce   sync.Once
+
+	// healthMu guards the health-report bookkeeping used by the periodic
+	// agent→gateway health_report control message.
+	healthMu       sync.Mutex
+	reconnectCount int
+	lastReconnect  time.Time
 }
 
 type agentStream struct {
@@ -157,11 +163,40 @@ func authenticateAgent(
 	return sess, nil
 }
 
+// newResumedAgentSession builds an Agent session after a Gateway-confirmed
+// session_resumed reply. It skips the challenge round trip and continues the
+// outbound sequence from lastOutbound.
+func newResumedAgentSession(conn *websocket.Conn, config Config, limits Limits, logger *slog.Logger, sessionID string, inbound contractv1.SequenceTracker, lastOutbound uint64) *agentSession {
+	sess := &agentSession{
+		conn:          conn,
+		config:        config,
+		limits:        limits,
+		logger:        logger,
+		sessionID:     sessionID,
+		inbound:       inbound,
+		streams:       make(map[uint32]*agentStream),
+		queueBudget:   newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:        make(chan struct{}),
+		controlWrites: make(chan agentWriteRequest, 32),
+		dataWrites:    make(chan agentWriteRequest, 2),
+	}
+	sess.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
+	}
+	sess.outbound.Store(lastOutbound)
+	sess.limits.IdleTimeout = limits.IdleTimeout
+	go sess.writeLoop()
+	return sess
+}
+
 func (sess *agentSession) run(parent context.Context) error {
 	defer sess.shutdown()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	go sess.healthReportLoop(ctx, sess.limits.IdleTimeout/2)
 	idle := sess.limits.IdleTimeout
 	for {
-		readCtx, cancel := context.WithTimeout(parent, idle)
+		readCtx, cancel := context.WithTimeout(ctx, idle)
 		frame, err := readAgentFrame(readCtx, sess.conn)
 		cancel()
 		if err != nil {
@@ -175,15 +210,49 @@ func (sess *agentSession) run(parent context.Context) error {
 		}
 		switch frame.Kind {
 		case contractv1.KindControl:
-			if err := sess.handleControl(parent, frame); err != nil {
+			if err := sess.handleControl(ctx, frame); err != nil {
 				return err
 			}
 		case contractv1.KindData:
-			if err := sess.handleData(parent, frame); err != nil {
+			if err := sess.handleData(ctx, frame); err != nil {
 				return err
 			}
 		default:
 			return errors.New("unknown protocol frame kind")
+		}
+	}
+}
+
+// healthReportLoop periodically sends the bounded Agent health_report control
+// message required by the tunnel reliability phase. Reports use the same
+// bounded write timeout as every other control write; a failed report ends
+// the loop and lets the read loop observe the transport failure. Entropy
+// failure of a report ID drops only that report.
+func (sess *agentSession) healthReportLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sess.closed:
+			return
+		case <-ticker.C:
+			reportID, err := randomNonce()
+			if err != nil {
+				sess.logger.Warn("agent health report ID generation failed", "error", err)
+				continue
+			}
+			reportCtx, cancel := context.WithTimeout(ctx, sess.limits.WriteTimeout)
+			err = sess.sendHealthReport(reportCtx, reportID[:16], Version)
+			cancel()
+			if err != nil {
+				sess.logger.Debug("agent health report send failed", "error", err)
+				return
+			}
 		}
 	}
 }
@@ -616,6 +685,18 @@ func (sess *agentSession) shutdown() {
 			stream.finishStream()
 		}
 		if sess.conn != nil {
+			// Graceful WebSocket close first: emit a proper normal-closure
+			// handshake with a bounded wait, then force-close the socket so
+			// shutdown can never hang on a stuck peer.
+			graceDone := make(chan struct{})
+			go func() {
+				_ = sess.conn.Close(websocket.StatusNormalClosure, "agent shutdown")
+				close(graceDone)
+			}()
+			select {
+			case <-graceDone:
+			case <-time.After(3 * time.Second):
+			}
 			sess.conn.CloseNow()
 		}
 	})
@@ -630,6 +711,69 @@ func readAgentFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame
 		return contractv1.Frame{}, errors.New("protocol requires binary WebSocket messages")
 	}
 	return contractv1.DecodeFrame(payload)
+}
+
+// countActiveStreams returns the current number of registered streams. It is
+// the bounded active-stream observation used by health reporting.
+func (sess *agentSession) countActiveStreams() int {
+	sess.mu.Lock()
+	count := len(sess.streams)
+	sess.mu.Unlock()
+	return count
+}
+
+// countQueuedFrames returns the number of queued inbound frames across all
+// live streams. Each queue is bounded, so the total is bounded by
+// MaxStreams * MaxQueueFrames.
+func (sess *agentSession) countQueuedFrames() int {
+	sess.mu.Lock()
+	streams := make([]*agentStream, 0, len(sess.streams))
+	for _, stream := range sess.streams {
+		streams = append(streams, stream)
+	}
+	sess.mu.Unlock()
+
+	total := 0
+	for _, stream := range streams {
+		stream.queueMu.Lock()
+		total += len(stream.incoming)
+		stream.queueMu.Unlock()
+	}
+	return total
+}
+
+// observeReconnect records that a reconnect cycle completed so the next
+// health_report can carry the bounded reconnect counter.
+func (sess *agentSession) observeReconnect() {
+	sess.healthMu.Lock()
+	sess.reconnectCount++
+	sess.lastReconnect = time.Now().UTC()
+	sess.healthMu.Unlock()
+}
+
+// sendHealthReport emits one bounded Agent→Gateway health_report control
+// message. It is telemetry only: failure to send returns an error the caller
+// may treat as session-level because it flows through the same control
+// writer as heartbeat/pong traffic.
+func (sess *agentSession) sendHealthReport(ctx context.Context, reportID string, agentVersion string) error {
+	report := contractv1.HealthReport{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "health_report",
+		ReportID:        reportID,
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		ActiveStreams:   sess.countActiveStreams(),
+		QueuedFrames:    sess.countQueuedFrames(),
+	}
+	sess.healthMu.Lock()
+	report.ReconnectCount = sess.reconnectCount
+	if !sess.lastReconnect.IsZero() {
+		report.LastReconnectAt = sess.lastReconnect.Format(time.RFC3339)
+	}
+	sess.healthMu.Unlock()
+	if agentVersion != "" {
+		report.AgentVersion = agentVersion
+	}
+	return sess.sendControl(ctx, 0, report)
 }
 
 func writeInitialControl(ctx context.Context, conn *websocket.Conn, sequence uint64, value any) error {

@@ -275,6 +275,51 @@ func TestGatewayProtocolHeartbeat(t *testing.T) {
 	}
 }
 
+func TestGatewayAcceptsHealthReportTelemetry(t *testing.T) {
+	identity := newTestIdentity(t)
+	metadata := testMetadata(t, identity, testRouteHost)
+	gateway, err := New(metadata, NopStatusSink{}, DefaultLimits(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(gateway.Handler())
+	defer tlsServer.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer local.Close()
+	agent := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
+	defer agent.close()
+	waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
+
+	before := gateway.resources.healthReports.Load()
+	if err := agent.sendControl(context.Background(), 0, contractv1.HealthReport{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "health_report",
+		ReportID:        "report-test-001",
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		ActiveStreams:   1,
+		QueuedFrames:    0,
+		ReconnectCount:  0,
+		AgentVersion:    "test",
+	}); err != nil {
+		t.Fatalf("send health_report: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return gateway.resources.healthReports.Load() == before+1 })
+
+	sess := gateway.sessionForDevice(identity.deviceID)
+	if sess == nil {
+		t.Fatal("health_report closed the session")
+	}
+
+	metrics := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_health_reports_total 1") {
+		t.Fatalf("health report metric missing: %s", metrics.Body.String())
+	}
+	if strings.Contains(metrics.Body.String(), "{") {
+		t.Fatalf("health report metric introduced labels: %s", metrics.Body.String())
+	}
+}
+
 func TestGatewayRequestAndStreamLimits(t *testing.T) {
 	t.Parallel()
 

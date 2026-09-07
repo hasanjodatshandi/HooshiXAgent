@@ -234,6 +234,8 @@ type gatewayResources struct {
 	handshakeRejects         atomic.Uint64
 	ingressRejects           atomic.Uint64
 	sessionRejects           atomic.Uint64
+	healthReports            atomic.Uint64
+	reconnects               atomic.Uint64
 }
 
 func newGatewayResources(limits Limits) gatewayResources {

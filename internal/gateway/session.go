@@ -28,6 +28,14 @@ type session struct {
 	lastSeen   atomic.Int64
 	authorized atomic.Bool
 
+	// Observability counters (Phase 5). Bounded aggregate telemetry only:
+	// never authorization, routing, or business authority.
+	agentBytes  atomic.Uint64 // data-frame bytes received from the Agent
+	publicBytes atomic.Uint64 // data-frame bytes sent toward the Agent
+	pingLatency atomic.Int64  // last heartbeat round-trip in nanoseconds
+	reconnected atomic.Bool   // session replaced a previous live session
+	pendingPing atomic.Value  // time.Time of the last outbound ping
+
 	controlWrites              chan sessionWriteRequest
 	dataWrites                 chan sessionWriteRequest
 	writeMessage               func(context.Context, []byte) error
@@ -71,6 +79,44 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	sess.authorized.Store(true)
 	go sess.writeLoop()
 	return sess
+}
+
+// resumeInto binds this session's identity to a replacement WebSocket after
+// a successful resume_session. The stream table starts empty (streams were
+// bound to the lost transport); sequence numbering restarts on the new
+// connection per ADR-0007's independent per-direction rule, so the resumed
+// control writer continues from the fresh handshake frame. It returns nil
+// when the original session is no longer resumable.
+func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.SequenceTracker) *session {
+	if sess == nil || !sess.authorized.Load() {
+		return nil
+	}
+	resumed := &session{
+		gateway:                sess.gateway,
+		conn:                   conn,
+		deviceID:               sess.deviceID,
+		sessionID:              sess.sessionID,
+		authorizationID:        sess.authorizationID,
+		tokenID:                sess.tokenID,
+		authorizationExpiresAt: sess.authorizationExpiresAt,
+		inbound:                inbound,
+		streams:                make(map[uint32]*stream),
+		queueBudget:            newByteBudget(sess.gateway.limits.MaxSessionQueueBytes),
+		nextID:                 sess.nextID,
+		done:                   make(chan struct{}),
+		controlWrites:          make(chan sessionWriteRequest, 32),
+		dataWrites:             make(chan sessionWriteRequest, 2),
+	}
+	resumed.writeMessage = func(ctx context.Context, frame []byte) error {
+		return conn.Write(ctx, websocket.MessageBinary, frame)
+	}
+	resumed.closeConn = conn.Close
+	resumed.closeNowConn = conn.CloseNow
+	resumed.outbound.Store(0)
+	resumed.lastSeen.Store(time.Now().UnixNano())
+	resumed.authorized.Store(true)
+	go resumed.writeLoop()
+	return resumed
 }
 
 func (sess *session) run(parent context.Context) {
@@ -156,6 +202,8 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 				sess.close(websocket.StatusInternalError, "heartbeat write failed")
 				return
 			}
+			// Arm the latency observation window for the matching pong.
+			sess.pendingPing.Store(time.Now())
 		}
 	}
 }
@@ -262,6 +310,34 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 
 	switch envelope.MessageType {
 	case "pong":
+		var pong contractv1.Heartbeat
+		if err := json.Unmarshal(frame.Payload, &pong); err != nil {
+			return err
+		}
+		// Record the bounded heartbeat round-trip for aggregate latency
+		// telemetry. The ping send time is tracked per session; a missed or
+		// stale pong simply leaves the last observation in place.
+		if sent, ok := sess.pendingPing.Load().(time.Time); ok && !sent.IsZero() {
+			sess.pingLatency.Store(time.Since(sent).Nanoseconds())
+			sess.pendingPing.Store(time.Time{})
+		}
+		return nil
+	case "health_report":
+		var report contractv1.HealthReport
+		if err := json.Unmarshal(frame.Payload, &report); err != nil {
+			return err
+		}
+		// Health reports are bounded operational telemetry only: they
+		// refresh liveness observation and are never authorization,
+		// routing, or revocation authority. Validation already happened
+		// in ValidateControlPayload above.
+		sess.lastSeen.Store(time.Now().UnixNano())
+		sess.gateway.resources.healthReports.Add(1)
+		sess.gateway.logger.Debug("agent health report received",
+			"device_id", sess.deviceID,
+			"active_streams", report.ActiveStreams,
+			"queued_frames", report.QueuedFrames,
+			"reconnect_count", report.ReconnectCount)
 		return nil
 	case "ping":
 		var ping contractv1.Heartbeat
@@ -302,6 +378,8 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
+	// Bounded aggregate tunnel-byte telemetry: Agent→Gateway data frames.
+	sess.agentBytes.Add(uint64(len(frame.Payload)))
 	if err := stream.enqueue(frame.Payload); err != nil {
 		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
 		return nil
@@ -398,6 +476,8 @@ func (sess *session) failAll(err error) {
 }
 
 func (sess *session) sendBytes(ctx context.Context, streamID uint32, payload []byte) error {
+	// Bounded aggregate tunnel-byte telemetry: Gateway→Agent data frames.
+	sess.publicBytes.Add(uint64(len(payload)))
 	for len(payload) > 0 {
 		size := len(payload)
 		if size > contractv1.MaxDataPayload {

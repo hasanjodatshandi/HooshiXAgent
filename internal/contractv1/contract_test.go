@@ -247,6 +247,46 @@ func TestControlPayloadScopeAndStrictness(t *testing.T) {
 	}
 }
 
+func TestHealthReportValidation(t *testing.T) {
+	t.Parallel()
+
+	valid := []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":3,"queued_frames":5,"reconnect_count":2,"last_reconnect_at":"2026-08-29T12:05:00Z","agent_version":"v1.2.3"}`)
+	if err := ValidateControlPayload(valid, 0, fixtureTime); err != nil {
+		t.Fatalf("valid health_report rejected: %v", err)
+	}
+	if err := ValidateControlPayload(valid, 7, fixtureTime); err == nil {
+		t.Fatal("health_report on stream scope must be rejected")
+	}
+
+	minimal := []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":0}`)
+	if err := ValidateControlPayload(minimal, 0, fixtureTime); err != nil {
+		t.Fatalf("minimal health_report rejected: %v", err)
+	}
+
+	invalid := []struct {
+		name    string
+		payload []byte
+	}{
+		{"unknown field", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":0,"extra":true}`)},
+		{"negative streams", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":-1,"queued_frames":0,"reconnect_count":0}`)},
+		{"streams over bound", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":4097,"queued_frames":0,"reconnect_count":0}`)},
+		{"queued over bound", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":65537,"reconnect_count":0}`)},
+		{"negative reconnects", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":-1}`)},
+		{"bad generated_at", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"not-a-time","active_streams":0,"queued_frames":0,"reconnect_count":0}`)},
+		{"bad last_reconnect_at", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":1,"last_reconnect_at":"not-a-time"}`)},
+		{"long agent_version", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":0,"agent_version":"` + strings.Repeat("v", 65) + `"}`)},
+		{"bad report_id", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":0}`)},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateControlPayload(test.payload, 0, fixtureTime); err == nil {
+				t.Fatalf("invalid health_report accepted: %s", test.name)
+			}
+		})
+	}
+}
+
 func TestJSONSchemaDocumentsAreValidAndStrict(t *testing.T) {
 	t.Parallel()
 

@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -66,6 +70,7 @@ func configureAgentState(stateDir string, store SecretStore, requested Config, t
 				return err
 			}
 			current.GatewayURL = requested.GatewayURL
+			current.GatewayAliases = requested.GatewayAliases
 			current.CAFile = requested.CAFile
 			current.DeviceID = requested.DeviceID
 			current.AuthorizationID = requested.AuthorizationID
@@ -98,6 +103,54 @@ func configureAgentState(stateDir string, store SecretStore, requested Config, t
 		})
 	})
 	return configured, err
+}
+
+// rotateAgentIdentity atomically replaces the device Ed25519 seed under the
+// existing mutation lock and rollback journal. The new seed is generated
+// locally with crypto/rand; the private key never leaves the device
+// (ADR-0002). A failed rotation restores the previous identity byte-for-byte.
+func rotateAgentIdentity(stateDir string, store SecretStore, faults stateMutationFaults) (publicKey []byte, err error) {
+	err = withConfigLock(stateDir, func() error {
+		return runStateTransaction(stateDir, func() error {
+			if err := prepareSecretMutation(store); err != nil {
+				return err
+			}
+			state, err := loadSecretForMutation(store)
+			if err != nil {
+				return err
+			}
+			if state.Seed == "" {
+				return errors.New("Agent identity is not initialized; run init first")
+			}
+			seed := make([]byte, ed25519.SeedSize)
+			if _, err := io.ReadFull(rand.Reader, seed); err != nil {
+				return fmt.Errorf("generate replacement Ed25519 seed: %w", err)
+			}
+			state.Seed = base64.RawURLEncoding.EncodeToString(seed)
+			if err := store.Save(state); err != nil {
+				return err
+			}
+			if faults.afterSecretSave != nil {
+				if err := faults.afterSecretSave(); err != nil {
+					return err
+				}
+			}
+			// Read back through the mutation-safe path: the transaction
+			// directory exists for the remainder of this operation, so the
+			// read-only Load() path must not be used here.
+			saved, err := loadSecretForMutation(store)
+			if err != nil {
+				return err
+			}
+			key, _, err := identityFromSeed(saved.Seed)
+			if err != nil {
+				return err
+			}
+			publicKey = append(publicKey[:0], key...)
+			return nil
+		})
+	})
+	return publicKey, err
 }
 
 type stateTransaction struct {

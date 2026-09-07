@@ -106,10 +106,17 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	gateway.mu.RUnlock()
 
 	activeStreams := 0
+	var agentBytesTotal, publicBytesTotal uint64
+	var latencyNanos int64 = -1
 	for _, sess := range sessions {
 		sess.mu.Lock()
 		activeStreams += len(sess.streams)
 		sess.mu.Unlock()
+		agentBytesTotal += sess.agentBytes.Load()
+		publicBytesTotal += sess.publicBytes.Load()
+		if observed := sess.pingLatency.Load(); observed > 0 && (latencyNanos < 0 || observed < latencyNanos) {
+			latencyNanos = observed
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -150,6 +157,21 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load()+gateway.resources.handshakeDeviceAdmission.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load()+gateway.resources.ingressRouteAdmission.rejected.Load()+gateway.resources.ingressDeviceAdmission.rejected.Load())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_health_reports_total Total bounded Agent health_report control messages accepted.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_health_reports_total counter\nhooshix_gateway_health_reports_total %d\n", gateway.resources.healthReports.Load())
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_reconnects_total Total authenticated Agent reconnects that replaced a live session (full handshake or resume).\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_reconnects_total counter\nhooshix_gateway_reconnects_total %d\n", gateway.resources.reconnects.Load())
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_tunnel_bytes_from_agents_total Total protocol data-frame bytes received from Agents.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_from_agents_total counter\nhooshix_gateway_tunnel_bytes_from_agents_total %d\n", agentBytesTotal)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_tunnel_bytes_to_agents_total Total protocol data-frame bytes sent toward Agents.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_to_agents_total counter\nhooshix_gateway_tunnel_bytes_to_agents_total %d\n", publicBytesTotal)
+	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_session_latency_ms Best observed heartbeat round-trip across live sessions in milliseconds; -1 while no pong has completed.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_latency_ms gauge\n")
+	if latencyNanos >= 0 {
+		_, _ = fmt.Fprintf(w, "hooshix_gateway_session_latency_ms %.3f\n", float64(latencyNanos)/1e6)
+	} else {
+		_, _ = fmt.Fprintf(w, "hooshix_gateway_session_latency_ms -1\n")
+	}
 	statusQueued, statusLimit, statusDropped, statusFailures := gateway.status.snapshot()
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_status_queue_depth Current queued status signals waiting for asynchronous export.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_status_queue_depth gauge\nhooshix_gateway_status_queue_depth %d\n", statusQueued)
@@ -205,7 +227,7 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	ctx, cancel := context.WithTimeout(request.Context(), gateway.limits.HandshakeTimeout)
 	defer cancel()
 	prefaceCtx, prefaceCancel := context.WithTimeout(ctx, handshakePrefaceTimeout(gateway.limits.HandshakeTimeout))
-	candidate, err := gateway.readAuthorizedHello(prefaceCtx, conn)
+	candidate, resume, err := gateway.readPreface(prefaceCtx, conn)
 	prefaceCancel()
 	if err != nil {
 		gateway.logger.Warn("agent pre-authentication failed", "error", err)
@@ -218,15 +240,28 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 		_ = conn.Close(websocket.StatusTryAgainLater, "agent handshake rate limit exceeded")
 		return
 	}
-	deviceAdmission := gateway.resources.handshakeDeviceAdmission.tryAcquire(candidate.record.DeviceID, now)
+	resumeDeviceID := candidate.record.DeviceID
+	if resume != nil {
+		resumeDeviceID = resume.DeviceID
+	}
+	deviceAdmission := gateway.resources.handshakeDeviceAdmission.tryAcquire(resumeDeviceID, now)
 	if deviceAdmission != admissionAccepted {
 		_ = conn.Close(websocket.StatusTryAgainLater, "device handshake admission limit exceeded")
 		return
 	}
-	sess, err := gateway.completeAuthentication(ctx, conn, candidate)
-	gateway.resources.handshakeDeviceAdmission.release(candidate.record.DeviceID)
+	sess, err := gateway.completeAuthenticationOrResume(ctx, conn, candidate, resume)
+	gateway.resources.handshakeDeviceAdmission.release(resumeDeviceID)
 	releaseHandshakeSlot()
 	cancel()
+	if errors.Is(err, errResumeUnavailable) {
+		// Resume is a best-effort fast path: when the target session no
+		// longer exists the Agent must fall back to a fresh full handshake
+		// on a new connection. Closing with TryAgainLater keeps the Agent's
+		// bounded reconnect behavior instead of treating this as permanent.
+		gateway.logger.Info("agent session resume unavailable", "device_id", resumeDeviceID)
+		_ = conn.Close(websocket.StatusTryAgainLater, "resume unavailable; reconnect with full handshake")
+		return
+	}
 	if err != nil {
 		gateway.logger.Warn("agent authentication failed", "error", err)
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
@@ -277,32 +312,135 @@ func handshakePrefaceTimeout(total time.Duration) time.Duration {
 }
 
 func (gateway *Gateway) readAuthorizedHello(ctx context.Context, conn *websocket.Conn) (authorizedHandshake, error) {
-	var candidate authorizedHandshake
-	first, err := readProtocolFrame(ctx, conn)
+	candidate, resume, err := gateway.readPreface(ctx, conn)
 	if err != nil {
 		return candidate, err
 	}
+	if resume != nil {
+		return candidate, errors.New("unexpected resume preface in full-handshake path")
+	}
+	return candidate, nil
+}
+
+// readPreface consumes the first session control frame and routes it as
+// either a fresh client_hello preface or a resume_session fast-path request.
+// The returned resume value is non-nil only for the resume path.
+func (gateway *Gateway) readPreface(ctx context.Context, conn *websocket.Conn) (authorizedHandshake, *contractv1.ResumeSession, error) {
+	var candidate authorizedHandshake
+	var resume contractv1.ResumeSession
+	first, err := readProtocolFrame(ctx, conn)
+	if err != nil {
+		return candidate, nil, err
+	}
 	if err := candidate.inbound.Accept(first.Sequence); err != nil {
-		return candidate, err
+		return candidate, nil, err
 	}
 	if first.Kind != contractv1.KindControl || first.StreamID != 0 {
-		return candidate, errors.New("first frame must be session control")
+		return candidate, nil, errors.New("first frame must be session control")
 	}
 	if err := contractv1.ValidateControlPayload(first.Payload, 0, time.Now().UTC()); err != nil {
-		return candidate, err
+		return candidate, nil, err
+	}
+	var envelope struct {
+		MessageType string `json:"message_type"`
+	}
+	if err := json.Unmarshal(first.Payload, &envelope); err != nil {
+		return candidate, nil, err
+	}
+	if envelope.MessageType == "resume_session" {
+		if err := json.Unmarshal(first.Payload, &resume); err != nil {
+			return candidate, nil, err
+		}
+		return candidate, &resume, nil
 	}
 	candidate.hello, err = contractv1.DecodeClientHello(first.Payload)
 	if err != nil {
-		return candidate, err
+		return candidate, nil, err
 	}
 	candidate.record, err = gateway.metadata.Authorization(ctx, candidate.hello.AuthorizationID, candidate.hello.DeviceID, candidate.hello.TokenID, time.Now().UTC())
 	if err != nil {
-		return candidate, fmt.Errorf("authorization lookup: %w", err)
+		return candidate, nil, fmt.Errorf("authorization lookup: %w", err)
 	}
 	if !contractv1.MatchSessionToken(candidate.record, candidate.hello.SessionToken) {
-		return candidate, errors.New("session token mismatch")
+		return candidate, nil, errors.New("session token mismatch")
 	}
-	return candidate, nil
+	return candidate, nil, nil
+}
+
+// errResumeUnavailable signals that the resume target session is gone; the
+// caller must close with TryAgainLater so the Agent falls back to a full
+// handshake on its next bounded reconnect attempt.
+var errResumeUnavailable = errors.New("resume target session unavailable")
+
+func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume *contractv1.ResumeSession) (*session, error) {
+	if resume == nil {
+		return gateway.completeAuthentication(ctx, conn, candidate)
+	}
+	return gateway.resumeSession(ctx, conn, candidate, *resume)
+}
+
+// resumeSession implements the Phase-2 session-resume fast path. It accepts
+// only when the referenced session is still live and authorized, the current
+// authorization record still matches and is active, the resume signature
+// verifies against the registered device key, and no revocation applies. Any
+// mismatch fails closed to errResumeUnavailable (never to a half-resumed
+// session).
+func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume contractv1.ResumeSession) (*session, error) {
+	gateway.mu.RLock()
+	existing := gateway.sessions[resume.DeviceID]
+	gateway.mu.RUnlock()
+	if existing == nil || !existing.authorized.Load() || existing.sessionID != resume.SessionID {
+		return nil, errResumeUnavailable
+	}
+	if existing.deviceID != resume.DeviceID || existing.authorizationID != resume.AuthorizationID || existing.tokenID != resume.TokenID {
+		return nil, errors.New("resume subject mismatch")
+	}
+
+	// The full authorization must still be current: same record identity,
+	// active, unexpired, and not revoked.
+	record, err := gateway.metadata.Authorization(ctx, resume.AuthorizationID, resume.DeviceID, resume.TokenID, time.Now().UTC())
+	if err != nil {
+		// Authorization lookup failures are authoritative rejections for a
+		// resume attempt: a resume may never bypass fresh validation.
+		return nil, fmt.Errorf("resume authorization lookup: %w", err)
+	}
+	if record.AuthorizationID != resume.AuthorizationID || record.DeviceID != resume.DeviceID || record.TokenID != resume.TokenID {
+		return nil, errors.New("resume authorization mismatch")
+	}
+	if record.Disabled {
+		return nil, errors.New("resume authorization disabled")
+	}
+	if err := contractv1.VerifyResumeSignature(record.DevicePublicKey, resume); err != nil {
+		return nil, err
+	}
+
+	// From here the new connection takes over the session identity. The
+	// existing WebSocket is closed outside the registry lock by the same
+	// registerSession replacement semantics as a normal reconnect.
+	resumed := existing.resumeInto(conn, candidate.inbound)
+	if resumed == nil {
+		return nil, errResumeUnavailable
+	}
+
+	// Sequence numbering restarts on the new connection (independent
+	// per-direction rule): the resume reply is sequence 1, so the Agent
+	// continues its inbound tracker at 2 for this transport.
+	resumedControl := contractv1.SessionResumed{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "session_resumed",
+		SessionID:       resumed.sessionID,
+		NextSequence:    2,
+		ResumedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeControlFrame(ctx, conn, 1, 0, resumedControl); err != nil {
+		resumed.forceClose()
+		return nil, err
+	}
+	// The direct handshake write consumed sequence 1; arm the control
+	// writer to continue at 2 on this transport.
+	resumed.outbound.Store(1)
+	gateway.logger.Info("agent session resumed", "device_id", resumed.deviceID, "session_id", resumed.sessionID)
+	return resumed, nil
 }
 
 func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake) (*session, error) {
@@ -386,6 +524,12 @@ func (gateway *Gateway) registerSession(sess *session) error {
 		gateway.resources.sessionRejects.Add(1)
 		gateway.mu.Unlock()
 		return errors.New("agent session capacity reached")
+	}
+	if current != nil && current != sess {
+		// A reconnect (fresh handshake or resume) replaced a live session:
+		// count it as an agent-driven reconnect for aggregate telemetry.
+		gateway.resources.reconnects.Add(1)
+		sess.reconnected.Store(true)
 	}
 	gateway.sessions[sess.deviceID] = sess
 	gateway.mu.Unlock()
