@@ -56,6 +56,16 @@ The server deployment remains **Docker Compose only**, with exactly Caddy and Tu
 
 The tested system includes real Agent↔Gateway E2E traffic, Gateway restart recovery, Agent process restart with persisted identity, forced tunnel-network interruption/reconnect, fail-closed offline behavior, package rollback, release checksum tamper rejection, SBOM/vulnerability scanning and OIDC-backed GitHub Artifact Attestations.
 
+## Tunnel upgrade capabilities (ADR-0013)
+
+The tunnel implementation plan landed as five phases under the Clean Architecture layering recorded in ADR-0013:
+
+- **Reliability** — an explicit connection health state machine (`init/connecting/connected/degraded/reconnecting/revoked/shutdown`), a bounded `health_report` control message carrying active streams, queued frames, reconnect counts and Agent version, and a graceful WebSocket close handshake before force-close on shutdown.
+- **Protocol** — a `resume_session`/`session_resumed` fast path with an Ed25519-signed resume transcript; acceptance requires a still-live authorized session plus fresh external authorization and signature verification, and rejection falls back to the full handshake on the next bounded reconnect.
+- **High availability** — bounded gateway aliases (max 4) with a failover dial schedule that rotates on outage and stops on policy-level rejections; a real-process E2E gate proves route recovery through the alias gateway with the same device identity.
+- **Security** — a transactional `rotate` command that replaces the device Ed25519 key on-device under the ADR-0002 locality boundary, gated by interactive confirmation, with byte-for-byte rollback on failure.
+- **Operations** — bounded aggregate metrics for reconnects, tunnel bytes in both directions, and heartbeat latency, alongside the existing low-cardinality metric set.
+
 ## Verification entry points
 
 ```bash

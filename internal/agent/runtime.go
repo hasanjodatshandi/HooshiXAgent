@@ -80,8 +80,10 @@ type Runner struct {
 
 	// health carries the connection health state machine and reconnect
 	// counter required by the tunnel reliability phase. It is observational
-	// only and never authorization authority.
+	// only and never authorization authority. The aggregate derives the
+	// combined multi-tunnel view (Phase 3 HA) from this machine today.
 	health     *tunnelstates.Machine
+	aggregate  *tunnelstates.Aggregate
 	reconnects atomic.Int64
 
 	// resumable holds the last authenticated session ID for the Phase-2
@@ -108,6 +110,7 @@ func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, er
 		logger = slog.Default()
 	}
 	runner := &Runner{stateDir: normalized, limits: limits, logger: logger, health: tunnelstates.New()}
+	runner.aggregate = tunnelstates.NewAggregate(runner.health)
 	runner.attempt = runner.runOnce
 	return runner, nil
 }
@@ -125,10 +128,17 @@ func (runner *Runner) storeResumable(sessionID string) {
 	runner.resumable.Store(sessionID)
 }
 
-// HealthState returns the current connection health state name and whether
-// it is terminal. Exposed for status/diagnostics only.
+// HealthState returns the current aggregate connection health state name
+// and whether it is terminal. Exposed for status/diagnostics only.
 func (runner *Runner) HealthState() (string, bool) {
-	return runner.health.Observability()
+	state, terminal, _ := runner.aggregate.Observability()
+	return state, terminal
+}
+
+// HealthyTunnel reports whether the aggregate view currently has a serving
+// tunnel. Exposed for status/diagnostics only.
+func (runner *Runner) HealthyTunnel() bool {
+	return runner.aggregate.Healthy()
 }
 
 // ReconnectCount returns the number of completed reconnect cycles since
