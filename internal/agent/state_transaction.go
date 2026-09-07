@@ -66,6 +66,7 @@ func configureAgentState(stateDir string, store SecretStore, requested Config, t
 				return err
 			}
 			current.GatewayURL = requested.GatewayURL
+			current.GatewayAliases = requested.GatewayAliases
 			current.CAFile = requested.CAFile
 			current.DeviceID = requested.DeviceID
 			current.AuthorizationID = requested.AuthorizationID

@@ -48,10 +48,11 @@ func TestIllegalTransitionsFailClosed(t *testing.T) {
 		{path: []State{Connecting}, bad: Init},
 		{path: []State{Connecting, Connected}, bad: Init},
 		{path: []State{Connecting}, bad: Degraded},
-		{path: []State{Connecting, Reconnecting}, bad: Connected},
 		{path: []State{Connecting, Reconnecting}, bad: Degraded},
+		{path: []State{Connecting, Reconnecting}, bad: Init},
 		{path: []State{}, bad: Connected},
 		{path: []State{}, bad: Revoked},
+		{path: []State{}, bad: Reconnecting},
 	}
 	for _, test := range illegal {
 		machine := New()

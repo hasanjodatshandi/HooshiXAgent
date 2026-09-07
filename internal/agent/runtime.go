@@ -89,6 +89,11 @@ type Runner struct {
 	// and cleared whenever resume is rejected so the Agent falls back to a
 	// full handshake.
 	resumable atomic.Value // string
+
+	// failoverIndex tracks the next gateway candidate for the Phase-3 HA
+	// failover schedule. It advances only on dial failure so a healthy
+	// primary never rotates.
+	failoverIndex atomic.Int32
 }
 
 func NewRunner(stateDir string, limits Limits, logger *slog.Logger) (*Runner, error) {
@@ -159,6 +164,16 @@ func (runner *Runner) Run(ctx context.Context) error {
 		if time.Since(sessionStarted) >= 10*time.Second {
 			backoff = runner.limits.ReconnectMin
 		}
+		if errors.Is(err, errResumeRejected) {
+			// The Gateway rejected the resume fast path and closed the
+			// transport: retry immediately with a full handshake instead of
+			// waiting out a reconnect backoff.
+			runner.reconnects.Add(1)
+			if transitionErr := runner.health.Transition(tunnelstates.Reconnecting); transitionErr != nil {
+				runner.logger.Warn("agent health transition rejected", "error", transitionErr)
+			}
+			continue
+		}
 		runner.reconnects.Add(1)
 		if err := runner.health.Transition(tunnelstates.Reconnecting); err != nil {
 			runner.logger.Warn("agent health transition rejected", "error", err)
@@ -178,6 +193,49 @@ func (runner *Runner) Run(ctx context.Context) error {
 			backoff = runner.limits.ReconnectMax
 		}
 	}
+}
+
+// dialWithFailover dials the configured gateway candidates in bounded
+// failover order. It returns the URL that answered plus the live connection.
+// The schedule starts at the persisted primary; on failure the next candidate
+// is tried until one answers or all fail with the last error. Permanent dial
+// errors (redirects, 4xx policy) abort immediately without trying aliases.
+func (runner *Runner) dialWithFailover(ctx context.Context, config Config, httpClient *http.Client) (string, *websocket.Conn, *http.Response, error) {
+	candidates := config.GatewayCandidates()
+	if len(candidates) == 0 {
+		return "", nil, nil, errors.New("no gateway URL configured")
+	}
+	start := int(runner.failoverIndex.Load()) % len(candidates)
+	var lastErr error
+	var lastResponse *http.Response
+	for offset := 0; offset < len(candidates); offset++ {
+		index := (start + offset) % len(candidates)
+		candidate := candidates[index]
+		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
+		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
+			HTTPClient:      httpClient,
+			CompressionMode: websocket.CompressionDisabled,
+		})
+		cancel()
+		if err == nil {
+			runner.failoverIndex.Store(int32(index))
+			return candidate, conn, nil, nil
+		}
+		lastErr = fmt.Errorf("dial Gateway WSS %s: %w", candidate, err)
+		lastResponse = response
+		if permanentDialError(err, response) {
+			// A policy-level rejection (redirect, TLS trust, hard 4xx) is a
+			// configuration/security signal, not a per-endpoint outage: stop
+			// before rotating through aliases.
+			return "", nil, response, lastErr
+		}
+		runner.logger.Warn("gateway candidate failed; trying next", "gateway", candidate, "error", sanitizedError(lastErr))
+	}
+	// Every candidate failed: advance the schedule so the next bounded
+	// reconnect attempt starts from the next candidate instead of retrying
+	// the same dead primary first.
+	runner.failoverIndex.Store(int32((start + 1) % len(candidates)))
+	return "", nil, lastResponse, lastErr
 }
 
 func (runner *Runner) runOnce(ctx context.Context) error {
@@ -215,13 +273,10 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
-	conn, response, err := websocket.Dial(dialCtx, config.GatewayURL, &websocket.DialOptions{
-		HTTPClient:      httpClient,
-		CompressionMode: websocket.CompressionDisabled,
-	})
+	gatewayURL, conn, response, err := runner.dialWithFailover(dialCtx, config, httpClient)
 	cancel()
 	if err != nil {
-		err = protectError(fmt.Errorf("dial Gateway WSS: %w", err), token)
+		err = protectError(err, token)
 		if permanentDialError(err, response) {
 			return permanentAgentFailure(err)
 		}
@@ -232,23 +287,20 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 	sess, err := runner.authenticateOrResume(ctx, conn, config, privateKey, token)
 	if err != nil {
 		conn.CloseNow()
-		err = protectError(err, token)
 		if errors.Is(err, errResumeRejected) {
-			// Resume was rejected (session gone, key rotated, authorization
-			// changed): retry once immediately with a full handshake before
-			// surfacing any failure to the reconnect loop.
+			// Resume was rejected (session gone, gateway restarted, key
+			// rotated): the transport is already closed by the Gateway, so
+			// return the sentinel to the reconnect loop for an immediate
+			// full-handshake retry on a fresh connection.
 			runner.storeResumable("")
-			runner.logger.Info("agent resume rejected; falling back to full handshake")
-			sess, err = authenticateAgent(ctx, conn, config, privateKey, token, runner.limits, runner.logger)
-		}
-		if err != nil {
-			conn.CloseNow()
-			err = protectError(err, token)
-			if permanentRemoteSessionError(err) {
-				return permanentAgentFailure(err)
-			}
+			runner.logger.Info("agent resume rejected; retrying with full handshake")
 			return err
 		}
+		err = protectError(err, token)
+		if permanentRemoteSessionError(err) {
+			return permanentAgentFailure(err)
+		}
+		return err
 	}
 	if err := runner.health.Transition(tunnelstates.Connected); err != nil {
 		runner.logger.Warn("agent health transition rejected", "error", err)
@@ -257,7 +309,7 @@ func (runner *Runner) runOnce(ctx context.Context) error {
 		sess.observeReconnect()
 	}
 	runner.storeResumable(sess.sessionID)
-	runner.logger.Info("agent session authenticated", "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", runner.health.Current().String())
+	runner.logger.Info("agent session authenticated", "gateway", gatewayURL, "device_id", config.DeviceID, "session_id", sess.sessionID, "secret_store", store.Kind(), "health", runner.health.Current().String())
 	err = protectError(sess.run(ctx), token)
 	if errors.Is(err, ErrSessionRevoked) {
 		return err
@@ -304,6 +356,13 @@ func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.
 	var inbound contractv1.SequenceTracker
 	reply, err := readAgentFrame(ctx, conn)
 	if err != nil {
+		// The Gateway signals an unavailable resume by closing the
+		// WebSocket with TryAgainLater before any session frame. That close
+		// reason is exactly the resume-rejection fallback signal.
+		if websocket.CloseStatus(err) == websocket.StatusTryAgainLater ||
+			errors.Is(err, errResumeRejected) {
+			return nil, errResumeRejected
+		}
 		return nil, err
 	}
 	if err := inbound.Accept(reply.Sequence); err != nil {

@@ -17,6 +17,10 @@ import (
 
 const configVersion = 1
 
+// MaxGatewayAliases bounds the HA failover list so configuration cannot grow
+// an unbounded reconnect schedule.
+const MaxGatewayAliases = 4
+
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 type Endpoint struct {
@@ -27,12 +31,32 @@ type Endpoint struct {
 type Config struct {
 	Version         int        `json:"version"`
 	GatewayURL      string     `json:"gateway_url,omitempty"`
+	GatewayAliases  []string   `json:"gateway_aliases,omitempty"`
 	CAFile          string     `json:"ca_file,omitempty"`
 	DeviceID        string     `json:"device_id,omitempty"`
 	AuthorizationID string     `json:"authorization_id,omitempty"`
 	TokenID         string     `json:"token_id,omitempty"`
 	UpdateChannel   string     `json:"update_channel"`
 	Endpoints       []Endpoint `json:"endpoints,omitempty"`
+}
+
+// GatewayCandidates returns the validated, de-duplicated failover list:
+// the primary GatewayURL first, then aliases. All candidates must use the
+// exact approved WSS path. An empty result means no gateway is configured.
+func (config Config) GatewayCandidates() []string {
+	seen := make(map[string]struct{}, 1+len(config.GatewayAliases))
+	candidates := make([]string, 0, 1+len(config.GatewayAliases))
+	for _, raw := range append([]string{config.GatewayURL}, config.GatewayAliases...) {
+		if raw == "" {
+			continue
+		}
+		if _, exists := seen[raw]; exists {
+			continue
+		}
+		seen[raw] = struct{}{}
+		candidates = append(candidates, raw)
+	}
+	return candidates
 }
 
 func DefaultConfig() Config {
@@ -153,6 +177,22 @@ func (config Config) ValidateRuntime() error {
 	}
 	if err := ValidateGatewayURL(config.GatewayURL); err != nil {
 		return err
+	}
+	if len(config.GatewayAliases) > MaxGatewayAliases {
+		return fmt.Errorf("gateway_aliases exceed the bounded failover list size %d", MaxGatewayAliases)
+	}
+	seenAlias := make(map[string]struct{}, len(config.GatewayAliases))
+	for _, alias := range config.GatewayAliases {
+		if err := ValidateGatewayURL(alias); err != nil {
+			return fmt.Errorf("gateway alias %q: %w", alias, err)
+		}
+		if _, duplicate := seenAlias[alias]; duplicate {
+			return fmt.Errorf("duplicate gateway alias %q", alias)
+		}
+		if alias == config.GatewayURL {
+			return fmt.Errorf("gateway alias %q duplicates the primary gateway URL", alias)
+		}
+		seenAlias[alias] = struct{}{}
 	}
 	for name, value := range map[string]string{
 		"device_id":        config.DeviceID,

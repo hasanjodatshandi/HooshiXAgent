@@ -85,6 +85,7 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	stateDir := flags.String("state-dir", "", "Agent state directory")
 	gatewayURL := flags.String("gateway", "", "Gateway WSS URL")
+	gatewayAliases := flags.String("gateway-alias", "", "comma-separated failover Gateway WSS URLs (optional)")
 	caFile := flags.String("ca-file", "", "optional trusted CA PEM file")
 	deviceID := flags.String("device-id", "", "externally assigned device ID")
 	authorizationID := flags.String("authorization-id", "", "external authorization ID")
@@ -100,6 +101,19 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	if err := ValidateGatewayURL(*gatewayURL); err != nil {
 		return err
+	}
+	var aliases []string
+	if raw := strings.TrimSpace(*gatewayAliases); raw != "" {
+		for _, alias := range strings.Split(raw, ",") {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			aliases = append(aliases, alias)
+		}
+	}
+	if len(aliases) > MaxGatewayAliases {
+		return fmt.Errorf("at most %d gateway aliases are supported", MaxGatewayAliases)
 	}
 	for name, value := range map[string]string{"device-id": *deviceID, "authorization-id": *authorizationID, "token-id": *tokenID} {
 		if !identifierPattern.MatchString(value) {
@@ -123,6 +137,7 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 	store := NewPlatformSecretStore(dir)
 	config, err := configureAgentState(dir, store, Config{
 		GatewayURL:      *gatewayURL,
+		GatewayAliases:  aliases,
 		CAFile:          *caFile,
 		DeviceID:        *deviceID,
 		AuthorizationID: *authorizationID,
@@ -132,7 +147,7 @@ func commandConfigure(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return printResult(stdout, *jsonOutput, map[string]any{"configured": true, "device_id": config.DeviceID}, "configured device=%s\n", config.DeviceID)
+	return printResult(stdout, *jsonOutput, map[string]any{"configured": true, "device_id": config.DeviceID, "gateways": config.GatewayCandidates()}, "configured device=%s gateways=%d\n", config.DeviceID, len(config.GatewayCandidates()))
 }
 
 func commandExpose(args []string, stdout io.Writer) error {
@@ -247,12 +262,13 @@ func commandStatus(args []string, stdout io.Writer) error {
 		"device_id":           config.DeviceID,
 		"public_key":          PublicKeyBase64(publicKey),
 		"gateway_url":         config.GatewayURL,
+		"gateway_candidates":  config.GatewayCandidates(),
 		"endpoint_count":      len(config.Endpoints),
 		"credentials_present": state.SessionToken != "",
 		"secret_store":        store.Kind(),
 		"update_channel":      config.UpdateChannel,
 	}
-	return printResult(stdout, *jsonOutput, result, "device=%s public_key=%s gateway=%s endpoints=%d credentials=%t secret_store=%s\n", config.DeviceID, PublicKeyBase64(publicKey), config.GatewayURL, len(config.Endpoints), state.SessionToken != "", store.Kind())
+	return printResult(stdout, *jsonOutput, result, "device=%s public_key=%s gateway=%s gateways=%d endpoints=%d credentials=%t secret_store=%s\n", config.DeviceID, PublicKeyBase64(publicKey), config.GatewayURL, len(config.GatewayCandidates()), len(config.Endpoints), state.SessionToken != "", store.Kind())
 }
 
 func commandDoctor(args []string, stdout io.Writer) error {

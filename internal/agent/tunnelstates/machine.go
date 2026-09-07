@@ -66,7 +66,7 @@ var legalTransitions = map[State][]State{
 	Connecting:   {Connected, Reconnecting, Revoked, Shutdown},
 	Connected:    {Degraded, Reconnecting, Revoked, Shutdown},
 	Degraded:     {Connected, Reconnecting, Revoked, Shutdown},
-	Reconnecting: {Connecting, Revoked, Shutdown},
+	Reconnecting: {Connecting, Connected, Revoked, Shutdown},
 	Revoked:      {},
 	Shutdown:     {},
 }
@@ -81,8 +81,9 @@ func canTransition(from, to State) bool {
 }
 
 // Machine is the connection health state machine for one Agent tunnel
-// lifecycle. It is not the stream/session protocol state; it is the
-// operational health view required by the reliability phase of the tunnel
+// lifecycle (per transport) or for the aggregate multi-tunnel view. It is
+// not the stream/session protocol state; it is the operational health view
+// required by the reliability and high-availability phases of the tunnel
 // implementation plan.
 type Machine struct {
 	state State
@@ -98,12 +99,17 @@ func (machine *Machine) Current() State {
 	return machine.state
 }
 
-// Transition applies a state change. Illegal transitions return
-// ErrIllegalTransition and leave the machine unchanged, mirroring the
-// fail-closed policy used across the runtime.
+// Transition applies a state change. Re-entering the current state is an
+// idempotent success so composite views can re-assert an unchanged health
+// level. All other illegal transitions return ErrIllegalTransition and leave
+// the machine unchanged, mirroring the fail-closed policy used across the
+// runtime.
 func (machine *Machine) Transition(to State) error {
 	if machine.state.Terminal() {
 		return ErrIllegalTransition
+	}
+	if machine.state == to {
+		return nil
 	}
 	if !canTransition(machine.state, to) {
 		return ErrIllegalTransition
