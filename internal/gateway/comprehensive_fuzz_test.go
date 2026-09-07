@@ -168,7 +168,7 @@ func TestRequestStreamWriterSlowConsumerBackpressureIsBounded(t *testing.T) {
 		t.Fatalf("writer completed before slow consumer released: %v", err)
 	default:
 	}
-	used, _, _ := budget.snapshot()
+	used, _, _ := budget.Snapshot()
 	if used != requestStreamChunkSize {
 		t.Fatalf("slow consumer retained %d bytes want exactly one chunk=%d", used, requestStreamChunkSize)
 	}
@@ -182,7 +182,7 @@ func TestRequestStreamWriterSlowConsumerBackpressureIsBounded(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not resume after slow consumer released")
 	}
-	if used, _, _ := budget.snapshot(); used != 0 {
+	if used, _, _ := budget.Snapshot(); used != 0 {
 		t.Fatalf("slow-consumer completion leaked ingress budget: %d", used)
 	}
 	if rejected.Load() != 0 {

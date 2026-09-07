@@ -105,7 +105,7 @@ func TestGatewayConcurrentBurstWithinConfiguredBounds(t *testing.T) {
 	}
 
 	waitFor(t, 2*time.Second, func() bool {
-		used, _, _ := gateway.resources.ingressBytes.snapshot()
+		used, _, _ := gateway.resources.ingressBytes.Snapshot()
 		return used == 0 && len(gateway.resources.ingressSlots) == 0
 	})
 }

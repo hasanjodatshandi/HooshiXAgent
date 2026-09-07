@@ -134,8 +134,8 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_pending_handshakes_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_pending_handshakes_limit %d\n", gateway.limits.MaxPendingHandshakes)
 
-	queueUsed, queueLimit, _ := gateway.resources.queueBytes.snapshot()
-	ingressUsed, ingressLimit, _ := gateway.resources.ingressBytes.snapshot()
+	queueUsed, queueLimit, _ := gateway.resources.queueBytes.Snapshot()
+	ingressUsed, ingressLimit, _ := gateway.resources.ingressBytes.Snapshot()
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_queued_bytes Current Agent-to-Gateway payload bytes waiting in stream queues.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queued_bytes gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_queued_bytes %d\n", queueUsed)
@@ -154,8 +154,8 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes_limit %d\n", ingressLimit)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queue_rejections_total counter\nhooshix_gateway_queue_rejections_total %d\n", gateway.resources.queueRejects.Load())
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.rejected.Load()+gateway.resources.handshakeDeviceAdmission.rejected.Load())
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.rejected.Load()+gateway.resources.ingressRouteAdmission.rejected.Load()+gateway.resources.ingressDeviceAdmission.rejected.Load())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.Rejected()+gateway.resources.handshakeDeviceAdmission.Rejected())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.Rejected()+gateway.resources.ingressRouteAdmission.Rejected()+gateway.resources.ingressDeviceAdmission.Rejected())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_health_reports_total Total bounded Agent health_report control messages accepted.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_health_reports_total counter\nhooshix_gateway_health_reports_total %d\n", gateway.resources.healthReports.Load())
@@ -236,7 +236,7 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	}
 
 	now := time.Now()
-	if !gateway.resources.handshakeRate.allow(now) {
+	if !gateway.resources.handshakeRate.Allow(now) {
 		_ = conn.Close(websocket.StatusTryAgainLater, "agent handshake rate limit exceeded")
 		return
 	}
@@ -244,13 +244,13 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	if resume != nil {
 		resumeDeviceID = resume.DeviceID
 	}
-	deviceAdmission := gateway.resources.handshakeDeviceAdmission.tryAcquire(resumeDeviceID, now)
+	deviceAdmission := gateway.resources.handshakeDeviceAdmission.TryAcquire(resumeDeviceID, now)
 	if deviceAdmission != admissionAccepted {
 		_ = conn.Close(websocket.StatusTryAgainLater, "device handshake admission limit exceeded")
 		return
 	}
 	sess, err := gateway.completeAuthenticationOrResume(ctx, conn, candidate, resume)
-	gateway.resources.handshakeDeviceAdmission.release(resumeDeviceID)
+	gateway.resources.handshakeDeviceAdmission.Release(resumeDeviceID)
 	releaseHandshakeSlot()
 	cancel()
 	if errors.Is(err, errResumeUnavailable) {
@@ -587,7 +587,7 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	routeAdmission := gateway.resources.ingressRouteAdmission.tryAcquire(route.AssignmentID, now)
+	routeAdmission := gateway.resources.ingressRouteAdmission.TryAcquire(route.AssignmentID, now)
 	if routeAdmission != admissionAccepted {
 		status := http.StatusServiceUnavailable
 		message := "route ingress concurrency limit reached"
@@ -598,9 +598,9 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		http.Error(w, message, status)
 		return
 	}
-	defer gateway.resources.ingressRouteAdmission.release(route.AssignmentID)
+	defer gateway.resources.ingressRouteAdmission.Release(route.AssignmentID)
 
-	deviceAdmission := gateway.resources.ingressDeviceAdmission.tryAcquire(route.DeviceID, now)
+	deviceAdmission := gateway.resources.ingressDeviceAdmission.TryAcquire(route.DeviceID, now)
 	if deviceAdmission != admissionAccepted {
 		status := http.StatusServiceUnavailable
 		message := "device ingress concurrency limit reached"
@@ -611,9 +611,9 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		http.Error(w, message, status)
 		return
 	}
-	defer gateway.resources.ingressDeviceAdmission.release(route.DeviceID)
+	defer gateway.resources.ingressDeviceAdmission.Release(route.DeviceID)
 
-	if !gateway.resources.ingressRate.allow(now) {
+	if !gateway.resources.ingressRate.Allow(now) {
 		http.Error(w, "public ingress rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
@@ -934,12 +934,12 @@ func (writer *requestStreamWriter) Write(data []byte) (int, error) {
 		if size > requestStreamChunkSize {
 			size = requestStreamChunkSize
 		}
-		if !writer.budget.tryAcquire(int64(size)) {
+		if !writer.budget.TryAcquire(int64(size)) {
 			writer.rejected.Add(1)
 			return total, errResourceBudget
 		}
 		err := writer.send(writer.ctx, data[:size])
-		writer.budget.release(int64(size))
+		writer.budget.Release(int64(size))
 		if err != nil {
 			return total, err
 		}

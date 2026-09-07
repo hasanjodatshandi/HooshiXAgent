@@ -363,24 +363,24 @@ func (stream *agentStream) enqueue(parent context.Context, data []byte, wait tim
 			stream.queueMu.Unlock()
 			return false
 		}
-		reservedStream := stream.streamBudget.tryAcquire(size)
+		reservedStream := stream.streamBudget.TryAcquire(size)
 		reservedSession := false
 		if reservedStream {
-			reservedSession = stream.sessionBudget.tryAcquire(size)
+			reservedSession = stream.sessionBudget.TryAcquire(size)
 		}
 		if reservedStream && reservedSession {
-			queued := agentQueuedPayload{data: append([]byte(nil), data...), size: size}
+			queued := agentQueuedPayload{Data: append([]byte(nil), data...), Size: size}
 			select {
 			case stream.incoming <- queued:
 				stream.queueMu.Unlock()
 				return true
 			default:
-				stream.sessionBudget.release(size)
-				stream.streamBudget.release(size)
+				stream.sessionBudget.Release(size)
+				stream.streamBudget.Release(size)
 			}
 		} else {
 			if reservedStream {
-				stream.streamBudget.release(size)
+				stream.streamBudget.Release(size)
 			}
 		}
 		stream.queueMu.Unlock()
@@ -398,8 +398,8 @@ func (stream *agentStream) enqueue(parent context.Context, data []byte, wait tim
 }
 
 func (stream *agentStream) releaseQueued(size int64) {
-	stream.sessionBudget.release(size)
-	stream.streamBudget.release(size)
+	stream.sessionBudget.Release(size)
+	stream.streamBudget.Release(size)
 	select {
 	case stream.space <- struct{}{}:
 	default:
@@ -413,7 +413,7 @@ func (stream *agentStream) finishStream() {
 		for {
 			select {
 			case queued := <-stream.incoming:
-				stream.releaseQueued(queued.size)
+				stream.releaseQueued(queued.Size)
 			default:
 				stream.queueMu.Unlock()
 				stream.cancel()
@@ -482,8 +482,8 @@ func (sess *agentSession) writeLocal(stream *agentStream, conn net.Conn) error {
 		case <-stream.ctx.Done():
 			return nil
 		case queued := <-stream.incoming:
-			stream.releaseQueued(queued.size)
-			payload := queued.data
+			stream.releaseQueued(queued.Size)
+			payload := queued.Data
 			if err := conn.SetWriteDeadline(time.Now().Add(sess.limits.WriteTimeout)); err != nil {
 				return err
 			}

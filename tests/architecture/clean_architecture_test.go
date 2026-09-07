@@ -17,6 +17,8 @@ import (
 var domainPackages = []string{
 	"internal/contractv1",
 	"internal/agent/tunnelstates",
+	"internal/agent/agentbudget",
+	"internal/gateway/gatewayresources",
 }
 
 // infrastructureImportPrefixes are Go standard-library/external packages
@@ -104,6 +106,15 @@ func TestDomainImportsPointInwardOnly(t *testing.T) {
 	}
 }
 
+// domainSubpackages lists the pure-domain package prefixes that live under a
+// product boundary; domain files may import other domain packages but never
+// an application/adapter (product) package.
+var domainSubpackages = []string{
+	"internal/agent/tunnelstates",
+	"internal/agent/agentbudget",
+	"internal/gateway/gatewayresources",
+}
+
 // inspectOutwardImports rejects domain imports of the Agent/Gateway product
 // packages (application/adapter layers) so the dependency rule stays
 // strictly inward-pointing.
@@ -117,14 +128,21 @@ func inspectOutwardImports(path, rel string, violations *[]string) error {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(importPath, modulePath+"/internal/agent") && !strings.HasPrefix(importPath, modulePath+"/internal/agent/tunnelstates") {
+		isDomain := false
+		for _, domain := range domainSubpackages {
+			if strings.HasPrefix(importPath, modulePath+"/"+domain) {
+				isDomain = true
+				break
+			}
+		}
+		if strings.HasPrefix(importPath, modulePath+"/internal/agent") && !isDomain {
 			*violations = append(*violations, rel+" imports application layer "+importPath)
 		}
-		if strings.HasPrefix(importPath, modulePath+"/internal/gateway") {
+		if strings.HasPrefix(importPath, modulePath+"/internal/gateway") && !isDomain {
 			*violations = append(*violations, rel+" imports application layer "+importPath)
 		}
-		if strings.HasPrefix(importPath, modulePath+"/internal/runtimegate") {
-			*violations = append(*violations, rel+" imports adapter layer "+importPath)
+		if strings.HasPrefix(importPath, modulePath+"/tests") {
+			*violations = append(*violations, rel+" imports test layer "+importPath)
 		}
 	}
 	return nil

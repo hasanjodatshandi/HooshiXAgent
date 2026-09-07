@@ -664,18 +664,18 @@ func (stream *stream) enqueue(data []byte) error {
 	if stream.closed {
 		return errors.New("stream closed")
 	}
-	if !stream.streamBudget.tryAcquire(size) {
+	if !stream.streamBudget.TryAcquire(size) {
 		stream.rejectCounter.Add(1)
 		return errResourceBudget
 	}
-	if !stream.sessionBudget.tryAcquire(size) {
-		stream.streamBudget.release(size)
+	if !stream.sessionBudget.TryAcquire(size) {
+		stream.streamBudget.Release(size)
 		stream.rejectCounter.Add(1)
 		return errResourceBudget
 	}
-	if !stream.globalBudget.tryAcquire(size) {
-		stream.sessionBudget.release(size)
-		stream.streamBudget.release(size)
+	if !stream.globalBudget.TryAcquire(size) {
+		stream.sessionBudget.Release(size)
+		stream.streamBudget.Release(size)
 		stream.rejectCounter.Add(1)
 		return errResourceBudget
 	}
@@ -691,9 +691,9 @@ func (stream *stream) enqueue(data []byte) error {
 }
 
 func (stream *stream) releaseQueued(size int64) {
-	stream.globalBudget.release(size)
-	stream.sessionBudget.release(size)
-	stream.streamBudget.release(size)
+	stream.globalBudget.Release(size)
+	stream.sessionBudget.Release(size)
+	stream.streamBudget.Release(size)
 }
 
 func (stream *stream) Read(data []byte) (int, error) {

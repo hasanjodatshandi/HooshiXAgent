@@ -392,7 +392,7 @@ func TestRequestStreamWriterBoundsChunkRetentionAndAccounting(t *testing.T) {
 	var observedPeak int64
 	var observedMaxChunk int
 	writer := newRequestStreamWriter(context.Background(), budget, &rejects, func(_ context.Context, payload []byte) error {
-		used, _, _ := budget.snapshot()
+		used, _, _ := budget.Snapshot()
 		if used > observedPeak {
 			observedPeak = used
 		}
@@ -412,7 +412,7 @@ func TestRequestStreamWriterBoundsChunkRetentionAndAccounting(t *testing.T) {
 	if observedMaxChunk > requestStreamChunkSize || observedPeak > requestStreamChunkSize {
 		t.Fatalf("streaming retention exceeded chunk bound: max_chunk=%d peak_budget=%d", observedMaxChunk, observedPeak)
 	}
-	if used, _, _ := budget.snapshot(); used != 0 {
+	if used, _, _ := budget.Snapshot(); used != 0 {
 		t.Fatalf("streaming writer leaked byte budget: %d", used)
 	}
 	if rejects.Load() != 0 {
@@ -535,7 +535,7 @@ func TestGatewayStreamsRequestBeforeUploadCompletesAndAccountsTunnelBytes(t *tes
 	if *signal.BytesFromPublic < bodySize {
 		t.Fatalf("traffic accounting=%d smaller than request body=%d", *signal.BytesFromPublic, bodySize)
 	}
-	if used, _, _ := gateway.resources.ingressBytes.snapshot(); used != 0 {
+	if used, _, _ := gateway.resources.ingressBytes.Snapshot(); used != 0 {
 		t.Fatalf("ingress streaming budget leaked after request: %d", used)
 	}
 }
@@ -601,7 +601,7 @@ func TestGatewayStreamingUploadCancellationReleasesResources(t *testing.T) {
 		t.Fatal("cancelled public upload did not terminate promptly")
 	}
 	waitFor(t, 3*time.Second, func() bool {
-		used, _, _ := gateway.resources.ingressBytes.snapshot()
+		used, _, _ := gateway.resources.ingressBytes.Snapshot()
 		return used == 0 && len(gateway.resources.ingressSlots) == 0 && agent.active.Load() == 0
 	})
 }

@@ -388,7 +388,7 @@ func runCapacitySample(t *testing.T, level int) capacitySample {
 		}
 	}
 	waitFor(t, 3*time.Second, func() bool {
-		used, _, _ := gateway.resources.ingressBytes.snapshot()
+		used, _, _ := gateway.resources.ingressBytes.Snapshot()
 		return used == 0 && len(gateway.resources.ingressSlots) == 0 && agent.active.Load() == 0
 	})
 

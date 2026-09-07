@@ -21,24 +21,24 @@ func TestAdaptiveIngressAdmissionPreservesUncontendedCapacityAndIsolatesNoisyKey
 
 	for _, limiter := range []*keyedAdmissionLimiter{resources.ingressRouteAdmission, resources.ingressDeviceAdmission} {
 		for i := 0; i < limits.MaxIngressInFlight; i++ {
-			if got := limiter.tryAcquire("noisy", now); got != admissionAccepted {
+			if got := limiter.TryAcquire("noisy", now); got != admissionAccepted {
 				t.Fatalf("uncontended admission %d/%d rejected: %v", i+1, limits.MaxIngressInFlight, got)
 			}
 		}
-		if got := limiter.tryAcquire("neighbor", now); got != admissionAccepted {
+		if got := limiter.TryAcquire("neighbor", now); got != admissionAccepted {
 			t.Fatalf("neighbor observation should pass keyed admission before global ceiling, got %v", got)
 		}
-		limiter.release("neighbor")
-		if got := limiter.tryAcquire("noisy", now); got != admissionRejectedConcurrency {
+		limiter.Release("neighbor")
+		if got := limiter.TryAcquire("noisy", now); got != admissionRejectedConcurrency {
 			t.Fatalf("noisy key reacquired borrowed capacity during contention: got %v", got)
 		}
-		limiter.release("noisy")
-		if got := limiter.tryAcquire("neighbor", now); got != admissionAccepted {
+		limiter.Release("noisy")
+		if got := limiter.TryAcquire("neighbor", now); got != admissionAccepted {
 			t.Fatalf("neighbor could not claim capacity released by noisy key: %v", got)
 		}
-		limiter.release("neighbor")
+		limiter.Release("neighbor")
 		for i := 1; i < limits.MaxIngressInFlight; i++ {
-			limiter.release("noisy")
+			limiter.Release("noisy")
 		}
 	}
 }
@@ -52,41 +52,41 @@ func TestAdaptiveIngressRateLeavesRefillCapacityForNeighbor(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 4; i++ {
-		if got := resources.ingressRouteAdmission.tryAcquire("route-a", now); got != admissionAccepted {
+		if got := resources.ingressRouteAdmission.TryAcquire("route-a", now); got != admissionAccepted {
 			t.Fatalf("initial route-a admission %d rejected: %v", i+1, got)
 		}
-		resources.ingressRouteAdmission.release("route-a")
-		if !resources.ingressRate.allow(now) {
+		resources.ingressRouteAdmission.Release("route-a")
+		if !resources.ingressRate.Allow(now) {
 			t.Fatalf("initial global token %d rejected", i+1)
 		}
 	}
 
-	if got := resources.ingressRouteAdmission.tryAcquire("route-b", now); got != admissionAccepted {
+	if got := resources.ingressRouteAdmission.TryAcquire("route-b", now); got != admissionAccepted {
 		t.Fatalf("route-b observation rejected by keyed limiter: %v", got)
 	}
-	resources.ingressRouteAdmission.release("route-b")
-	if resources.ingressRate.allow(now) {
+	resources.ingressRouteAdmission.Release("route-b")
+	if resources.ingressRate.Allow(now) {
 		t.Fatal("exhausted global bucket unexpectedly admitted route-b")
 	}
 
 	later := now.Add(time.Second)
 	for i := 0; i < fairnessShare(limits.IngressRatePerSecond); i++ {
-		if got := resources.ingressRouteAdmission.tryAcquire("route-a", later); got != admissionAccepted {
+		if got := resources.ingressRouteAdmission.TryAcquire("route-a", later); got != admissionAccepted {
 			t.Fatalf("fair route-a refill %d rejected: %v", i+1, got)
 		}
-		resources.ingressRouteAdmission.release("route-a")
-		if !resources.ingressRate.allow(later) {
+		resources.ingressRouteAdmission.Release("route-a")
+		if !resources.ingressRate.Allow(later) {
 			t.Fatalf("global refill for route-a %d rejected", i+1)
 		}
 	}
-	if got := resources.ingressRouteAdmission.tryAcquire("route-a", later); got != admissionRejectedRate {
+	if got := resources.ingressRouteAdmission.TryAcquire("route-a", later); got != admissionRejectedRate {
 		t.Fatalf("noisy route exceeded contended fair rate: got %v", got)
 	}
-	if got := resources.ingressRouteAdmission.tryAcquire("route-b", later); got != admissionAccepted {
+	if got := resources.ingressRouteAdmission.TryAcquire("route-b", later); got != admissionAccepted {
 		t.Fatalf("neighbor route did not retain keyed rate capacity: %v", got)
 	}
-	resources.ingressRouteAdmission.release("route-b")
-	if !resources.ingressRate.allow(later) {
+	resources.ingressRouteAdmission.Release("route-b")
+	if !resources.ingressRate.Allow(later) {
 		t.Fatal("neighbor route could not consume global refill left by noisy-route fair cap")
 	}
 }
@@ -246,14 +246,7 @@ func TestSuccessfulHandshakeReleasesDeviceAdmissionWhileSessionStaysLive(t *test
 	defer agent.close()
 	waitFor(t, time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
 
-	gateway.resources.handshakeDeviceAdmission.mu.Lock()
-	state := gateway.resources.handshakeDeviceAdmission.states[identity.deviceID]
-	inFlight := 0
-	if state != nil {
-		inFlight = state.inFlight
-	}
-	gateway.resources.handshakeDeviceAdmission.mu.Unlock()
-	if inFlight != 0 {
+	if inFlight := gateway.resources.handshakeDeviceAdmission.InFlight(identity.deviceID); inFlight != 0 {
 		t.Fatalf("validated handshake admission leaked into live session lifetime: in_flight=%d", inFlight)
 	}
 }

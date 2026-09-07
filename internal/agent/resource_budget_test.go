@@ -45,20 +45,20 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 	if second.enqueue(context.Background(), bytes.Repeat([]byte{'b'}, 5), time.Millisecond) {
 		t.Fatal("Agent session queue budget allowed overcommit")
 	}
-	if sessionBudget.used.Load() != 8 {
-		t.Fatalf("Agent failed enqueue leaked budget: %d", sessionBudget.used.Load())
+	if sessionBudget.Used() != 8 {
+		t.Fatalf("Agent failed enqueue leaked budget: %d", sessionBudget.Used())
 	}
 	queued := <-first.incoming
-	first.releaseQueued(queued.size)
-	if sessionBudget.used.Load() != 0 {
+	first.releaseQueued(queued.Size)
+	if sessionBudget.Used() != 0 {
 		t.Fatal("Agent dequeue did not release session byte budget")
 	}
 	if !second.enqueue(context.Background(), bytes.Repeat([]byte{'c'}, 5), time.Millisecond) {
 		t.Fatal("Agent queue did not recover after release")
 	}
 	second.finishStream()
-	if sessionBudget.used.Load() != 0 {
-		t.Fatalf("Agent stream cleanup leaked queued bytes: %d", sessionBudget.used.Load())
+	if sessionBudget.Used() != 0 {
+		t.Fatalf("Agent stream cleanup leaked queued bytes: %d", sessionBudget.Used())
 	}
 	first.finishStream()
 }
@@ -82,11 +82,11 @@ func TestAgentQueueFrameLimitDoesNotLeakBytes(t *testing.T) {
 	if stream.enqueue(context.Background(), []byte("second"), time.Millisecond) {
 		t.Fatal("Agent frame queue over-capacity succeeded")
 	}
-	if got := sessionBudget.used.Load(); got != int64(len("first")) {
+	if got := sessionBudget.Used(); got != int64(len("first")) {
 		t.Fatalf("Agent rejected frame leaked reservation: %d", got)
 	}
 	stream.finishStream()
-	if sessionBudget.used.Load() != 0 {
+	if sessionBudget.Used() != 0 {
 		t.Fatal("Agent frame-limit cleanup leaked reservation")
 	}
 }
@@ -117,7 +117,7 @@ func TestAgentQueueBackpressureAllowsBoundedStreaming(t *testing.T) {
 	case <-time.After(25 * time.Millisecond):
 	}
 	queued := <-stream.incoming
-	stream.releaseQueued(queued.size)
+	stream.releaseQueued(queued.Size)
 	select {
 	case ok := <-result:
 		if !ok {
@@ -127,8 +127,8 @@ func TestAgentQueueBackpressureAllowsBoundedStreaming(t *testing.T) {
 		t.Fatal("backpressured enqueue remained blocked after queue space release")
 	}
 	stream.finishStream()
-	if sessionBudget.used.Load() != 0 {
-		t.Fatalf("backpressure cleanup leaked bytes: %d", sessionBudget.used.Load())
+	if sessionBudget.Used() != 0 {
+		t.Fatalf("backpressure cleanup leaked bytes: %d", sessionBudget.Used())
 	}
 }
 

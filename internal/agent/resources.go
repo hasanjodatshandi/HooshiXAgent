@@ -1,44 +1,14 @@
 package agent
 
-import "sync/atomic"
+import "github.com/hasanjodatshandi/HooshiXAgent/internal/agent/agentbudget"
 
-type agentByteBudget struct {
-	limit int64
-	used  atomic.Int64
-}
+// agentByteBudget aliases the pure-domain bounded byte budget so existing
+// Agent session/stream code keeps its names while the policy lives in the
+// ADR-0013 domain layer.
+type agentByteBudget = agentbudget.ByteBudget
 
 func newAgentByteBudget(limit int64) *agentByteBudget {
-	return &agentByteBudget{limit: limit}
+	return agentbudget.New(limit)
 }
 
-func (budget *agentByteBudget) tryAcquire(size int64) bool {
-	if size < 0 || size > budget.limit {
-		return false
-	}
-	if size == 0 {
-		return true
-	}
-	for {
-		used := budget.used.Load()
-		if used > budget.limit-size {
-			return false
-		}
-		if budget.used.CompareAndSwap(used, used+size) {
-			return true
-		}
-	}
-}
-
-func (budget *agentByteBudget) release(size int64) {
-	if size <= 0 {
-		return
-	}
-	if used := budget.used.Add(-size); used < 0 {
-		panic("agent byte budget underflow")
-	}
-}
-
-type agentQueuedPayload struct {
-	data []byte
-	size int64
-}
+type agentQueuedPayload = agentbudget.QueuedPayload
