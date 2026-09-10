@@ -49,6 +49,10 @@ func main() {
 func run() error {
 	fmt.Println("=== HooshiX Agent Setup ===")
 
+	// Stop any previous installation first: the running service and tray
+	// hold locks on the binaries we are about to replace.
+	stopPreviousInstallation()
+
 	if err := extractPayload(); err != nil {
 		return fmt.Errorf("extract binaries: %w", err)
 	}
@@ -103,6 +107,21 @@ func runAgentCommand(args ...string) error {
 		fmt.Print(string(output))
 	}
 	return nil
+}
+
+// stopPreviousInstallation stops the running service and kills any leftover
+// tray processes so binary files are writable again.
+func stopPreviousInstallation() {
+	_ = runAgentCommand("service", "stop")
+	killProcessByName(trayBinary)
+	killProcessByName(agentBinary)
+	// Give the OS a moment to release file handles after process exit.
+	time.Sleep(2 * time.Second)
+}
+
+func killProcessByName(name string) {
+	taskkill := exec.Command("taskkill", "/F", "/IM", name)
+	_ = taskkill.Run()
 }
 
 func registerUninstall() error {
