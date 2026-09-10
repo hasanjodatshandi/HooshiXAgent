@@ -21,6 +21,10 @@ import (
 
 var sessionTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
 
+// SessionTokenPattern is the exported session-token grammar shared with the
+// local pairing UI.
+var SessionTokenPattern = sessionTokenPattern
+
 func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printUsage(stderr)
