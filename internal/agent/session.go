@@ -342,8 +342,18 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 func (sess *agentSession) handleData(parent context.Context, frame contractv1.Frame) error {
 	sess.mu.Lock()
 	stream := sess.streams[frame.StreamID]
+	maxStreamID := sess.maxStreamID
 	sess.mu.Unlock()
 	if stream == nil {
+		// The Gateway may still have data frames in flight for a stream the
+		// Agent has already terminated (for example after a local-target dial
+		// failure). Frames for a previously seen stream ID are stale tail
+		// traffic and MUST NOT kill the session; drop them just like the
+		// Gateway-side handleData does for closed streams.
+		if frame.StreamID != 0 && frame.StreamID <= maxStreamID {
+			sess.logger.Debug("dropping data for terminated stream", "stream_id", frame.StreamID)
+			return nil
+		}
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
 	if !stream.enqueue(parent, frame.Payload, sess.limits.WriteTimeout) {
