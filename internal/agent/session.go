@@ -241,13 +241,13 @@ func (sess *agentSession) healthReportLoop(ctx context.Context, interval time.Du
 		case <-sess.closed:
 			return
 		case <-ticker.C:
-			reportID, err := randomNonce()
+			reportID, err := randomID("report")
 			if err != nil {
 				sess.logger.Warn("agent health report ID generation failed", "error", err)
 				continue
 			}
 			reportCtx, cancel := context.WithTimeout(ctx, sess.limits.WriteTimeout)
-			err = sess.sendHealthReport(reportCtx, reportID[:16], Version)
+			err = sess.sendHealthReport(reportCtx, reportID, Version)
 			cancel()
 			if err != nil {
 				sess.logger.Debug("agent health report send failed", "error", err)
@@ -813,4 +813,16 @@ func randomNonceFrom(entropy io.Reader) (string, error) {
 		return "", fmt.Errorf("generate client nonce: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+// randomID builds a contract-valid identifier (matching the contract's
+// idPattern: first character must be alphanumeric) from OS entropy. A raw
+// base64url slice can begin with "-" or "_", which the contract's ID grammar
+// rejects, so contract-scoped IDs MUST use a guaranteed-safe prefix.
+func randomID(prefix string) (string, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return "", err
+	}
+	return prefix + "-" + nonce[:16], nil
 }
