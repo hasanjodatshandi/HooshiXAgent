@@ -105,7 +105,8 @@ func IsWindowsService() bool {
 
 // Install registers the service with SCM, configures auto-start and failure
 // recovery, and grants interactive users the limited right to start/stop it
-// (so the tray works without elevation).
+// (so the tray works without elevation). It is idempotent: an existing
+// HooshiXAgent service is stopped and recreated with the current binary.
 func Install(execPath string) error {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -113,10 +114,24 @@ func Install(execPath string) error {
 	}
 	defer manager.Disconnect()
 
-	existing, err := manager.OpenService(ServiceName)
-	if err == nil {
+	if existing, openErr := manager.OpenService(ServiceName); openErr == nil {
+		if status, queryErr := existing.Query(); queryErr == nil && status.State != svc.Stopped {
+			_, _ = existing.Control(svc.Stop)
+			waitStopped(existing)
+		}
+		if deleteErr := existing.Delete(); deleteErr != nil {
+			existing.Close()
+			return fmt.Errorf("replace existing service: delete: %w", deleteErr)
+		}
 		existing.Close()
-		return fmt.Errorf("service %s already exists", ServiceName)
+		// Wait for SCM to fully release the mark before recreating.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, openErr := manager.OpenService(ServiceName); openErr != nil {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
 	}
 
 	service, err := manager.CreateService(ServiceName, execPath, mgr.Config{
@@ -125,7 +140,7 @@ func Install(execPath string) error {
 		Description:      "HooshiX tunnel agent: keeps an always-on reverse tunnel to the HooshiX Gateway.",
 		Dependencies:     []string{"Tcpip", "Dnscache"},
 		DelayedAutoStart: false,
-	}, "run-service")
+	}, "service", "run-service")
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}

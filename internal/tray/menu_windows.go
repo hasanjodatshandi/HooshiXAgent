@@ -13,7 +13,7 @@ import (
 // menuHost owns the hidden window, tray icon, context menu, and message pump.
 type menuHost struct {
 	app       *App
-	instance  windows.Handle
+	instance  uintptr
 	window    windows.Handle
 	menu      windows.Handle
 	iconToken uint32
@@ -63,17 +63,20 @@ var (
 	menuSepLabel   = syscall.StringToUTF16Ptr("-")
 )
 
-type wndClass struct {
-	style         uint32
-	wndProc       uintptr
-	classExtra    int32
-	windowExtra   int32
-	instance      windows.Handle
-	icon          windows.Handle
-	cursor        windows.Handle
-	background    windows.Handle
-	menuName      *uint16
-	className     *uint16
+// wndClassEx mirrors the Win32 WNDCLASSEXW structure exactly.
+type wndClassEx struct {
+	Size       uint32
+	Style      uint32
+	WndProc    uintptr
+	ClassExtra int32
+	WindowExtra int32
+	Instance   uintptr
+	Icon       uintptr
+	Cursor     uintptr
+	Background uintptr
+	MenuName   uintptr
+	ClassName  uintptr
+	IconSm     uintptr
 }
 
 func newMenuHost(app *App) (*menuHost, error) {
@@ -83,21 +86,26 @@ func newMenuHost(app *App) (*menuHost, error) {
 	if instance == 0 {
 		return nil, fmt.Errorf("GetModuleHandle: %w", err)
 	}
-	host.instance = windows.Handle(instance)
+	host.instance = uintptr(instance)
 
 	// Register the window class with our tray callback procedure.
 	registerClass := user32.NewProc("RegisterClassExW")
 	routine := syscall.NewCallback(trayWndProc)
-	// Store the host pointer per-process; single instance assumption is fine
-	// for one tray app.
 	currentHost = host
-	class := wndClass{
-		wndProc:   routine,
-		instance:  host.instance,
-		className: className,
-		icon:      loadDefaultIcon(),
+	cursor := uintptr(loadCursor())
+	class := wndClassEx{
+		Size:      uint32(unsafe.Sizeof(wndClassEx{})),
+		WndProc:   routine,
+		Instance:  host.instance,
+		Icon:      uintptr(loadDefaultIcon()),
+		Cursor:    cursor,
+		IconSm:    uintptr(loadDefaultIcon()),
+		ClassName: uintptr(unsafe.Pointer(className)),
 	}
-	registerClass.Call(uintptr(unsafe.Pointer(&class)))
+	atom, _, classErr := registerClass.Call(uintptr(unsafe.Pointer(&class)))
+	if atom == 0 {
+		return nil, fmt.Errorf("RegisterClassEx: %w", classErr)
+	}
 
 	createWindow := user32.NewProc("CreateWindowExW")
 	window, _, createErr := createWindow.Call(
@@ -292,6 +300,12 @@ func loadDefaultIcon() windows.Handle {
 	loadIcon := user32.NewProc("LoadIconW")
 	icon, _, _ := loadIcon.Call(0, 32512) // IDI_APPLICATION
 	return windows.Handle(icon)
+}
+
+func loadCursor() windows.Handle {
+	loadCursorProc := user32.NewProc("LoadCursorW")
+	cursor, _, _ := loadCursorProc.Call(0, 32512) // IDC_ARROW
+	return windows.Handle(cursor)
 }
 
 func postQuitMessage() {
