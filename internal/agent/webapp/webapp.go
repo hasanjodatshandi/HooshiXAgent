@@ -62,6 +62,9 @@ func (app *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.handleRoot)
 	mux.HandleFunc("/pair", app.handlePair)
+	mux.HandleFunc("/expose", app.handleExpose)
+	mux.HandleFunc("/expose/add", app.handleExposeAdd)
+	mux.HandleFunc("/expose/remove", app.handleExposeRemove)
 	return mux
 }
 
@@ -89,7 +92,14 @@ func (app *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 		notice = app.notice
 	}
 	app.mu.Unlock()
-	fmt.Fprintf(w, pageTemplate, publicKey, keyErrText(keyErr), pairedText(paired, config.GatewayURL, config.DeviceID), notice)
+	fmt.Fprintf(w, pageTemplate,
+		publicKey,
+		keyErrText(keyErr),
+		pairedText(paired, config.GatewayURL, config.DeviceID),
+		notice,
+		exposeRowsHTML(config.Endpoints),
+		exposeOptionsHTML(config.Endpoints),
+	)
 }
 
 func keyErrText(err error) string {
@@ -104,6 +114,27 @@ func pairedText(paired bool, gateway, device string) string {
 		return "<p class=\"ok\">Paired with " + htmlEscape(device) + " via " + htmlEscape(gateway) + ". This page can be closed.</p>"
 	}
 	return "<p class=\"info\">Paste the pairing text from the panel below.</p>"
+}
+
+func exposeRowsHTML(endpoints []agent.Endpoint) string {
+	if len(endpoints) == 0 {
+		return "<tr><td colspan=\"3\">no local services exposed yet</td></tr>"
+	}
+	rows := ""
+	for _, endpoint := range endpoints {
+		rows += "<tr><td><code>" + htmlEscape(endpoint.ID) + "</code></td><td>" + htmlEscape(endpoint.Target) +
+			"</td><td><form method=\"post\" action=\"/expose/remove\"><input type=\"hidden\" name=\"id\" value=\"" +
+			htmlEscape(endpoint.ID) + "\"><button>Remove</button></form></td></tr>"
+	}
+	return rows
+}
+
+func exposeOptionsHTML(endpoints []agent.Endpoint) string {
+	options := ""
+	for _, endpoint := range endpoints {
+		options += "<option value=\"" + htmlEscape(endpoint.ID) + "\">"
+	}
+	return options
 }
 
 // handlePair applies the pasted pairing payload.
@@ -193,6 +224,66 @@ func (app *App) setNotice(message string) {
 	app.mu.Unlock()
 }
 
+// handleExposeAdd persists a new local service mapping from the UI form.
+func (app *App) handleExposeAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form failed", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.PostFormValue("id"))
+	target := strings.TrimSpace(r.PostFormValue("target"))
+	if err := agent.MutateConfig(app.stateDir, func(config *agent.Config) error {
+		config.SetEndpoint(agent.Endpoint{ID: id, Target: target})
+		return config.ValidateRuntime()
+	}); err != nil {
+		app.setNotice("expose failed: " + err.Error())
+		app.logger.Warn("expose add failed", "error", err)
+	} else {
+		app.setNotice("exposed " + id + " -> " + target + " (restart the service from the tray to apply)")
+		app.logger.Info("local service exposed via ui", "id", id, "target", target)
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleExposeRemove drops a local service mapping from the UI form.
+func (app *App) handleExposeRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "parse form failed", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.PostFormValue("id"))
+	if err := agent.MutateConfig(app.stateDir, func(config *agent.Config) error {
+		if !config.RemoveEndpoint(id) {
+			return fmt.Errorf("unknown local endpoint %q", id)
+		}
+		return config.ValidateRuntime()
+	}); err != nil {
+		app.setNotice("remove failed: " + err.Error())
+	} else {
+		app.setNotice("removed " + id + " (restart the service from the tray to apply)")
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleExpose returns the current local endpoints as JSON (for tooling).
+func (app *App) handleExpose(w http.ResponseWriter, r *http.Request) {
+	config, err := agent.LoadConfig(app.stateDir)
+	if err != nil {
+		http.Error(w, "load config failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(config.Endpoints)
+}
+
 // Serve runs the loopback listener until ctx is done.
 func (app *App) Serve(ctx context.Context, listenAddr string, logger *slog.Logger) error {
 	listener, err := net.Listen("tcp", listenAddr)
@@ -234,14 +325,18 @@ const pageTemplate = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>HooshiX Agent — Pair</title>
+<title>HooshiX Agent</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }
   .key { background: #f4f4f8; border: 1px solid #ccc; padding: .8rem; font-family: monospace; word-break: break-all; user-select: all; }
   textarea { width: 100%%; height: 8rem; font-family: monospace; }
   .ok { color: #0a7a2e; } .error { color: #b00020; } .info { color: #555; }
   button { padding: .5rem 1.2rem; }
-  h1 { font-size: 1.3rem; }
+  h1 { font-size: 1.3rem; } h2 { margin-top: 2rem; }
+  table { border-collapse: collapse; width: 100%%; }
+  th, td { border: 1px solid #ddd; padding: .4rem .6rem; font-size: .9rem; }
+  input { font: inherit; padding: .35rem .5rem; width: 200px; }
+  #target { width: 260px; }
 </style>
 </head>
 <body>
@@ -257,6 +352,17 @@ const pageTemplate = `<!doctype html>
 <br><button type="submit">Pair</button>
 </form>
 <p class="info">%s</p>
+<h2>3. Local services</h2>
+<p class="info">Map a local port, then reserve a subdomain in the panel with the same endpoint id.</p>
+<form method="post" action="/expose/add">
+<input name="id" placeholder="web-001" required pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,63}" title="endpoint id: letters, digits, . _ : -">
+<input id="target" name="target" placeholder="127.0.0.1:4000" required>
+<button type="submit">Add service</button>
+</form>
+<table><tr><th>endpoint id</th><th>local target</th><th></th></tr>
+%s
+</table>
+<datalist id="expose-ids">%s</datalist>
 </body>
 </html>
 `
