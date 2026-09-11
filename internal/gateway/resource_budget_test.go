@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,8 +111,14 @@ func TestStreamQueueBudgetsBoundPerStreamSessionAndGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.finish(nil)
+	// With the no-discard finish contract, a live reader still drains queued
+	// chunks (and their byte reservations) before observing the terminal EOF.
+	out2 := make([]byte, 5)
+	if _, err := io.ReadFull(second, out2); err != nil {
+		t.Fatalf("drain after finish: %v", err)
+	}
 	if session.Used() != 0 || global.Used() != 0 {
-		t.Fatal("stream cleanup did not release queued byte budgets")
+		t.Fatal("reader drain did not release queued byte budgets")
 	}
 
 	global = newByteBudget(10)
@@ -126,6 +133,10 @@ func TestStreamQueueBudgetsBoundPerStreamSessionAndGlobal(t *testing.T) {
 		t.Fatalf("global budget error=%v want=%v", err, errResourceBudget)
 	}
 	streamA.finish(nil)
+	drain := make([]byte, 6)
+	if _, err := io.ReadFull(streamA, drain); err != nil {
+		t.Fatalf("streamA drain after finish: %v", err)
+	}
 	streamB.finish(nil)
 	if global.Used() != 0 {
 		t.Fatalf("global queue budget leaked: %d", global.Used())
@@ -150,8 +161,19 @@ func TestStreamQueueFrameLimitReleasesRejectedReservation(t *testing.T) {
 		t.Fatalf("rejected frame leaked global reservation: %d", got)
 	}
 	stream.finish(nil)
+	// No-discard finish: the queued chunk is still readable and its budget
+	// is released by the reader, then EOF surfaces.
+	out := make([]byte, 32)
+	n, err := stream.Read(out)
+	if err != nil || !bytes.Equal(out[:n], []byte("first")) {
+		t.Fatalf("read after finish n=%d err=%v data=%q", n, err, out[:n])
+	}
+	_, err = stream.Read(out)
+	if err != io.EOF {
+		t.Fatalf("second read err=%v want EOF", err)
+	}
 	if global.Used() != 0 || session.Used() != 0 {
-		t.Fatal("frame-limit cleanup leaked byte reservations")
+		t.Fatal("drain after finish leaked byte reservations")
 	}
 }
 

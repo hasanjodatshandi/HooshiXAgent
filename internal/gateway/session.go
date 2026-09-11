@@ -436,6 +436,7 @@ func (sess *session) detachStream(streamID uint32, err error) *stream {
 	sess.mu.Unlock()
 	if stream != nil {
 		stream.finish(err)
+		stream.releaseRemaining()
 	}
 	return stream
 }
@@ -705,6 +706,11 @@ func (stream *stream) Read(data []byte) (int, error) {
 			continue
 		default:
 		}
+		// The stream may have been finished (stream_close/error from the
+		// Agent) while payload chunks were still queued. Queued chunks are
+		// still readable: a terminal frame only means "no more data follows",
+		// so drain them before surfacing EOF. This preserves tunnel response
+		// bodies whose final data frames raced the close frame.
 		select {
 		case chunk := <-stream.incoming:
 			stream.releaseQueued(chunk.size)
@@ -725,15 +731,34 @@ func (stream *stream) finish(err error) {
 	stream.finishOnce.Do(func() {
 		stream.queueMu.Lock()
 		stream.closed = true
+		stream.queueMu.Unlock()
+		// Signal the reader without discarding queued payload chunks: the
+		// reader drains incoming first and only then observes the terminal
+		// error, so trailing tunnel data is never lost on close races.
+		select {
+		case stream.errCh <- err:
+		default:
+		}
+	})
+}
+
+// releaseRemaining asynchronously drains any payload chunks left after the
+// reader stopped (detached stream: client cancelled, handler returned). It
+// keeps the shared byte budgets correct so abandoned streams cannot starve
+// the session or global queues.
+func (stream *stream) releaseRemaining() {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 		for {
 			select {
 			case chunk := <-stream.incoming:
 				stream.releaseQueued(chunk.size)
+			case <-ticker.C:
+				return
 			default:
-				stream.queueMu.Unlock()
-				stream.errCh <- err
 				return
 			}
 		}
-	})
+	}()
 }

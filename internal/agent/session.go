@@ -598,49 +598,50 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 }
 
 func (sess *agentSession) writeLoop() {
-	var pendingData *agentWriteRequest
+	// Strict global write ordering: every frame (data or control) passes
+	// through one FIFO queue so a terminal stream_close can never overtake
+	// in-flight data frames of the same stream on the wire. Sequence numbers
+	// are assigned in write order, which keeps the tunnel semantics intact.
+	pending := make([]agentWriteRequest, 0, 64)
 	for {
-		if pendingData != nil {
-			select {
-			case <-sess.closed:
-				return
-			default:
-			}
+		select {
+		case <-sess.closed:
+			return
+		default:
+		}
+		if len(pending) == 0 {
 			select {
 			case request := <-sess.controlWrites:
-				sess.writeQueued(request)
+				pending = append(pending, request)
+			case request := <-sess.dataWrites:
+				pending = append(pending, request)
+			}
+		} else {
+			// Opportunistic batch: pull whatever is already queued (control
+			// first is fine here — both are already behind the FIFO head).
+			select {
+			case request := <-sess.controlWrites:
+				pending = append(pending, request)
+				continue
+			case request := <-sess.dataWrites:
+				pending = append(pending, request)
 				continue
 			default:
 			}
-			request := *pendingData
-			pendingData = nil
-			sess.writeQueued(request)
-			continue
 		}
-		select {
-		case <-sess.closed:
-			return
-		default:
-		}
-		select {
-		case request := <-sess.controlWrites:
-			sess.writeQueued(request)
-			continue
-		default:
-		}
-		select {
-		case <-sess.closed:
-			return
-		case request := <-sess.controlWrites:
-			sess.writeQueued(request)
-		case request := <-sess.dataWrites:
-			pendingData = &request
-		}
+		request := pending[0]
+		pending = pending[1:]
+		sess.writeQueued(request)
 	}
 }
 
 func (sess *agentSession) writeQueued(request agentWriteRequest) {
-	if err := request.ctx.Err(); err != nil {
+	// Data frames must never be dropped due to a caller timeout: a dropped
+	// tunnel chunk silently truncates the tunneled response (the gateway
+	// sees unexpected EOF). If the writer is healthy the frame is written
+	// even when the enqueue context has expired; only a session shutdown or
+	// a real transport error may drop it.
+	if err := request.ctx.Err(); err != nil && request.kind == contractv1.KindControl {
 		request.result <- err
 		return
 	}
@@ -656,7 +657,16 @@ func (sess *agentSession) writeQueued(request agentWriteRequest) {
 		return
 	}
 	sess.outbound.Store(sequence)
-	if err := sess.writeMessage(request.ctx, encoded); err != nil {
+	writeCtx := request.ctx
+	if request.kind == contractv1.KindData {
+		// Data frames write under a fresh bounded deadline so a slow enqueue
+		// never truncates the tunnel stream; the write itself stays bounded
+		// by WriteTimeout from now, not from enqueue time.
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(context.Background(), sess.limits.WriteTimeout)
+		defer cancel()
+	}
+	if err := sess.writeMessage(writeCtx, encoded); err != nil {
 		request.result <- err
 		sess.shutdown()
 		return
