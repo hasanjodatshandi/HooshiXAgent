@@ -174,10 +174,13 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	case wmTaskbarCreated:
 		_ = host.notify(nimAdd)
 	case wmTrayCallback:
-		switch lParam {
-		case 0x0203: // WM_CONTEXTMENU (right click); 0x0202 = WM_LBUTTONUP (left click)
-			fallthrough
-		case 0x0202:
+		// Tray mouse events arrive in the LOWORD of lParam: WM_LBUTTONUP,
+		// WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_RBUTTONDBLCLK (and NIN_SELECT /
+		// NIN_KEYSELECT for keyboard-invoked tray activation).
+		switch uint32(lParam) & 0xFFFF {
+		case 0x0202, 0x0203, 0x0206, // WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK
+			0x0205, // WM_RBUTTONUP
+			0x0404, 0x0405: // NIN_SELECT, NIN_KEYSELECT (keyboard/Space/Enter)
 			host.showMenu()
 		}
 	case wmDestroy:
@@ -192,32 +195,38 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 }
 
 func (host *menuHost) showMenu() {
-	setForegroundWindow := user32.NewProc("SetForegroundWindow")
+	const (
+		tpmRightAlign  = 0x0008
+		tpmBottomAlign = 0x0020
+		tpmReturnCmd   = 0x0100
+		tpmNonotify    = 0x0080
+		tpmLeftBtn     = 0x0000
+		wmNull         = 0x0000
+	)
+	user32Once := user32.NewProc("SetForegroundWindow")
 	trackPopupMenu := user32.NewProc("TrackPopupMenu")
-	const tpmRightAlign = 0x0008
-	const tpmBottomAlign = 0x0020
-	const tpmReturnCmd = 0x0100
-	const tpmNonotify = 0x0080
-	const tpmLeftBtn = 0x0000
+	postMessage := user32.NewProc("PostMessageW")
+	getCursor := user32.NewProc("GetCursorPos")
 
-	setForegroundWindow.Call(uintptr(host.window))
+	// Standard tray-menu pattern (Microsoft KB135238): make the owner
+	// window foreground BEFORE showing the menu so the menu dismisses when
+	// the user clicks elsewhere or presses ESC, then post WM_NULL after.
+	user32Once.Call(uintptr(host.window))
+
+	var point struct{ x, y int32 }
+	getCursor.Call(uintptr(unsafe.Pointer(&point)))
+
 	chosen, _, _ := trackPopupMenu.Call(
 		uintptr(host.menu),
 		uintptr(tpmRightAlign|tpmBottomAlign|tpmReturnCmd|tpmNonotify|tpmLeftBtn),
-		wParamFromMessage(),
-		0,
+		uintptr(int64(point.x)), // x (screen)
+		uintptr(int64(point.y)), // y (screen)
 		0,
 		uintptr(host.window),
 		0,
 	)
+	postMessage.Call(uintptr(host.window), uintptr(wmNull), 0, 0)
 	go host.dispatchMenu(uint32(chosen))
-}
-
-func wParamFromMessage() uintptr {
-	getCursor := user32.NewProc("GetCursorPos")
-	var point struct{ x, y int32 }
-	getCursor.Call(uintptr(unsafe.Pointer(&point)))
-	return uintptr(uint32(point.x)) | uintptr(uint32(point.y))<<16
 }
 
 func (host *menuHost) dispatchMenu(id uint32) {
