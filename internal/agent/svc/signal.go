@@ -20,5 +20,3 @@ func signalContext() context.Context {
 	_ = stop
 	return ctx
 }
-
-

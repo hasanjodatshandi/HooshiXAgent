@@ -160,6 +160,7 @@ type KeyedAdmissionLimiter struct {
 	contentionWindow time.Duration
 	alwaysFair       bool
 	states           map[string]*keyedState
+	maxTrackedKeys   int
 	recentKey        string
 	recentAt         time.Time
 	previousKey      string
@@ -184,6 +185,9 @@ func FairnessShare(global int) int {
 }
 
 // NewKeyedAdmissionLimiter returns a contentional fair limiter.
+// maxTrackedKeys bounds the per-key state map: keys come from external
+// metadata (device/assignment IDs) and rotate over process lifetime, so the
+// map is lazily swept when it exceeds the bound to prevent unbounded growth.
 func NewKeyedAdmissionLimiter(maxInFlight, rate, burst int) *KeyedAdmissionLimiter {
 	return &KeyedAdmissionLimiter{
 		maxInFlight:      maxInFlight,
@@ -194,6 +198,7 @@ func NewKeyedAdmissionLimiter(maxInFlight, rate, burst int) *KeyedAdmissionLimit
 		fairBurst:        float64(FairnessShare(burst)),
 		contentionWindow: 2 * time.Second,
 		states:           make(map[string]*keyedState),
+		maxTrackedKeys:   65536,
 	}
 }
 
@@ -226,6 +231,17 @@ func (limiter *KeyedAdmissionLimiter) TryAcquire(key string, now time.Time) Reje
 	if state == nil {
 		state = &keyedState{tokens: limiter.burst, last: now}
 		limiter.states[key] = state
+		// Lazy eviction: external keys rotate (devices are deleted and
+		// re-registered), so without a sweep the map would grow for the
+		// process lifetime. Idle entries (no in-flight work) are dropped
+		// when the map exceeds its bound; fresh state is rebuilt on demand.
+		if len(limiter.states) > limiter.maxTrackedKeys {
+			for idleKey, idleState := range limiter.states {
+				if idleState.inFlight == 0 && idleKey != key {
+					delete(limiter.states, idleKey)
+				}
+			}
+		}
 	}
 	if state.inFlight >= maxInFlight {
 		limiter.rejected.Add(1)

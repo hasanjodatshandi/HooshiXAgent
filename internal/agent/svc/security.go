@@ -24,8 +24,8 @@ func applyRecoveryPolicy(handle windows.Handle) error {
 		actions         *scAction
 	}
 	const (
-		scActionRestart          = 1
-		serviceConfigFailures   = 2
+		scActionRestart       = 1
+		serviceConfigFailures = 2
 	)
 	actions := []scAction{{actionType: scActionRestart, delayMs: 5000}}
 	fa := failureActions{
@@ -71,4 +71,3 @@ func grantUserStartStop(handle windows.Handle) error {
 	}
 	return nil
 }
-

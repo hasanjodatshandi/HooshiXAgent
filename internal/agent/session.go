@@ -601,17 +601,34 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 	case err := <-request.result:
 		return err
 	case <-ctx.Done():
+		// Deadline fired: the write may still have completed concurrently.
+		// Prefer a delivered result over the deadline error so a frame that
+		// actually went out is never reported as failed (phantom-error
+		// attribution makes callers tear down healthy streams).
+		select {
+		case err := <-request.result:
+			return err
+		default:
+		}
 		return ctx.Err()
 	case <-sess.closed:
+		select {
+		case err := <-request.result:
+			return err
+		default:
+		}
 		return errAgentWriterClosed
 	}
 }
 
 func (sess *agentSession) writeLoop() {
-	// Strict global write ordering: every frame (data or control) passes
-	// through one FIFO queue so a terminal stream_close can never overtake
-	// in-flight data frames of the same stream on the wire. Sequence numbers
-	// are assigned in write order, which keeps the tunnel semantics intact.
+	// Two FIFO queues merged per arrival; cross-queue order is randomized
+	// ONLY between queues. Per-stream ordering (data before terminal close)
+	// is guaranteed by the senders: every stream sender awaits sendFrame's
+	// result before issuing the next frame for that stream, so a stream can
+	// never have a data frame queued behind its own terminal close.
+	// INVARIANT: never add fire-and-forget sends for per-stream frames; a
+	// close overtaking queued data reintroduces the gateway 502 truncation.
 	pending := make([]agentWriteRequest, 0, 64)
 	for {
 		select {

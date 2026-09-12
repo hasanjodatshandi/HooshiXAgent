@@ -107,8 +107,15 @@ func (exporter *statusExporter) emit(signal contractv1.GatewayStatusSignal) {
 		}
 	case <-ctx.Done():
 		exporter.failures.Add(1)
+		// Enter a bounded cooldown instead of latching off forever: a single
+		// slow sink must not permanently disable observability for the rest
+		// of the process lifetime.
 		exporter.timedOut.Store(true)
-		exporter.logger.Warn("status sink timed out; exporter disabled", "error", ctx.Err(), "kind", signal.Kind)
+		exporter.logger.Warn("status sink timed out; exporter cooling down", "error", ctx.Err(), "kind", signal.Kind)
+		time.AfterFunc(exporter.emitTimeout, func() {
+			exporter.timedOut.Store(false)
+			exporter.logger.Info("status exporter cooldown ended; re-enabling")
+		})
 	}
 }
 

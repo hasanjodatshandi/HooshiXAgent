@@ -34,7 +34,7 @@ type session struct {
 	publicBytes atomic.Uint64 // data-frame bytes sent toward the Agent
 	pingLatency atomic.Int64  // last heartbeat round-trip in nanoseconds
 	reconnected atomic.Bool   // session replaced a previous live session
-	pendingPing atomic.Value  // time.Time of the last outbound ping
+	pendingPing atomic.Value  // pendingPing{id, sentAt} of the last outbound ping
 
 	controlWrites              chan sessionWriteRequest
 	dataWrites                 chan sessionWriteRequest
@@ -50,6 +50,13 @@ type session struct {
 	closeConn                  func(websocket.StatusCode, string) error
 	closeNowConn               func() error
 	authorizationTerminateOnce sync.Once
+}
+
+// pendingPing pairs an outbound heartbeat ping ID with its send time so the
+// matching pong can be identified exactly (telemetry correctness).
+type pendingPing struct {
+	id     string
+	sentAt time.Time
 }
 
 func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64) *session {
@@ -91,6 +98,12 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 	if sess == nil || !sess.authorized.Load() {
 		return nil
 	}
+	// nextID is guarded by sess.mu in openStream; reading it here without
+	// the mutex is a data race (Go memory model: unsynchronized read while
+	// concurrent ingress handlers may be allocating stream IDs).
+	sess.mu.Lock()
+	resumeNextID := sess.nextID
+	sess.mu.Unlock()
 	resumed := &session{
 		gateway:                sess.gateway,
 		conn:                   conn,
@@ -102,7 +115,7 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
 		queueBudget:            newByteBudget(sess.gateway.limits.MaxSessionQueueBytes),
-		nextID:                 sess.nextID,
+		nextID:                 resumeNextID,
 		done:                   make(chan struct{}),
 		controlWrites:          make(chan sessionWriteRequest, 32),
 		dataWrites:             make(chan sessionWriteRequest, 2),
@@ -203,7 +216,10 @@ func (sess *session) heartbeatLoop(ctx context.Context) {
 				return
 			}
 			// Arm the latency observation window for the matching pong.
-			sess.pendingPing.Store(time.Now())
+			// Store the ping ID so a stale/late pong from an earlier ping
+			// cannot be paired with the newest send time (which would skew
+			// the latency telemetry last-writer-wins).
+			sess.pendingPing.Store(pendingPing{id: pingID, sentAt: time.Now()})
 		}
 	}
 }
@@ -315,11 +331,14 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 			return err
 		}
 		// Record the bounded heartbeat round-trip for aggregate latency
-		// telemetry. The ping send time is tracked per session; a missed or
-		// stale pong simply leaves the last observation in place.
-		if sent, ok := sess.pendingPing.Load().(time.Time); ok && !sent.IsZero() {
-			sess.pingLatency.Store(time.Since(sent).Nanoseconds())
-			sess.pendingPing.Store(time.Time{})
+		// telemetry. Pair on the ping ID so only the matching pong updates
+		// the observation; a missed or stale pong is ignored, leaving the
+		// last observation in place.
+		if armed, ok := sess.pendingPing.Load().(pendingPing); ok && armed.id != "" {
+			if pong.PingID == armed.id {
+				sess.pingLatency.Store(time.Since(armed.sentAt).Nanoseconds())
+				sess.pendingPing.Store(pendingPing{})
+			}
 		}
 		return nil
 	case "health_report":
@@ -532,8 +551,22 @@ func (sess *session) sendFrame(parent context.Context, kind contractv1.Kind, str
 	case err := <-request.result:
 		return err
 	case <-ctx.Done():
+		// Deadline fired: the write may still have completed concurrently.
+		// Prefer a delivered result over the deadline error so a frame that
+		// actually went out is never reported as failed (phantom-error
+		// attribution makes callers tear down healthy tunnels).
+		select {
+		case err := <-request.result:
+			return err
+		default:
+		}
 		return ctx.Err()
 	case <-sess.done:
+		select {
+		case err := <-request.result:
+			return err
+		default:
+		}
 		return errSessionWriterClosed
 	}
 }
@@ -547,12 +580,10 @@ func (sess *session) writeLoop() {
 				return
 			default:
 			}
-			select {
-			case request := <-sess.controlWrites:
-				sess.writeQueued(request)
-				continue
-			default:
-			}
+			// The held data frame goes out first: sustained control traffic
+			// must never postpone the single in-flight tunneled-request
+			// chunk past its write deadline (cross-queue order is free; only
+			// per-stream ordering matters and that is sender-synchronized).
 			request := *pendingData
 			pendingData = nil
 			sess.writeQueued(request)
@@ -582,7 +613,12 @@ func (sess *session) writeLoop() {
 }
 
 func (sess *session) writeQueued(request sessionWriteRequest) {
-	if err := request.ctx.Err(); err != nil {
+	// Tunnel data frames (the tunneled request body) must never be dropped
+	// due to an expired enqueue deadline: a dropped chunk silently
+	// truncates the request the Agent forwards to the local target. Only
+	// control frames may be abandoned on deadline; data is written under a
+	// fresh bounded write deadline as long as the session is healthy.
+	if err := request.ctx.Err(); err != nil && request.kind != contractv1.KindData {
 		request.result <- err
 		return
 	}
@@ -599,7 +635,20 @@ func (sess *session) writeQueued(request sessionWriteRequest) {
 		return
 	}
 	sess.outbound.Store(sequence)
-	if err := sess.writeMessage(request.ctx, frame); err != nil {
+	writeCtx := request.ctx
+	if request.kind == contractv1.KindData {
+		writeCtx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
+		defer cancel()
+		if err := sess.writeMessage(writeCtx, frame); err != nil {
+			request.result <- err
+			sess.failAll(err)
+			sess.close(websocket.StatusInternalError, "protocol write failed")
+			return
+		}
+		request.result <- nil
+		return
+	}
+	if err := sess.writeMessage(writeCtx, frame); err != nil {
 		request.result <- err
 		sess.failAll(err)
 		sess.close(websocket.StatusInternalError, "protocol write failed")
@@ -636,12 +685,11 @@ type queuedPayload struct {
 }
 
 type stream struct {
-	id            uint32
-	incoming      chan queuedPayload
-	errCh         chan error
-	buffer        []byte
-	queueMu       sync.Mutex
-	closed        bool
+	id       uint32
+	incoming chan queuedPayload
+	buffer   []byte
+	queueMu  sync.Mutex
+	closed   bool
 	// terminalBuffer holds payload chunks that were still queued when the
 	// terminal frame arrived; Read drains them before surfacing the
 	// terminal error so close races can never truncate tunneled bodies.
@@ -660,7 +708,6 @@ func newStream(id uint32, queueFrames int, queueBytes int64, sessionBudget, glob
 	return &stream{
 		id:            id,
 		incoming:      make(chan queuedPayload, queueFrames),
-		errCh:         make(chan error, 1),
 		terminal:      make(chan struct{}),
 		streamBudget:  newByteBudget(queueBytes),
 		sessionBudget: sessionBudget,
@@ -771,32 +818,22 @@ func (stream *stream) finish(err error) {
 		stream.terminalReady = true
 		stream.queueMu.Unlock()
 		close(stream.terminal)
-		// errCh kept for legacy wakeup paths; empty close signal suffices.
-		select {
-		case stream.errCh <- err:
-		default:
-		}
 	})
 }
 
-// releaseRemaining asynchronously drains any payload chunks left after the
+// releaseRemaining drains any payload chunks left in the queue after the
 // reader stopped (detached stream: client cancelled, handler returned). It
 // keeps the shared byte budgets correct so abandoned streams cannot starve
-// the session or global queues.
+// the session or global queues. finish() has already drained the queue into
+// terminalBuffer under queueMu and enqueue() rejects post-finish sends, so at
+// most a few in-flight chunks can remain; drain without blocking.
 func (stream *stream) releaseRemaining() {
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case chunk := <-stream.incoming:
-				stream.releaseQueued(chunk.size)
-			case <-ticker.C:
-				return
-			default:
-				return
-			}
+	for {
+		select {
+		case chunk := <-stream.incoming:
+			stream.releaseQueued(chunk.size)
+		default:
+			return
 		}
-	}()
+	}
 }
-

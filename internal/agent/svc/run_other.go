@@ -57,12 +57,12 @@ func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 }
 
 // SCM management commands are Windows-only.
-func Install(string) error          { return errors.New("service install requires Windows") }
-func Uninstall() error              { return errors.New("service uninstall requires Windows") }
-func Start() error                  { return errors.New("service start requires Windows") }
-func Stop() error                   { return errors.New("service stop requires Windows") }
-func QueryStatus() (string, error)  { return "", errors.New("service status requires Windows") }
-func IsWindowsService() bool        { return false }
+func Install(string) error         { return errors.New("service install requires Windows") }
+func Uninstall() error             { return errors.New("service uninstall requires Windows") }
+func Start() error                 { return errors.New("service start requires Windows") }
+func Stop() error                  { return errors.New("service stop requires Windows") }
+func QueryStatus() (string, error) { return "", errors.New("service status requires Windows") }
+func IsWindowsService() bool       { return false }
 
 type logOutput struct{}
 

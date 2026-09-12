@@ -24,12 +24,12 @@ import (
 
 // PairingPayload is the single-paste format produced by the panel.
 type PairingPayload struct {
-	GatewayURL     string `json:"gateway_url"`
-	GatewayAliases string `json:"gateway_aliases,omitempty"`
-	DeviceID       string `json:"device_id"`
+	GatewayURL      string `json:"gateway_url"`
+	GatewayAliases  string `json:"gateway_aliases,omitempty"`
+	DeviceID        string `json:"device_id"`
 	AuthorizationID string `json:"authorization_id"`
-	TokenID        string `json:"token_id"`
-	Token          string `json:"token"`
+	TokenID         string `json:"token_id"`
+	Token           string `json:"token"`
 }
 
 // App wires the HTTP handlers to Agent state.

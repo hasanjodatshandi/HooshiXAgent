@@ -30,11 +30,11 @@ import (
 var payload embed.FS
 
 const (
-	installDir   = `C:\Program Files\HooshiXAgent`
-	arpKeyPath   = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HooshiXAgent`
-	appTitle     = "HooshiX Agent"
-	agentBinary  = "hooshix-agent.exe"
-	trayBinary   = "hooshix-agent-tray.exe"
+	installDir  = `C:\Program Files\HooshiXAgent`
+	arpKeyPath  = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HooshiXAgent`
+	appTitle    = "HooshiX Agent"
+	agentBinary = "hooshix-agent.exe"
+	trayBinary  = "hooshix-agent-tray.exe"
 )
 
 func main() {
@@ -136,11 +136,11 @@ func registerUninstall() error {
 
 	uninstallCmd := fmt.Sprintf(`"%s" --uninstall`, filepath.Join(installDir, agentBinary))
 	strings := map[string]string{
-		"DisplayName":      appTitle,
-		"DisplayVersion":   "1.0.0",
-		"Publisher":        "HooshiX",
-		"UninstallString":  uninstallCmd,
-		"InstallLocation":  installDir,
+		"DisplayName":     appTitle,
+		"DisplayVersion":  "1.0.0",
+		"Publisher":       "HooshiX",
+		"UninstallString": uninstallCmd,
+		"InstallLocation": installDir,
 	}
 	for name, value := range strings {
 		if err := key.SetStringValue(name, value); err != nil {

@@ -24,8 +24,8 @@ import (
 
 // Status is a point-in-time supervisor snapshot for UIs and diagnostics.
 type Status struct {
-	Phase        string `json:"phase"`                   // stopped|pending_config|running|terminal
-	State        string `json:"state"`                    // tunnel state name (connecting/connected/...)
+	Phase        string `json:"phase"` // stopped|pending_config|running|terminal
+	State        string `json:"state"` // tunnel state name (connecting/connected/...)
 	Reconnects   int64  `json:"reconnects"`
 	LastError    string `json:"last_error,omitempty"`
 	LastUpdateAt string `json:"last_update_at"`
@@ -37,7 +37,7 @@ type Options struct {
 	Logger    *slog.Logger
 	Limits    agent.Limits
 	StatusDir string // where status.json is written; defaults to StateDir
-}// Supervisor manages the Agent Runner lifecycle with reconnect-forever
+} // Supervisor manages the Agent Runner lifecycle with reconnect-forever
 // semantics for recoverable failures.
 type Supervisor struct {
 	opts Options

@@ -21,9 +21,9 @@ type menuHost struct {
 }
 
 const (
-	wmTrayCallback  = 0x8000 // WM_APP
-	wmDestroy       = 0x0002
-	wmEndSession    = 0x0016
+	wmTrayCallback   = 0x8000 // WM_APP
+	wmDestroy        = 0x0002
+	wmEndSession     = 0x0016
 	wmTaskbarCreated = 0x1E // "TaskbarCreated" broadcast for re-add
 )
 
@@ -47,36 +47,36 @@ type notifyIconData struct {
 
 const (
 	nifMessage = 0x01
-	nifIcon   = 0x02
-	nifTip    = 0x04
-	nimAdd    = 0x00
-	nimDelete = 0x02
+	nifIcon    = 0x02
+	nifTip     = 0x04
+	nimAdd     = 0x00
+	nimDelete  = 0x02
 )
 
 var (
-	className      = syscall.StringToUTF16Ptr("HooshiXAgentTray")
-	windowTitle    = syscall.StringToUTF16Ptr("HooshiX Agent Tray")
-	pairingLabel   = syscall.StringToUTF16Ptr("Open pairing page")
-	startLabel     = syscall.StringToUTF16Ptr("Start service")
-	stopLabel      = syscall.StringToUTF16Ptr("Stop service")
-	exitLabel      = syscall.StringToUTF16Ptr("Exit")
-	menuSepLabel   = syscall.StringToUTF16Ptr("-")
+	className    = syscall.StringToUTF16Ptr("HooshiXAgentTray")
+	windowTitle  = syscall.StringToUTF16Ptr("HooshiX Agent Tray")
+	pairingLabel = syscall.StringToUTF16Ptr("Open pairing page")
+	startLabel   = syscall.StringToUTF16Ptr("Start service")
+	stopLabel    = syscall.StringToUTF16Ptr("Stop service")
+	exitLabel    = syscall.StringToUTF16Ptr("Exit")
+	menuSepLabel = syscall.StringToUTF16Ptr("-")
 )
 
 // wndClassEx mirrors the Win32 WNDCLASSEXW structure exactly.
 type wndClassEx struct {
-	Size       uint32
-	Style      uint32
-	WndProc    uintptr
-	ClassExtra int32
+	Size        uint32
+	Style       uint32
+	WndProc     uintptr
+	ClassExtra  int32
 	WindowExtra int32
-	Instance   uintptr
-	Icon       uintptr
-	Cursor     uintptr
-	Background uintptr
-	MenuName   uintptr
-	ClassName  uintptr
-	IconSm     uintptr
+	Instance    uintptr
+	Icon        uintptr
+	Cursor      uintptr
+	Background  uintptr
+	MenuName    uintptr
+	ClassName   uintptr
+	IconSm      uintptr
 }
 
 func newMenuHost(app *App) (*menuHost, error) {
@@ -179,7 +179,7 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 		// NIN_KEYSELECT for keyboard-invoked tray activation).
 		switch uint32(lParam) & 0xFFFF {
 		case 0x0202, 0x0203, 0x0206, // WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK
-			0x0205, // WM_RBUTTONUP
+			0x0205,         // WM_RBUTTONUP
 			0x0404, 0x0405: // NIN_SELECT, NIN_KEYSELECT (keyboard/Space/Enter)
 			host.showMenu()
 		}
@@ -243,18 +243,18 @@ func (host *menuHost) dispatchMenu(id uint32) {
 }
 
 func (host *menuHost) run() error {
- getMessage := user32.NewProc("GetMessageW")
- translateMessage := user32.NewProc("TranslateMessage")
- dispatchMessage := user32.NewProc("DispatchMessageW")
- var msg struct {
-	Window  windows.Handle
-	Message uint32
-	WParam  uintptr
-	LParam  uintptr
-	Time    uint32
-	Point   struct{ x, y int32 }
-	LPrivate uint32
- }
+	getMessage := user32.NewProc("GetMessageW")
+	translateMessage := user32.NewProc("TranslateMessage")
+	dispatchMessage := user32.NewProc("DispatchMessageW")
+	var msg struct {
+		Window   windows.Handle
+		Message  uint32
+		WParam   uintptr
+		LParam   uintptr
+		Time     uint32
+		Point    struct{ x, y int32 }
+		LPrivate uint32
+	}
 	for {
 		result, _, err := getMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if int32(result) == -1 {

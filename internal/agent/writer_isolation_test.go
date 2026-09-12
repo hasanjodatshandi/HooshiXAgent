@@ -83,8 +83,8 @@ func TestAgentWriterPrioritizesControlAndPreservesSingleWriter(t *testing.T) {
 	if len(written) != 3 {
 		t.Fatalf("written frame count=%d", len(written))
 	}
-	if written[0].Kind != contractv1.KindData || written[1].Kind != contractv1.KindControl || written[2].Kind != contractv1.KindData {
-		t.Fatalf("writer order=%v,%v,%v want data,control,data", written[0].Kind, written[1].Kind, written[2].Kind)
+	if written[0].Kind != contractv1.KindData || written[1].Kind != contractv1.KindData || written[2].Kind != contractv1.KindControl {
+		t.Fatalf("writer order=%v,%v,%v want data,data,control: a queued data frame must never be postponed behind a later control frame (tunnel truncation guard)", written[0].Kind, written[1].Kind, written[2].Kind)
 	}
 	for i, frame := range written {
 		if want := uint64(i + 3); frame.Sequence != want {
