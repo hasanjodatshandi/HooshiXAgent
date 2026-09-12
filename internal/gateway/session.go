@@ -642,11 +642,18 @@ type stream struct {
 	buffer        []byte
 	queueMu       sync.Mutex
 	closed        bool
-	streamBudget  *byteBudget
-	sessionBudget *byteBudget
-	globalBudget  *byteBudget
-	rejectCounter *atomic.Uint64
-	finishOnce    sync.Once
+	// terminalBuffer holds payload chunks that were still queued when the
+	// terminal frame arrived; Read drains them before surfacing the
+	// terminal error so close races can never truncate tunneled bodies.
+	terminalBuffer []byte
+	terminalErr    error
+	terminalReady  bool
+	terminal       chan struct{}
+	streamBudget   *byteBudget
+	sessionBudget  *byteBudget
+	globalBudget   *byteBudget
+	rejectCounter  *atomic.Uint64
+	finishOnce     sync.Once
 }
 
 func newStream(id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
@@ -654,6 +661,7 @@ func newStream(id uint32, queueFrames int, queueBytes int64, sessionBudget, glob
 		id:            id,
 		incoming:      make(chan queuedPayload, queueFrames),
 		errCh:         make(chan error, 1),
+		terminal:      make(chan struct{}),
 		streamBudget:  newByteBudget(queueBytes),
 		sessionBudget: sessionBudget,
 		globalBudget:  globalBudget,
@@ -702,6 +710,9 @@ func (stream *stream) releaseQueued(size int64) {
 
 func (stream *stream) Read(data []byte) (int, error) {
 	for len(stream.buffer) == 0 {
+		// Queued payload chunks are always drained first: a terminal frame
+		// only means "no more data follows", so chunks racing the close
+		// frame must still be delivered instead of truncating the body.
 		select {
 		case chunk := <-stream.incoming:
 			stream.releaseQueued(chunk.size)
@@ -709,20 +720,28 @@ func (stream *stream) Read(data []byte) (int, error) {
 			continue
 		default:
 		}
-		// The stream may have been finished (stream_close/error from the
-		// Agent) while payload chunks were still queued. Queued chunks are
-		// still readable: a terminal frame only means "no more data follows",
-		// so drain them before surfacing EOF. This preserves tunnel response
-		// bodies whose final data frames raced the close frame.
-		select {
-		case chunk := <-stream.incoming:
-			stream.releaseQueued(chunk.size)
-			stream.buffer = chunk.data
-		case err := <-stream.errCh:
+		stream.queueMu.Lock()
+		if stream.terminalReady {
+			if len(stream.terminalBuffer) > 0 {
+				stream.buffer = stream.terminalBuffer
+				stream.terminalBuffer = nil
+				stream.queueMu.Unlock()
+				continue
+			}
+			err := stream.terminalErr
+			stream.queueMu.Unlock()
 			if err == nil {
 				return 0, io.EOF
 			}
 			return 0, err
+		}
+		stream.queueMu.Unlock()
+		select {
+		case chunk := <-stream.incoming:
+			stream.releaseQueued(chunk.size)
+			stream.buffer = chunk.data
+		case <-stream.terminal:
+			// loop: the next pass drains terminalBuffer or returns the error
 		}
 	}
 	n := copy(data, stream.buffer)
@@ -734,10 +753,25 @@ func (stream *stream) finish(err error) {
 	stream.finishOnce.Do(func() {
 		stream.queueMu.Lock()
 		stream.closed = true
+		// Move still-queued chunks into the terminal buffer so Read can
+		// deliver them before the terminal error: no-discard semantics.
+		var tail []byte
+		for {
+			select {
+			case chunk := <-stream.incoming:
+				stream.releaseQueued(chunk.size)
+				tail = append(tail, chunk.data...)
+				continue
+			default:
+			}
+			break
+		}
+		stream.terminalBuffer = tail
+		stream.terminalErr = err
+		stream.terminalReady = true
 		stream.queueMu.Unlock()
-		// Signal the reader without discarding queued payload chunks: the
-		// reader drains incoming first and only then observes the terminal
-		// error, so trailing tunnel data is never lost on close races.
+		close(stream.terminal)
+		// errCh kept for legacy wakeup paths; empty close signal suffices.
 		select {
 		case stream.errCh <- err:
 		default:
