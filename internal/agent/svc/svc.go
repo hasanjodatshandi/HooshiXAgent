@@ -66,7 +66,7 @@ func startAgent() (context.CancelFunc, <-chan struct{}) {
 	done := make(chan struct{})
 
 	stateDir := StateDir()
-	logger := slog.New(slog.NewTextHandler(nopWriter{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := newServiceLogger(stateDir)
 
 	sup, err := supervisor.New(supervisor.Options{StateDir: stateDir, Logger: logger})
 	if err != nil {
@@ -94,6 +94,19 @@ func startAgent() (context.CancelFunc, <-chan struct{}) {
 		}
 	}()
 	return cancel, done
+}
+
+// newServiceLogger writes agent diagnostics to agent.log in the service
+// state directory (SCM does not capture stdout/stderr), rotating is left to
+// the operator. A file open failure degrades to a nop logger rather than
+// preventing the tunnel from running.
+func newServiceLogger(stateDir string) *slog.Logger {
+	_ = os.MkdirAll(stateDir, 0o755)
+	file, err := os.OpenFile(filepath.Join(stateDir, "agent.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(nopWriter{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	return slog.New(slog.NewTextHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // IsWindowsService reports whether the current process is running as a

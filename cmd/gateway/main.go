@@ -24,6 +24,7 @@ func run() error {
 	defaults := gateway.DefaultLimits()
 	var (
 		listenAddr           = flag.String("listen", "127.0.0.1:8443", "HTTPS/WSS listen address")
+		logLevel             = flag.String("log-level", "info", "log level: debug or info")
 		tlsCert              = flag.String("tls-cert", "", "TLS certificate PEM path (required)")
 		tlsKey               = flag.String("tls-key", "", "TLS private key PEM path (required)")
 		metadataDir          = flag.String("metadata-dir", "", "read-only external metadata root directory (required)")
@@ -51,7 +52,7 @@ func run() error {
 		return errors.New("-metadata-dir is required")
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: gatewayLogLevel(*logLevel)}))
 	var metadata gateway.MetadataSource
 	var closeMetadata func()
 	switch *metadataMode {
@@ -129,4 +130,12 @@ func run() error {
 		}
 		return err
 	}
+}
+
+// gatewayLogLevel maps the -log-level flag to a slog level.
+func gatewayLogLevel(raw string) slog.Level {
+	if raw == "debug" {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
 }

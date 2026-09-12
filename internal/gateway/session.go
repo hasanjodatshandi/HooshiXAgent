@@ -374,6 +374,7 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 	sess.mu.Unlock()
 	if stream == nil {
 		if frame.StreamID != 0 && frame.StreamID < nextID {
+			sess.gateway.logger.Debug("dropping data for detached stream", "stream_id", frame.StreamID, "bytes", len(frame.Payload))
 			return nil
 		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
@@ -381,6 +382,7 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 	// Bounded aggregate tunnel-byte telemetry: Agent→Gateway data frames.
 	sess.agentBytes.Add(uint64(len(frame.Payload)))
 	if err := stream.enqueue(frame.Payload); err != nil {
+		sess.gateway.logger.Warn("stream enqueue rejected", "stream_id", frame.StreamID, "bytes", len(frame.Payload), "error", err)
 		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
 		return nil
 	}
@@ -445,6 +447,7 @@ func (sess *session) closeStream(streamID uint32, reasonCode string) {
 	if sess.detachStream(streamID, io.EOF) == nil {
 		return
 	}
+	sess.gateway.logger.Debug("gateway closing stream", "stream_id", streamID, "reason", reasonCode)
 	ctx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
 	defer cancel()
 	_ = sess.sendControl(ctx, streamID, contractv1.StreamClose{ContractVersion: contractv1.ProtocolVersion, MessageType: "stream_close", ReasonCode: reasonCode})
@@ -762,3 +765,4 @@ func (stream *stream) releaseRemaining() {
 		}
 	}()
 }
+

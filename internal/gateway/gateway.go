@@ -790,7 +790,8 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	}
 	if copyErr != nil {
 		terminalCode, terminalMessage = "internal_error", "tunneled response body ended unexpectedly"
-		gateway.logger.Warn(terminalMessage, "error", copyErr, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+		gateway.logger.Warn(terminalMessage, "error", copyErr, "endpoint_id", route.EndpointID, "stream_id", stream.id,
+			"content_length", response.ContentLength, "written_bytes", written, "from_public_bytes", fromPublic)
 		panic(http.ErrAbortHandler)
 	}
 	terminalReason = "completed"

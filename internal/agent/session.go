@@ -287,9 +287,11 @@ func (sess *agentSession) handleControl(parent context.Context, frame contractv1
 	case "stream_open":
 		return sess.handleStreamOpen(parent, frame)
 	case "stream_close":
+		sess.logger.Debug("gateway stream_close", "stream_id", frame.StreamID)
 		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
 	case "stream_error":
+		sess.logger.Debug("gateway stream_error", "stream_id", frame.StreamID)
 		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
 	default:
@@ -434,8 +436,10 @@ func (stream *agentStream) finishStream() {
 }
 
 func (sess *agentSession) serveStream(stream *agentStream) {
+	sess.logger.Debug("stream open", "stream_id", stream.id, "endpoint_id", stream.endpoint.ID, "target", stream.endpoint.Target)
 	conn, err := DialLocalTarget(stream.ctx, stream.endpoint.Target, sess.limits.DialTimeout)
 	if err != nil {
+		sess.logger.Warn("stream dial failed", "stream_id", stream.id, "error", err)
 		_ = sess.sendStreamTerminalError(stream, "local_target_unavailable", "approved local target is unavailable", true)
 		sess.finishStream(stream.id)
 		return
@@ -450,6 +454,8 @@ func (sess *agentSession) serveStream(stream *agentStream) {
 	go func() { writerDone <- sess.writeLocal(stream, conn) }()
 
 	buffer := make([]byte, 32*1024)
+	sent := 0
+	chunks := 0
 readLoop:
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(sess.limits.IdleTimeout)); err != nil {
@@ -457,7 +463,10 @@ readLoop:
 		}
 		n, readErr := conn.Read(buffer)
 		if n > 0 {
+			sent += n
+			chunks++
 			if err := sess.sendBytes(stream.ctx, stream.id, buffer[:n]); err != nil {
+				sess.logger.Warn("stream send failed mid-response", "stream_id", stream.id, "sent", sent, "error", err)
 				break
 			}
 		}
@@ -483,6 +492,7 @@ readLoop:
 	if !peerClosed {
 		_ = sess.sendStreamTerminalClose(stream, "completed")
 	}
+	sess.logger.Debug("stream finished", "stream_id", stream.id, "peer_closed", peerClosed, "bytes_sent", sent, "chunks", chunks)
 	sess.finishStream(stream.id)
 }
 
