@@ -5,7 +5,10 @@
 // legal/illegal transition behavior is fully unit-testable without sockets.
 package tunnelstates
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 // State is one Agent tunnel connection health state.
 type State int
@@ -86,6 +89,7 @@ func canTransition(from, to State) bool {
 // required by the reliability and high-availability phases of the tunnel
 // implementation plan.
 type Machine struct {
+	mu    sync.RWMutex
 	state State
 }
 
@@ -96,6 +100,8 @@ func New() *Machine {
 
 // Current returns the current state.
 func (machine *Machine) Current() State {
+	machine.mu.RLock()
+	defer machine.mu.RUnlock()
 	return machine.state
 }
 
@@ -105,6 +111,8 @@ func (machine *Machine) Current() State {
 // the machine unchanged, mirroring the fail-closed policy used across the
 // runtime.
 func (machine *Machine) Transition(to State) error {
+	machine.mu.Lock()
+	defer machine.mu.Unlock()
 	if machine.state.Terminal() {
 		return ErrIllegalTransition
 	}
@@ -129,5 +137,6 @@ func (machine *Machine) MustTransition(to State) {
 // Observability returns a short bounded status descriptor suitable for
 // structured logs or health reporting. It exposes no identifiers.
 func (machine *Machine) Observability() (state string, terminal bool) {
-	return machine.state.String(), machine.state.Terminal()
+	current := machine.Current()
+	return current.String(), current.Terminal()
 }

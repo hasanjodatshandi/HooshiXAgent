@@ -7,10 +7,12 @@ trap 'rm -rf "$WORK"' EXIT
 
 cd "$ROOT"
 
+source "$ROOT/scripts/ci/test-guard.sh"
+
 go build -o "$WORK/hooshix-agent" ./cmd/agent
 go build -o "$WORK/hooshix-gateway" ./cmd/gateway
 
 export HOOSHIX_AGENT_BINARY="$WORK/hooshix-agent"
 export HOOSHIX_GATEWAY_BINARY="$WORK/hooshix-gateway"
 
-go test -count=1 -run '^TestFirstPrototypeSmoke$' -v ./tests/integration
+fail_if_no_tests ./tests/integration -run '^TestFirstPrototypeSmoke$'

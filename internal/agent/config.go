@@ -15,11 +15,21 @@ import (
 	"strings"
 )
 
-const configVersion = 1
+// ConfigVersion is the supported Agent config schema version. Exported for
+// callers that construct a Config for validation before persistence.
+const ConfigVersion = 1
+
+const configVersion = ConfigVersion
 
 // MaxGatewayAliases bounds the HA failover list so configuration cannot grow
 // an unbounded reconnect schedule.
 const MaxGatewayAliases = 4
+
+// MaxEndpoints bounds the local exposure list. It matches the session-level
+// stream ceiling: a larger config cannot serve more concurrent streams than
+// MaxStreams, so accepting more entries would only grow state and attack
+// surface without adding capacity.
+const MaxEndpoints = 64
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
@@ -202,6 +212,9 @@ func (config Config) ValidateRuntime() error {
 		if !identifierPattern.MatchString(value) {
 			return fmt.Errorf("%s is not a valid contract identifier", name)
 		}
+	}
+	if len(config.Endpoints) > MaxEndpoints {
+		return fmt.Errorf("endpoints exceed the bounded exposure list size %d", MaxEndpoints)
 	}
 	seen := make(map[string]struct{}, len(config.Endpoints))
 	for _, endpoint := range config.Endpoints {

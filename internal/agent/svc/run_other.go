@@ -48,6 +48,9 @@ func RunService(stateDir string) error {
 // PairingUI serves the pairing UI on the loopback listener.
 func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if _, err := agent.EnsurePairingCapability(stateDir); err != nil {
+		return err
+	}
 	app, err := webapp.NewApp(stateDir, logger)
 	if err != nil {
 		return err

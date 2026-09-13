@@ -12,14 +12,17 @@ package tray
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
 	agentsvc "github.com/hasanjodatshandi/HooshiXAgent/internal/agent/svc"
+	"golang.org/x/sys/windows"
 )
 
 // TrayState mirrors the service status.json snapshot.
@@ -42,18 +45,82 @@ type App struct {
 
 // Run starts the tray app and blocks until the message loop ends.
 func Run() error {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if !acquireSingletonLock() {
+		// Another tray instance already owns the session tray slot (login
+		// task racing a manual launch, or a double start). Silently exit:
+		// the existing instance keeps the icon.
+		return nil
+	}
+	logDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "HooshiXAgent")
+	logger := newTrayLogger(logDir)
 	app := &App{logger: logger}
 
 	host, err := newMenuHost(app)
 	if err != nil {
+		logger.Error("create tray menu failed", "error", err)
 		return err
 	}
 	app.menu = host
 
+	logger.Info("tray started")
 	go app.pollLoop()
 	defer host.dispose()
-	return host.run()
+	defer releaseSingletonLock()
+	err = host.run()
+	logger.Info("tray exited")
+	return err
+}
+
+// trayLogMaxBytes bounds tray.log before rotation (one retained previous
+// file) so a long-lived session cannot grow the log without limit.
+const trayLogMaxBytes = 1 << 20
+
+func newTrayLogger(logDir string) *slog.Logger {
+	fallback := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fallback
+	}
+	logPath := filepath.Join(logDir, "tray.log")
+	info, err := os.Stat(logPath)
+	if err == nil && info.Size() >= trayLogMaxBytes {
+		_ = os.Remove(logPath + ".1")
+		_ = os.Rename(logPath, logPath+".1")
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return fallback
+	}
+	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+// acquireSingletonLock takes a best-effort exclusive lock for this tray
+// instance. The lock lives in LOCALAPPDATA (per user, per machine): a second
+// tray in the same account exits instead of stacking duplicate icons.
+func acquireSingletonLock() bool {
+	name, err := windows.UTF16PtrFromString(`Local\HooshiXAgentTray`)
+	if err != nil {
+		return true
+	}
+	handle, err := windows.CreateMutex(nil, false, name)
+	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		_ = windows.CloseHandle(handle)
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	singletonMutex = handle
+	return true
+}
+
+var singletonMutex windows.Handle
+
+func releaseSingletonLock() {
+	if singletonMutex == 0 {
+		return
+	}
+	_ = windows.CloseHandle(singletonMutex)
+	singletonMutex = 0
 }
 
 // pollLoop refreshes SCM state and status.json into the tray state.
@@ -68,6 +135,13 @@ func (app *App) pollLoop() {
 func (app *App) refresh() {
 	scmState, err := agentsvc.QueryStatus()
 	if err != nil {
+		// SCM query failed (service removed, transient access failure):
+		// surface it in state instead of silently keeping stale data.
+		state := TrayState{Phase: "service:unknown", State: "status-unavailable"}
+		app.mu.Lock()
+		app.state = state
+		app.mu.Unlock()
+		app.menu.refreshMenu(state)
 		return
 	}
 	state := TrayState{Phase: "service:" + scmState}
@@ -88,7 +162,13 @@ func (app *App) refresh() {
 // Menu actions (invoked from the Win32 menu on the UI thread).
 
 func (app *App) openPairing() {
-	if err := openBrowser("http://" + agentsvc.PairingListenAddr); err != nil {
+	capability, err := agent.LoadPairingCapability(agentsvc.StateDir())
+	if err != nil {
+		app.logger.Warn("read pairing capability failed", "error", err)
+		return
+	}
+	pairingURL := "http://" + agentsvc.PairingListenAddr + "/?cap=" + url.QueryEscape(capability)
+	if err := openBrowser(pairingURL); err != nil {
 		app.logger.Warn("open pairing page failed", "error", err)
 	}
 }
@@ -115,7 +195,3 @@ func (app *App) exit() {
 		app.menu.quit()
 	}
 }
-
-var (
-	_ = fmt.Sprintf
-)

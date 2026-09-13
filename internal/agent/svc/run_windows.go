@@ -30,7 +30,11 @@ func RunService(stateDir string) error {
 // tray fallback when the service is not installed).
 func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	app, err := webapp.NewApp(stateDir, logger)
+	resolvedStateDir := resolveServiceStateDir(stateDir)
+	if _, err := agent.EnsurePairingCapability(resolvedStateDir); err != nil {
+		return err
+	}
+	app, err := webapp.NewApp(resolvedStateDir, logger)
 	if err != nil {
 		return err
 	}

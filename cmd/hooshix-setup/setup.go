@@ -1,28 +1,22 @@
 //go:build windows
 
-// HooshiX Agent Setup: installs the agent binaries, registers the Windows
-// service, and launches the tray. Requires elevation (requests it via the
-// standard UAC manifest directive compiled into the binary).
-//
-// Layout created:
-//
-//	C:\Program Files\HooshiXAgent\hooshix-agent.exe
-//	C:\Program Files\HooshiXAgent\hooshix-agent-tray.exe
-//	C:\ProgramData\HooshiXAgent\           (service state: config.json, status.json, token.txt)
-//
-// ARP entry: "HooshiX Agent" in Add/Remove Programs, uninstall = stop
-// service, delete service, delete files.
 package main
 
 import (
 	"bufio"
 	"embed"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
+	"unsafe"
 
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -30,12 +24,16 @@ import (
 var payload embed.FS
 
 const (
-	installDir  = `C:\Program Files\HooshiXAgent`
-	arpKeyPath  = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HooshiXAgent`
-	appTitle    = "HooshiX Agent"
-	agentBinary = "hooshix-agent.exe"
-	trayBinary  = "hooshix-agent-tray.exe"
+	installDir      = `C:\Program Files\HooshiXAgent`
+	arpKeyPath      = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HooshiXAgent`
+	appTitle        = "HooshiX Agent"
+	agentBinary     = "hooshix-agent.exe"
+	trayBinary      = "hooshix-agent-tray.exe"
+	uninstallBinary = "uninstall.exe"
+	trayTaskName    = "HooshiXAgentTray"
 )
+
+var setupVersion = "dev"
 
 func main() {
 	if err := run(); err != nil {
@@ -48,20 +46,31 @@ func main() {
 
 func run() error {
 	fmt.Println("=== HooshiX Agent Setup ===")
+	stage, err := stagePayload()
+	if err != nil {
+		return fmt.Errorf("stage binaries: %w", err)
+	}
+	defer os.RemoveAll(stage)
+	interactiveAccount, err := interactiveUser()
+	if err != nil {
+		return fmt.Errorf("determine interactive user: %w", err)
+	}
 
-	// Stop any previous installation first: the running service and tray
-	// hold locks on the binaries we are about to replace.
 	stopPreviousInstallation()
-
-	if err := extractPayload(); err != nil {
-		return fmt.Errorf("extract binaries: %w", err)
+	backups, err := commitStagedPayload(stage)
+	if err != nil {
+		return fmt.Errorf("install binaries: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			rollbackFiles(backups)
+		}
+	}()
 
-	if err := registerUninstall(); err != nil {
-		return fmt.Errorf("register uninstall entry: %w", err)
+	if err := installPairingCapability(interactiveAccount); err != nil {
+		return fmt.Errorf("install pairing authorization: %w", err)
 	}
-
-	fmt.Println("installing service ...")
 	if err := runAgentCommand("service", "install"); err != nil {
 		return fmt.Errorf("install service: %w", err)
 	}
@@ -69,80 +78,300 @@ func run() error {
 		return fmt.Errorf("start service: %w", err)
 	}
 
-	fmt.Println("starting tray ...")
-	_ = startTray()
-
-	fmt.Println("done.")
-	fmt.Println("The HooshiX Agent service is running.")
-	fmt.Println("Use the tray icon (Open pairing page) to pair your device.")
+	// Desktop integration is best-effort: the tunnel (service + binaries) is
+	// already installed and running at this point, so a tray-task or
+	// uninstall-entry failure must only warn, never roll the install back
+	// (rolling back here would remove binaries the running service points
+	// at and leave a half-installed machine).
+	if err := registerTrayTask(interactiveAccount); err != nil {
+		fmt.Println("warning: tray auto-start was not registered:", err)
+		fmt.Println("        the HooshiX Agent service is installed and running; start the tray manually or re-run setup.")
+	}
+	if err := registerUninstall(); err != nil {
+		fmt.Println("warning: Windows uninstall entry was not registered:", err)
+	}
+	for _, backup := range backups {
+		_ = os.Remove(backup)
+	}
+	committed = true
+	fmt.Println("done. The HooshiX Agent service and tray are running.")
 	return nil
 }
 
-func extractPayload() error {
+func stagePayload() (string, error) {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
-		return err
+		return "", err
+	}
+	stage, err := os.MkdirTemp(installDir, ".setup-")
+	if err != nil {
+		return "", err
 	}
 	for _, name := range []string{agentBinary, trayBinary} {
-		data, err := payload.ReadFile("payload/" + name)
-		if err != nil {
-			return err
+		data, readErr := payload.ReadFile("payload/" + name)
+		if readErr != nil {
+			os.RemoveAll(stage)
+			return "", readErr
 		}
-		target := filepath.Join(installDir, name)
-		if writeErr := os.WriteFile(target, data, 0o755); writeErr != nil {
-			return writeErr
+		if writeErr := os.WriteFile(filepath.Join(stage, name), data, 0o755); writeErr != nil {
+			os.RemoveAll(stage)
+			return "", writeErr
 		}
-		fmt.Println("installed", target)
 	}
-	return nil
+	self, err := os.Executable()
+	if err != nil {
+		os.RemoveAll(stage)
+		return "", err
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		os.RemoveAll(stage)
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(stage, uninstallBinary), data, 0o755); err != nil {
+		os.RemoveAll(stage)
+		return "", err
+	}
+	return stage, nil
+}
+
+func commitStagedPayload(stage string) (map[string]string, error) {
+	backups := make(map[string]string)
+	for _, name := range []string{agentBinary, trayBinary, uninstallBinary} {
+		target := filepath.Join(installDir, name)
+		backup := target + ".previous"
+		_ = os.Remove(backup)
+		if _, err := os.Stat(target); err == nil {
+			if err := os.Rename(target, backup); err != nil {
+				rollbackFiles(backups)
+				return nil, err
+			}
+			backups[target] = backup
+		}
+		if err := os.Rename(filepath.Join(stage, name), target); err != nil {
+			rollbackFiles(backups)
+			return nil, err
+		}
+		if _, existed := backups[target]; !existed {
+			backups[target] = ""
+		}
+	}
+	return backups, nil
+}
+
+func rollbackFiles(backups map[string]string) {
+	for target, backup := range backups {
+		_ = os.Remove(target)
+		if backup != "" {
+			_ = os.Rename(backup, target)
+		}
+	}
 }
 
 func runAgentCommand(args ...string) error {
-	agentExe := filepath.Join(installDir, agentBinary)
-	command := exec.Command(agentExe, args...)
-	output, err := command.CombinedOutput()
+	output, err := exec.Command(filepath.Join(installDir, agentBinary), args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%v: %w: %s", args, err, string(output))
-	}
-	if len(output) > 0 {
-		fmt.Print(string(output))
+		return fmt.Errorf("%v: %w: %s", args, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
-// stopPreviousInstallation stops the running service and kills any leftover
-// tray processes so binary files are writable again.
 func stopPreviousInstallation() {
-	_ = runAgentCommand("service", "stop")
+	if err := runAgentCommand("service", "stop"); err != nil {
+		fmt.Println("note: stopping previous service:", err)
+	}
+	_ = exec.Command("schtasks.exe", "/End", "/TN", trayTaskName).Run()
 	killProcessByName(trayBinary)
 	killProcessByName(agentBinary)
-	// Give the OS a moment to release file handles after process exit.
-	time.Sleep(2 * time.Second)
+	time.Sleep(time.Second)
 }
 
-func killProcessByName(name string) {
-	taskkill := exec.Command("taskkill", "/F", "/IM", name)
-	_ = taskkill.Run()
+func killProcessByName(name string) { _ = exec.Command("taskkill.exe", "/F", "/IM", name).Run() }
+
+var (
+	wtsapi32DLL = windows.NewLazySystemDLL("wtsapi32.dll")
+	wtsQuery    = wtsapi32DLL.NewProc("WTSQuerySessionInformationW")
+)
+
+const (
+	wtsUserName   = 5 // WTSUserName
+	wtsDomainName = 7 // WTSDomainName
+	wtsActive     = 0 // WTSActive
+)
+
+// interactiveUser returns the account owning the active console session (the
+// physical desktop user), not the elevated installer account. It prefers the
+// active console session, then falls back to enumerating every WTS session
+// for any active one with a logged-on user (covers RDS/multi-session hosts
+// where WTSGetActiveConsoleSessionId reports the services session). The
+// returned errors are static: a nil error is never wrapped.
+func interactiveUser() (string, error) {
+	if user := querySessionUser(windows.WTSGetActiveConsoleSessionId()); user != "" {
+		return user, nil
+	}
+	if user := firstActiveSessionUser(); user != "" {
+		return user, nil
+	}
+	return "", errors.New("no logged-on desktop user found in any active session")
+}
+
+func querySessionUser(sessionID uint32) string {
+	if sessionID == 0 || sessionID == ^uint32(0) {
+		return ""
+	}
+	user := querySessionString(sessionID, wtsUserName)
+	if user == "" {
+		return ""
+	}
+	domain := querySessionString(sessionID, wtsDomainName)
+	if domain != "" {
+		return domain + `\` + user
+	}
+	return user
+}
+
+func querySessionString(sessionID uint32, infoClass uintptr) string {
+	var buffer *uint16
+	var length uint32
+	result, _, _ := wtsQuery.Call(0, uintptr(sessionID), infoClass, uintptr(unsafe.Pointer(&buffer)), uintptr(unsafe.Pointer(&length)))
+	if result == 0 || buffer == nil {
+		return ""
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(buffer)))
+	return windows.UTF16PtrToString(buffer)
+}
+
+// firstActiveSessionUser scans every WTS session for an active one with a
+// logged-on user. It is the fallback when the active console session cannot
+// be resolved (elevated service contexts, disconnected console, RDS).
+func firstActiveSessionUser() string {
+	var sessions *windows.WTS_SESSION_INFO
+	var count uint32
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil || sessions == nil || count == 0 {
+		return ""
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
+	for _, session := range unsafe.Slice(sessions, count) {
+		if session.State != wtsActive {
+			continue
+		}
+		if user := querySessionUser(session.SessionID); user != "" {
+			return user
+		}
+	}
+	return ""
+}
+
+func registerTrayTask(user string) error {
+	// Run as the interactive user without storing their password: schtasks
+	// only permits /RU with a password or for the current user with /IT.
+	// The logon-trigger task under the console user's own account is
+	// created via XML to avoid credential prompts.
+	userXML := xmlEscape(user)
+	commandXML := xmlEscape(filepath.Join(installDir, trayBinary))
+	taskXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>HooshiX Agent tray auto-start at logon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>%s</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%s</Command>
+    </Exec>
+  </Actions>
+</Task>`, userXML, commandXML)
+	tempXML := filepath.Join(os.Getenv("TEMP"), "hooshix-tray-task.xml")
+	if err := os.WriteFile(tempXML, []byte(taskXML), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(tempXML)
+	args := []string{"/Create", "/F", "/TN", trayTaskName, "/XML", tempXML, "/RU", user}
+	output, err := exec.Command("schtasks.exe", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("schtasks create: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	output, err = exec.Command("schtasks.exe", "/Run", "/TN", trayTaskName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("schtasks run: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func installPairingCapability(user string) error {
+	stateDir := filepath.Join(os.Getenv("ProgramData"), "HooshiXAgent")
+	if os.Getenv("ProgramData") == "" {
+		stateDir = `C:\ProgramData\HooshiXAgent`
+	}
+	capability, err := agent.GeneratePairingCapability()
+	if err != nil {
+		return err
+	}
+	if err := agent.WritePairingCapability(stateDir, capability); err != nil {
+		return err
+	}
+	sid, _, _, err := windows.LookupSID("", user)
+	if err != nil {
+		return fmt.Errorf("resolve interactive user SID: %w", err)
+	}
+	userSID := "*" + sid.String()
+	output, err := exec.Command("icacls.exe", stateDir,
+		"/inheritance:r",
+		"/grant:r", userSID+":(OI)(CI)(RX)",
+		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
+		"/grant:r", "*S-1-5-32-544:(OI)(CI)(F)",
+		"/T", "/C").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("secure Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	path := agent.PairingCapabilityPath(stateDir)
+	output, err = exec.Command("icacls.exe", path,
+		"/inheritance:r",
+		"/grant:r", userSID+":(R)",
+		"/grant:r", "*S-1-5-18:(F)",
+		"/grant:r", "*S-1-5-32-544:(F)").CombinedOutput()
+	if err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("secure pairing capability ACL: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func xmlEscape(value string) string {
+	var escaped strings.Builder
+	_ = xml.EscapeText(&escaped, []byte(value))
+	return escaped.String()
 }
 
 func registerUninstall() error {
-	key, err := registry.OpenKey(registry.LOCAL_MACHINE, arpKeyPath, registry.ALL_ACCESS)
+	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, arpKeyPath, registry.ALL_ACCESS)
 	if err != nil {
-		key, _, err = registry.CreateKey(registry.LOCAL_MACHINE, arpKeyPath, registry.ALL_ACCESS)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	defer key.Close()
-
-	uninstallCmd := fmt.Sprintf(`"%s" --uninstall`, filepath.Join(installDir, agentBinary))
-	strings := map[string]string{
-		"DisplayName":     appTitle,
-		"DisplayVersion":  "1.0.0",
-		"Publisher":       "HooshiX",
-		"UninstallString": uninstallCmd,
-		"InstallLocation": installDir,
+	values := map[string]string{
+		"DisplayName": appTitle, "DisplayVersion": setupVersion, "Publisher": "HooshiX",
+		"UninstallString": fmt.Sprintf(`"%s" --uninstall`, filepath.Join(installDir, uninstallBinary)),
+		"InstallLocation": installDir, "DisplayIcon": filepath.Join(installDir, trayBinary),
 	}
-	for name, value := range strings {
+	for name, value := range values {
 		if err := key.SetStringValue(name, value); err != nil {
 			return err
 		}
@@ -153,15 +382,9 @@ func registerUninstall() error {
 	return key.SetDWordValue("NoRepair", 1)
 }
 
-func startTray() error {
-	trayExe := filepath.Join(installDir, trayBinary)
-	command := exec.Command(trayExe)
-	return command.Start()
-}
-
 func pause() {
-	fmt.Print("\nPress Enter to exit ...")
-	reader := bufio.NewReader(os.Stdin)
-	_, _ = reader.ReadString('\n')
-	_ = time.Second
+	if stdinInfo, err := os.Stdin.Stat(); err == nil && stdinInfo.Mode()&os.ModeCharDevice != 0 {
+		fmt.Print("\nPress Enter to exit ...")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	}
 }

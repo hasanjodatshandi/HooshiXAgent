@@ -433,6 +433,42 @@ jobs:
         shell: bash
         run: bash scripts/ci/packaging-ops.sh
 
+  windows-distribution-build:
+    name: Windows desktop distribution build (setup + tray)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go 1.27
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+
+      - name: Install rsrc resource compiler
+        shell: pwsh
+        run: go install github.com/akavel/rsrc@v0.10.2
+
+      # Guards against the shipped installer ever diverging from source
+      # again: the full setup/tray/agent distribution must build from a
+      # clean checkout with no manual resource steps.
+      - name: Build HooshiXAgent-Setup.exe distribution
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-setup.ps1
+
+      - name: Verify distribution artifacts exist
+        shell: pwsh
+        run: |
+          $dist = "${{ github.workspace }}\dist"
+          foreach ($name in @('HooshiXAgent-Setup.exe', 'hooshix-agent.exe', 'hooshix-agent-tray.exe')) {
+            $path = Join-Path $dist $name
+            if (-not (Test-Path $path)) { throw "missing distribution artifact: $name" }
+            $info = Get-Item $path
+            if ($info.Length -lt 1MB) { throw "distribution artifact suspiciously small: $name ($($info.Length) bytes)" }
+            Write-Host "$name = $($info.Length) bytes"
+          }
+
   runtime-gate:
     name: Executable runtime gate guard
     runs-on: ubuntu-latest
@@ -485,6 +521,7 @@ jobs:
       - multi-host-public-edge
       - packaging-ops
       - runtime-gate
+      - windows-distribution-build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release candidate

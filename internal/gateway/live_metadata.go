@@ -65,6 +65,12 @@ type liveMetadataGeneration struct {
 	validUntil  time.Time
 	deadline    time.Time
 	digest      [sha256.Size]byte
+	// statFingerprint is the cheap directory-stat signature the refresh
+	// loop compares before re-reading an unchanged revision: category file
+	// names, sizes, and modification times. A changed fingerprint forces
+	// the full parse+hash path; an identical fingerprint proves nothing was
+	// republished, avoiding a full re-read of up to 64 MiB every second.
+	statFingerprint [sha256.Size]byte
 }
 
 type LiveMetadata struct {
@@ -237,6 +243,22 @@ func (source *LiveMetadata) refreshAt(now time.Time) error {
 		return source.recordRefreshFailure(fmt.Errorf("metadata revision rollback rejected: candidate=%d active=%d", manifest.revision, active.revision))
 	}
 
+	// Cheap-path: when the manifest still points at the active revision,
+	// compare the generation directory's stat fingerprint (file names,
+	// sizes, mtimes) first. An identical fingerprint proves the generation
+	// content is untouched, so the refresh stays a directory walk instead
+	// of a full parse+hash of up to 64 MiB every interval.
+	if active != nil && manifest.revision == active.revision && manifest.generation == active.generation {
+		fingerprint, statErr := statGenerationFingerprint(filepath.Join(source.root, "generations", manifest.generation))
+		if statErr == nil && fingerprint == active.statFingerprint {
+			source.recordRefreshSuccess()
+			return nil
+		}
+		// A fingerprint mismatch (or stat failure) falls through to the
+		// full verification path below: republished content under the same
+		// revision must still be detected and fail closed.
+	}
+
 	snapshot, digest, err := loadLiveGeneration(filepath.Join(source.root, "generations", manifest.generation))
 	if err != nil {
 		return source.recordRefreshFailure(fmt.Errorf("load metadata generation %q: %w", manifest.generation, err))
@@ -249,14 +271,16 @@ func (source *LiveMetadata) refreshAt(now time.Time) error {
 		return nil
 	}
 
+	fingerprint, _ := statGenerationFingerprint(filepath.Join(source.root, "generations", manifest.generation))
 	candidate := &liveMetadataGeneration{
-		snapshot:    snapshot,
-		revision:    manifest.revision,
-		generation:  manifest.generation,
-		publishedAt: manifest.publishedAt,
-		validUntil:  manifest.validUntil,
-		deadline:    manifest.deadline,
-		digest:      digest,
+		snapshot:        snapshot,
+		revision:        manifest.revision,
+		generation:      manifest.generation,
+		publishedAt:     manifest.publishedAt,
+		validUntil:      manifest.validUntil,
+		deadline:        manifest.deadline,
+		digest:          digest,
+		statFingerprint: fingerprint,
 	}
 	source.active.Store(candidate)
 	source.recordRefreshSuccess()
@@ -389,6 +413,48 @@ func loadLiveGeneration(root string) (*SnapshotMetadata, [sha256.Size]byte, erro
 
 func readRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
 	return readTrustedMetadataFile(path, maxBytes)
+}
+
+// statGenerationFingerprint hashes the stat metadata (name, size, modtime)
+// of every record file in the generation directory. It is the cheap change
+// detector used by the refresh loop before falling back to a full content
+// parse+hash. A failed stat returns a zero fingerprint and an error, which
+// callers treat as "unknown — do the full verification".
+func statGenerationFingerprint(root string) ([sha256.Size]byte, error) {
+	var zero [sha256.Size]byte
+	if err := validateTrustedMetadataDirectory(root, false); err != nil {
+		return zero, err
+	}
+	hasher := sha256.New()
+	for _, category := range []string{"authorizations", "routes", "revocations"} {
+		dir := filepath.Join(root, category)
+		if err := validateTrustedMetadataDirectory(dir, false); err != nil {
+			return zero, err
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return zero, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				return zero, fmt.Errorf("unexpected metadata generation entry %s/%s", category, entry.Name())
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return zero, err
+			}
+			_, _ = io.WriteString(hasher, category)
+			_, _ = hasher.Write([]byte{0})
+			_, _ = io.WriteString(hasher, entry.Name())
+			_, _ = hasher.Write([]byte{0})
+			//nolint:gosec // size/modtime are metadata attributes, not attacker-controlled lengths
+			_, _ = fmt.Fprintf(hasher, "%d:%d", info.Size(), info.ModTime().UnixNano())
+			_, _ = hasher.Write([]byte{0})
+		}
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hasher.Sum(nil))
+	return fingerprint, nil
 }
 
 func validGenerationName(value string) bool {

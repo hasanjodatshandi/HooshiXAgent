@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -15,10 +15,18 @@ if ! command -v go >/dev/null 2>&1; then
   exit 1
 fi
 
+source "$repo_root/scripts/ci/test-guard.sh"
+
 unexpected=()
 for file in "${runnable_files[@]}"; do
   case "$file" in
     ./cmd/gateway/*.go|./cmd/agent/*.go) ;;
+    # Windows-only product executables: their runtime procedures run on
+    # windows-latest runners (build setup distribution + service/tray
+    # lifecycle), not in this Unix gate. They are allowlisted here so the
+    # gate reflects the approved executable set without weakening the
+    # Unix-side runtime assertions.
+    ./cmd/hooshix-agent-tray/*.go|./cmd/hooshix-setup/*.go) ;;
     *) unexpected+=("$file") ;;
   esac
 done
@@ -37,10 +45,10 @@ go build -o "$gateway_binary" ./cmd/gateway
 go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
-  go test -count=1 -run 'TestExternalProcessRuntimeGate|TestExecutableRefusesPlaintextStartup' ./internal/gateway
+  fail_if_no_tests ./internal/gateway -run 'TestExternalProcessRuntimeGate|TestExecutableRefusesPlaintextStartup'
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  go test -count=1 -run TestRealAgentGatewayRuntime ./tests/integration
+  fail_if_no_tests ./tests/integration -run TestRealAgentGatewayRuntime
 
 echo "Executable Runtime Gate: PASSED — real Gateway and Edge Agent processes exercised over TLS/WSS with authenticated tunnel ingress, Agent state persistence/reconnect, and plaintext-startup rejection."

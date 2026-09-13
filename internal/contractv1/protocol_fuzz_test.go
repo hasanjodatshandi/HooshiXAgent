@@ -71,6 +71,19 @@ func FuzzValidateControlPayloadStrictness(f *testing.F) {
 	f.Add(invalidUTF8, uint32(1))
 
 	f.Fuzz(func(t *testing.T, data []byte, streamID uint32) {
-		_ = ValidateControlPayload(data, streamID, fixtureTime)
+		if err := ValidateControlPayload(data, streamID, fixtureTime); err != nil {
+			return
+		}
+		// Invariant: validation must be deterministic — the same payload
+		// must validate identically on a second pass (no hidden state or
+		// time-of-check drift between the two calls at the same instant).
+		if err := ValidateControlPayload(data, streamID, fixtureTime); err != nil {
+			t.Fatalf("control payload accepted once then rejected: %v", err)
+		}
+		// Invariant: strict JSON rules mean duplicate keys must always be
+		// rejected even when the fuzz input otherwise looks valid.
+		if validateStrictJSONObject(data) != nil {
+			t.Fatal("control payload passed ValidateControlPayload but failed strict JSON validation")
+		}
 	})
 }

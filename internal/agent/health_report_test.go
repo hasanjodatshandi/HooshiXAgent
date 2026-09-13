@@ -45,7 +45,7 @@ func TestAgentHealthReportContentAndValidation(t *testing.T) {
 		streamBudget:  newAgentByteBudget(2 << 20),
 		sessionBudget: sess.queueBudget,
 	}
-	if !stream.enqueue(context.Background(), []byte("queued-frame"), time.Millisecond) {
+	if !stream.enqueue([]byte("queued-frame")) {
 		t.Fatal("test stream enqueue failed")
 	}
 	sess.mu.Lock()

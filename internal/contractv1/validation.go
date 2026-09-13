@@ -29,8 +29,9 @@ const (
 )
 
 var (
-	idPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
-	tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
+	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
+	utcTimestampPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$`)
 )
 
 type DeviceSessionAuthorization struct {
@@ -349,7 +350,7 @@ type HealthReport struct {
 	GeneratedAt     string `json:"generated_at"`
 	ActiveStreams   int    `json:"active_streams"`
 	QueuedFrames    int    `json:"queued_frames"`
-	ReconnectCount  int    `json:"reconnect_count"`
+	ReconnectCount  int64  `json:"reconnect_count"`
 	LastReconnectAt string `json:"last_reconnect_at,omitempty"`
 	AgentVersion    string `json:"agent_version,omitempty"`
 }
@@ -538,8 +539,8 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if report.QueuedFrames < 0 || report.QueuedFrames > MaxQueuedFramesBound {
 			return errors.New("health_report queued_frames outside contract bounds")
 		}
-		if report.ReconnectCount < 0 {
-			return errors.New("health_report reconnect_count must not be negative")
+		if report.ReconnectCount < 0 || report.ReconnectCount > MaxHealthReconnectCount {
+			return errors.New("health_report reconnect_count outside contract bounds")
 		}
 		if report.LastReconnectAt != "" {
 			if _, err := parseUTCTime("last_reconnect_at", report.LastReconnectAt); err != nil {
@@ -832,8 +833,8 @@ func validateRawBase64Length(name, value string, size int) error {
 }
 
 func parseUTCTime(name, value string) (time.Time, error) {
-	if !strings.HasSuffix(value, "Z") {
-		return time.Time{}, fmt.Errorf("%s must be RFC3339 UTC with Z suffix", name)
+	if !utcTimestampPattern.MatchString(value) {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339 UTC with Z suffix and optional dot-fraction", name)
 	}
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

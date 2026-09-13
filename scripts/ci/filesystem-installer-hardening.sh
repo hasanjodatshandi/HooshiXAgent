@@ -6,8 +6,11 @@ cd "$repo_root"
 
 command -v go >/dev/null 2>&1 || { echo "required RA-6 tool missing: go" >&2; exit 1; }
 
+source "$repo_root/scripts/ci/test-guard.sh"
+
 # Filesystem trust and path traversal are concurrency-sensitive. Repeat the focused
 # adversarial suite under the race detector, then preserve the existing Unix package smoke.
+fail_if_no_tests ./internal/agent ./internal/gateway -run '^TestRA6'
 go test -race -count=10 ./internal/agent ./internal/gateway -run '^TestRA6'
 bash scripts/ci/agent-install-smoke.sh
 

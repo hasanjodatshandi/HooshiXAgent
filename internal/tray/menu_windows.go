@@ -17,14 +17,14 @@ type menuHost struct {
 	window    windows.Handle
 	menu      windows.Handle
 	iconToken uint32
-	quitFlag  bool
+	taskbarCreated uint32
 }
 
 const (
 	wmTrayCallback   = 0x8000 // WM_APP
 	wmDestroy        = 0x0002
 	wmEndSession     = 0x0016
-	wmTaskbarCreated = 0x1E // "TaskbarCreated" broadcast for re-add
+	wmClose          = 0x0010
 )
 
 var (
@@ -34,7 +34,7 @@ var (
 	shellProc = shell32.NewProc("Shell_NotifyIconW")
 )
 
-// notifyIconData mirrors the fixed NOTIFYICONDATAW layout we need.
+// notifyIconData is NOTIFYICONDATAW as documented by the Windows SDK.
 type notifyIconData struct {
 	Size            uint32
 	Window          windows.Handle
@@ -43,6 +43,14 @@ type notifyIconData struct {
 	CallbackMessage uint32
 	Icon            windows.Handle
 	Tip             [128]uint16
+	State           uint32
+	StateMask       uint32
+	Info            [256]uint16
+	VersionOrTimeout uint32
+	InfoTitle       [64]uint16
+	InfoFlags       uint32
+	GUIDItem        windows.GUID
+	BalloonIcon     windows.Handle
 }
 
 const (
@@ -51,6 +59,8 @@ const (
 	nifTip     = 0x04
 	nimAdd     = 0x00
 	nimDelete  = 0x02
+	nimSetVersion = 0x04
+	notifyIconVersion4 = 4
 )
 
 var (
@@ -87,6 +97,13 @@ func newMenuHost(app *App) (*menuHost, error) {
 		return nil, fmt.Errorf("GetModuleHandle: %w", err)
 	}
 	host.instance = uintptr(instance)
+	registerWindowMessage := user32.NewProc("RegisterWindowMessageW")
+	taskbarCreatedName := syscall.StringToUTF16Ptr("TaskbarCreated")
+	taskbarCreated, _, registerErr := registerWindowMessage.Call(uintptr(unsafe.Pointer(taskbarCreatedName)))
+	if taskbarCreated == 0 {
+		return nil, fmt.Errorf("RegisterWindowMessage(TaskbarCreated): %w", registerErr)
+	}
+	host.taskbarCreated = uint32(taskbarCreated)
 
 	// Register the window class with our tray callback procedure.
 	registerClass := user32.NewProc("RegisterClassExW")
@@ -97,9 +114,9 @@ func newMenuHost(app *App) (*menuHost, error) {
 		Size:      uint32(unsafe.Sizeof(wndClassEx{})),
 		WndProc:   routine,
 		Instance:  host.instance,
-		Icon:      uintptr(loadDefaultIcon()),
+		Icon:      uintptr(loadAppIcon(host.instance)),
 		Cursor:    cursor,
-		IconSm:    uintptr(loadDefaultIcon()),
+		IconSm:    uintptr(loadAppIcon(host.instance)),
 		ClassName: uintptr(unsafe.Pointer(className)),
 	}
 	atom, _, classErr := registerClass.Call(uintptr(unsafe.Pointer(&class)))
@@ -136,6 +153,9 @@ func newMenuHost(app *App) (*menuHost, error) {
 	if err := host.notify(nimAdd); err != nil {
 		return nil, fmt.Errorf("Shell_NotifyIcon add: %w", err)
 	}
+	if err := host.setNotifyVersion(); err != nil {
+		app.logger.Warn("set tray notification version failed", "error", err)
+	}
 	return host, nil
 }
 
@@ -170,9 +190,12 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	if host == nil {
 		return 0
 	}
-	switch message {
-	case wmTaskbarCreated:
+	if message == host.taskbarCreated {
 		_ = host.notify(nimAdd)
+		_ = host.setNotifyVersion()
+		return 0
+	}
+	switch message {
 	case wmTrayCallback:
 		// Tray mouse events arrive in the LOWORD of lParam: WM_LBUTTONUP,
 		// WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_RBUTTONDBLCLK (and NIN_SELECT /
@@ -185,6 +208,12 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 		}
 	case wmDestroy:
 		_ = host.notify(nimDelete)
+		postQuitMessage()
+		return 0
+	case wmClose:
+		destroyWindow := user32.NewProc("DestroyWindow")
+		destroyWindow.Call(uintptr(window))
+		return 0
 	case wmEndSession:
 		postQuitMessage()
 		return 0
@@ -263,12 +292,19 @@ func (host *menuHost) run() error {
 		if result == 0 {
 			return nil
 		}
-		if host.quitFlag {
-			postQuitMessage()
-		}
 		translateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		dispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
 	}
+}
+
+func (host *menuHost) setNotifyVersion() error {
+	data := notifyIconData{Window: host.window, ID: host.iconToken, VersionOrTimeout: notifyIconVersion4}
+	data.Size = uint32(unsafe.Sizeof(data))
+	result, _, err := shellProc.Call(nimSetVersion, uintptr(unsafe.Pointer(&data)))
+	if result == 0 {
+		return fmt.Errorf("Shell_NotifyIcon(NIM_SETVERSION): %w", err)
+	}
+	return nil
 }
 
 func (host *menuHost) notify(op uint32) error {
@@ -277,7 +313,7 @@ func (host *menuHost) notify(op uint32) error {
 		ID:              host.iconToken,
 		Flags:           nifMessage | nifIcon | nifTip,
 		CallbackMessage: wmTrayCallback,
-		Icon:            loadDefaultIcon(),
+		Icon:            loadAppIcon(host.instance),
 	}
 	copy(data.Tip[:], syscall.StringToUTF16("HooshiX Agent"))
 	data.Size = uint32(unsafe.Sizeof(data))
@@ -293,8 +329,10 @@ func (host *menuHost) dispose() {
 }
 
 func (host *menuHost) quit() {
-	host.quitFlag = true
-	postQuitMessage()
+	postMessage := user32.NewProc("PostMessageW")
+	if result, _, err := postMessage.Call(uintptr(host.window), wmClose, 0, 0); result == 0 {
+		host.app.logger.Error("request tray shutdown failed", "error", err)
+	}
 }
 
 // refreshMenu applies state to the tray tooltip (cheap, non-blocking).
@@ -305,8 +343,11 @@ func (host *menuHost) refreshMenu(state TrayState) {
 	// balloons can be layered on later without protocol changes.
 }
 
-func loadDefaultIcon() windows.Handle {
+func loadAppIcon(instance uintptr) windows.Handle {
 	loadIcon := user32.NewProc("LoadIconW")
+	if icon, _, _ := loadIcon.Call(instance, 1); icon != 0 {
+		return windows.Handle(icon)
+	}
 	icon, _, _ := loadIcon.Call(0, 32512) // IDI_APPLICATION
 	return windows.Handle(icon)
 }

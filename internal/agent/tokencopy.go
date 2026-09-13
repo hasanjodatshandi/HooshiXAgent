@@ -6,18 +6,29 @@ import (
 	"path/filepath"
 )
 
-// WriteTokenCopy writes the user-facing token.txt record in the state
-// directory. The live credential stays in the platform secret store; this
-// copy exists so the user has a durable record of the issued token exactly
-// like the documented CLI workflow.
-func WriteTokenCopy(stateDir string, token string) error {
+// RemoveTokenCopy deletes any legacy plaintext token.txt record from the
+// state directory. The live credential stays only in the platform secret
+// store; the plaintext convenience copy is no longer written and must be
+// removed on load so old installations do not keep exposing the session
+// token to every local user with inherited read access.
+func RemoveTokenCopy(stateDir string) error {
 	normalized, err := NormalizeStateDir(stateDir)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(normalized, "token.txt")
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write token.txt: %w", err)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect token.txt: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to remove unsafe token.txt path")
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove token.txt: %w", err)
 	}
 	return nil
 }

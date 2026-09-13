@@ -170,12 +170,12 @@ func (sup *Supervisor) WriteStatusFile() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(sup.opts.StatusDir, 0o755); err != nil {
+	if err := os.MkdirAll(sup.opts.StatusDir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(sup.opts.StatusDir, "status.json")
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

@@ -459,6 +459,10 @@ func (runner *Runner) runOnceWithDialer(ctx context.Context, config Config, dial
 		return permanentAgentFailure(err)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// The LocalSystem tunnel must not be silently redirected by inherited
+	// process proxy variables. Proxy support requires an explicit future
+	// configuration surface and threat model.
+	transport.Proxy = nil
 	transport.TLSClientConfig = tlsConfig
 	transport.TLSHandshakeTimeout = runner.limits.HandshakeTimeout
 	transport.ResponseHeaderTimeout = runner.limits.HandshakeTimeout

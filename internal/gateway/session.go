@@ -36,6 +36,13 @@ type session struct {
 	reconnected atomic.Bool   // session replaced a previous live session
 	pendingPing atomic.Value  // pendingPing{id, sentAt} of the last outbound ping
 
+	// resumeArmed enforces one-shot replay protection for resume_session:
+	// an accepted resume must be explicitly rearmed by the authenticated
+	// transport before another resume is allowed on this session identity.
+	// A replayed (captured) resume frame can therefore never replace the
+	// live connection a second time.
+	resumeArmed atomic.Bool
+
 	controlWrites              chan sessionWriteRequest
 	dataWrites                 chan sessionWriteRequest
 	writeMessage               func(context.Context, []byte) error
@@ -84,6 +91,9 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	sess.outbound.Store(lastOutbound)
 	sess.lastSeen.Store(time.Now().UnixNano())
 	sess.authorized.Store(true)
+	// A fresh full handshake arms the one-shot resume slot for this new
+	// session identity.
+	sess.resumeArmed.Store(true)
 	go sess.writeLoop()
 	return sess
 }
@@ -128,6 +138,10 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 	resumed.outbound.Store(0)
 	resumed.lastSeen.Store(time.Now().UnixNano())
 	resumed.authorized.Store(true)
+	// The fresh transport may itself be resumed later (a later network
+	// drop must not lock the device out of the fast path), so the resumed
+	// session starts armed for exactly one future resume.
+	resumed.resumeArmed.Store(true)
 	go resumed.writeLoop()
 	return resumed
 }
@@ -398,13 +412,12 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
-	// Bounded aggregate tunnel-byte telemetry: Agent→Gateway data frames.
-	sess.agentBytes.Add(uint64(len(frame.Payload)))
 	if err := stream.enqueue(frame.Payload); err != nil {
 		sess.gateway.logger.Warn("stream enqueue rejected", "stream_id", frame.StreamID, "bytes", len(frame.Payload), "error", err)
 		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
 		return nil
 	}
+	sess.gateway.resources.agentBytes.Add(uint64(len(frame.Payload)))
 	return nil
 }
 
@@ -499,8 +512,6 @@ func (sess *session) failAll(err error) {
 }
 
 func (sess *session) sendBytes(ctx context.Context, streamID uint32, payload []byte) error {
-	// Bounded aggregate tunnel-byte telemetry: Gateway→Agent data frames.
-	sess.publicBytes.Add(uint64(len(payload)))
 	for len(payload) > 0 {
 		size := len(payload)
 		if size > contractv1.MaxDataPayload {
@@ -546,6 +557,23 @@ func (sess *session) sendFrame(parent context.Context, kind contractv1.Kind, str
 		return ctx.Err()
 	case <-sess.done:
 		return errSessionWriterClosed
+	}
+	if kind == contractv1.KindData {
+		// Once accepted by the writer queue, data owns its place before the
+		// caller can emit a terminal control frame. The writer applies its own
+		// bounded deadline, so waiting here cannot silently reorder close/error
+		// ahead of an accepted body chunk.
+		select {
+		case err := <-request.result:
+			return err
+		case <-sess.done:
+			select {
+			case err := <-request.result:
+				return err
+			default:
+			}
+			return errSessionWriterClosed
+		}
 	}
 	select {
 	case err := <-request.result:
@@ -613,11 +641,9 @@ func (sess *session) writeLoop() {
 }
 
 func (sess *session) writeQueued(request sessionWriteRequest) {
-	// Tunnel data frames (the tunneled request body) must never be dropped
-	// due to an expired enqueue deadline: a dropped chunk silently
-	// truncates the request the Agent forwards to the local target. Only
-	// control frames may be abandoned on deadline; data is written under a
-	// fresh bounded write deadline as long as the session is healthy.
+	// Accepted tunnel data must never be dropped because its enqueue caller
+	// timed out: doing so silently truncates the tunneled request body. Control
+	// frames can still be abandoned when their caller no longer needs them.
 	if err := request.ctx.Err(); err != nil && request.kind != contractv1.KindData {
 		request.result <- err
 		return
@@ -637,22 +663,18 @@ func (sess *session) writeQueued(request sessionWriteRequest) {
 	sess.outbound.Store(sequence)
 	writeCtx := request.ctx
 	if request.kind == contractv1.KindData {
-		writeCtx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
 		defer cancel()
-		if err := sess.writeMessage(writeCtx, frame); err != nil {
-			request.result <- err
-			sess.failAll(err)
-			sess.close(websocket.StatusInternalError, "protocol write failed")
-			return
-		}
-		request.result <- nil
-		return
 	}
 	if err := sess.writeMessage(writeCtx, frame); err != nil {
 		request.result <- err
 		sess.failAll(err)
 		sess.close(websocket.StatusInternalError, "protocol write failed")
 		return
+	}
+	if request.kind == contractv1.KindData {
+		sess.gateway.resources.publicBytes.Add(uint64(len(request.payload)))
 	}
 	request.result <- nil
 }

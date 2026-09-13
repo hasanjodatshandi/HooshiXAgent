@@ -52,12 +52,33 @@ function Assert-SafePurgeDirectory([string]$Path) {
 if ($PurgeState) { Assert-SafePurgeDirectory $StateDir }
 
 if (-not $NoPersistence) {
-    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
+    try {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        # Wait for the process to actually exit: a slow/stuck stop would
+        # leave the binary locked, and silently swallowing removal failures
+        # would report success while files remain.
+        $waited = 0
+        while ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).State -eq 'Running' -and $waited -lt 15) {
+            Start-Sleep -Milliseconds 500
+            $waited++
+        }
+        if ($waited -ge 15) {
+            Write-Warning 'Agent scheduled task did not stop within the bounded wait; continuing best-effort.'
+        }
+    } catch {}
     try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 }
 
-Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $Target
-Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $Previous
+# Remove with verification: report failures instead of claiming success
+# while locked files remain installed.
+foreach ($file in @($Target, $Previous)) {
+    if (Test-Path -LiteralPath $file) {
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $file
+        if (Test-Path -LiteralPath $file) {
+            throw "uninstall incomplete: could not remove $file (still locked by a running process?)"
+        }
+    }
+}
 if ($PurgeState -and (Test-Path -LiteralPath $StateDir)) {
     Remove-Item -Recurse -Force -LiteralPath $StateDir
 }

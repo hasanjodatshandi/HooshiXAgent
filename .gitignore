@@ -7,3 +7,8 @@
 /deploy/gateway/runtime/
 dist/
 cmd/hooshix-setup/payload/
+/hooshix-agent-tray.exe
+/hooshix-setup.exe
+/cmd/hooshix-agent-tray/hooshix.ico
+/cmd/hooshix-agent-tray/rsrc_windows_*.syso
+/cmd/hooshix-setup/rsrc_windows_*.syso

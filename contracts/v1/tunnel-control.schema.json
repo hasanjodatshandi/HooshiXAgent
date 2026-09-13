@@ -36,6 +36,12 @@
       "maxLength": 86,
       "pattern": "^[A-Za-z0-9_-]{86}$"
     },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 35,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    },
     "base": {
       "type": "object",
       "required": ["contract_version", "message_type"],
@@ -71,7 +77,7 @@
         "message_type": { "const": "server_challenge" },
         "session_id": { "$ref": "#/$defs/id" },
         "server_nonce": { "$ref": "#/$defs/nonce32" },
-        "expires_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+        "expires_at": { "$ref": "#/$defs/timestamp" }
       },
       "additionalProperties": false
     },
@@ -105,7 +111,7 @@
         "contract_version": { "const": 1 },
         "message_type": { "const": "ping" },
         "ping_id": { "$ref": "#/$defs/id" },
-        "sent_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+        "sent_at": { "$ref": "#/$defs/timestamp" }
       },
       "additionalProperties": false
     },
@@ -116,7 +122,7 @@
         "contract_version": { "const": 1 },
         "message_type": { "const": "pong" },
         "ping_id": { "$ref": "#/$defs/id" },
-        "received_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+        "received_at": { "$ref": "#/$defs/timestamp" }
       },
       "additionalProperties": false
     },
@@ -127,11 +133,11 @@
         "contract_version": { "const": 1 },
         "message_type": { "const": "health_report" },
         "report_id": { "$ref": "#/$defs/id" },
-        "generated_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
         "active_streams": { "type": "integer", "minimum": 0, "maximum": 4096 },
         "queued_frames": { "type": "integer", "minimum": 0, "maximum": 65536 },
-        "reconnect_count": { "type": "integer", "minimum": 0 },
-        "last_reconnect_at": { "type": "string", "format": "date-time", "maxLength": 35 },
+        "reconnect_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "last_reconnect_at": { "$ref": "#/$defs/timestamp" },
         "agent_version": { "type": "string", "maxLength": 64 }
       },
       "additionalProperties": false
@@ -204,8 +210,8 @@
         "contract_version": { "const": 1 },
         "message_type": { "const": "session_resumed" },
         "session_id": { "$ref": "#/$defs/id" },
-        "next_sequence": { "type": "integer", "minimum": 1 },
-        "resumed_at": { "type": "string", "format": "date-time", "maxLength": 35 }
+        "next_sequence": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+        "resumed_at": { "$ref": "#/$defs/timestamp" }
       },
       "additionalProperties": false
     }

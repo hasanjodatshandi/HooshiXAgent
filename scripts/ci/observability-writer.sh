@@ -6,7 +6,16 @@ cd "$repo_root"
 
 command -v go >/dev/null 2>&1 || { echo "required R-8 tool missing: go" >&2; exit 1; }
 
-go test -count=1 ./internal/gateway ./internal/agent \
+fail_if_no_tests() {
+  local output
+  output="$(go test -count=1 -v "$@" 2>&1 | tee /dev/stderr)"
+  if ! grep -q -- '=== RUN ' <<<"$output"; then
+    echo "focused gate matched zero tests: $*" >&2
+    exit 1
+  fi
+}
+
+fail_if_no_tests ./internal/gateway ./internal/agent \
   -run 'Test(StatusExporterBackpressureDoesNotBlockCriticalCaller|StatusExporterAccountsFailures|GatewayWriterPrioritizesControlAndPreservesSingleWriter|AgentWriterPrioritizesControlAndPreservesSingleWriter|OperationalReadinessAndMetrics)$'
 
 go test -race -count=10 ./internal/gateway ./internal/agent \

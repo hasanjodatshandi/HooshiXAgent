@@ -28,6 +28,8 @@ type agentSession struct {
 
 	inbound       contractv1.SequenceTracker
 	outbound      atomic.Uint64
+	writeMu       sync.Mutex
+	nextWrite     uint64
 	controlWrites chan agentWriteRequest
 	dataWrites    chan agentWriteRequest
 	writeMessage  func(context.Context, []byte) error
@@ -42,7 +44,7 @@ type agentSession struct {
 	// healthMu guards the health-report bookkeeping used by the periodic
 	// agent→gateway health_report control message.
 	healthMu       sync.Mutex
-	reconnectCount int
+	reconnectCount int64
 	lastReconnect  time.Time
 }
 
@@ -358,54 +360,32 @@ func (sess *agentSession) handleData(parent context.Context, frame contractv1.Fr
 		}
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
-	if !stream.enqueue(parent, frame.Payload, sess.limits.WriteTimeout) {
+	if !stream.enqueue(frame.Payload) {
 		_ = sess.sendStreamTerminalError(stream, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
 		sess.finishStream(frame.StreamID)
 	}
 	return nil
 }
 
-func (stream *agentStream) enqueue(parent context.Context, data []byte, wait time.Duration) bool {
+func (stream *agentStream) enqueue(data []byte) bool {
 	size := int64(len(data))
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	for {
-		stream.queueMu.Lock()
-		if stream.closed {
-			stream.queueMu.Unlock()
-			return false
-		}
-		reservedStream := stream.streamBudget.TryAcquire(size)
-		reservedSession := false
-		if reservedStream {
-			reservedSession = stream.sessionBudget.TryAcquire(size)
-		}
-		if reservedStream && reservedSession {
-			queued := agentQueuedPayload{Data: append([]byte(nil), data...), Size: size}
-			select {
-			case stream.incoming <- queued:
-				stream.queueMu.Unlock()
-				return true
-			default:
-				stream.sessionBudget.Release(size)
-				stream.streamBudget.Release(size)
-			}
-		} else {
-			if reservedStream {
-				stream.streamBudget.Release(size)
-			}
-		}
-		stream.queueMu.Unlock()
-
-		select {
-		case <-parent.Done():
-			return false
-		case <-stream.ctx.Done():
-			return false
-		case <-timer.C:
-			return false
-		case <-stream.space:
-		}
+	stream.queueMu.Lock()
+	defer stream.queueMu.Unlock()
+	if stream.closed || !stream.streamBudget.TryAcquire(size) {
+		return false
+	}
+	if !stream.sessionBudget.TryAcquire(size) {
+		stream.streamBudget.Release(size)
+		return false
+	}
+	queued := agentQueuedPayload{Data: append([]byte(nil), data...), Size: size}
+	select {
+	case stream.incoming <- queued:
+		return true
+	default:
+		stream.sessionBudget.Release(size)
+		stream.streamBudget.Release(size)
+		return false
 	}
 }
 
@@ -456,9 +436,11 @@ func (sess *agentSession) serveStream(stream *agentStream) {
 	buffer := make([]byte, 32*1024)
 	sent := 0
 	chunks := 0
+	var localReadErr error
 readLoop:
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(sess.limits.IdleTimeout)); err != nil {
+			localReadErr = err
 			break
 		}
 		n, readErr := conn.Read(buffer)
@@ -472,6 +454,7 @@ readLoop:
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
+				localReadErr = readErr
 				sess.logger.Debug("local stream read ended", "stream_id", stream.id, "error", readErr)
 			}
 			break
@@ -490,7 +473,18 @@ readLoop:
 	case <-time.After(sess.limits.WriteTimeout):
 	}
 	if !peerClosed {
-		_ = sess.sendStreamTerminalClose(stream, "completed")
+		if localReadErr == nil {
+			_ = sess.sendStreamTerminalClose(stream, "completed")
+		} else {
+			code := "local_target_read_error"
+			message := "approved local target read failed"
+			var networkError net.Error
+			if errors.As(localReadErr, &networkError) && networkError.Timeout() {
+				code = "local_target_timeout"
+				message = "approved local target read timed out"
+			}
+			_ = sess.sendStreamTerminalError(stream, code, message, true)
+		}
 	}
 	sess.logger.Debug("stream finished", "stream_id", stream.id, "peer_closed", peerClosed, "bytes_sent", sent, "chunks", chunks)
 	sess.finishStream(stream.id)
@@ -578,6 +572,7 @@ type agentWriteRequest struct {
 	streamID uint32
 	payload  []byte
 	result   chan error
+	order    uint64
 }
 
 var errAgentWriterClosed = errors.New("agent session writer closed")
@@ -590,11 +585,17 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 	if kind == contractv1.KindControl {
 		queue = sess.controlWrites
 	}
+	sess.writeMu.Lock()
+	sess.nextWrite++
+	request.order = sess.nextWrite
 	select {
 	case queue <- request:
+		sess.writeMu.Unlock()
 	case <-ctx.Done():
+		sess.writeMu.Unlock()
 		return ctx.Err()
 	case <-sess.closed:
+		sess.writeMu.Unlock()
 		return errAgentWriterClosed
 	}
 	select {
@@ -643,21 +644,29 @@ func (sess *agentSession) writeLoop() {
 			case request := <-sess.dataWrites:
 				pending = append(pending, request)
 			}
-		} else {
-			// Opportunistic batch: pull whatever is already queued (control
-			// first is fine here — both are already behind the FIFO head).
+		}
+		// Drain both bounded queues before choosing the oldest accepted
+		// request. This preserves cross-queue enqueue order while retaining
+		// separate capacity for control traffic.
+		for {
 			select {
 			case request := <-sess.controlWrites:
 				pending = append(pending, request)
-				continue
 			case request := <-sess.dataWrites:
 				pending = append(pending, request)
-				continue
 			default:
+				goto drained
 			}
 		}
-		request := pending[0]
-		pending = pending[1:]
+	drained:
+		oldest := 0
+		for i := 1; i < len(pending); i++ {
+			if pending[i].order < pending[oldest].order {
+				oldest = i
+			}
+		}
+		request := pending[oldest]
+		pending = append(pending[:oldest], pending[oldest+1:]...)
 		sess.writeQueued(request)
 	}
 }

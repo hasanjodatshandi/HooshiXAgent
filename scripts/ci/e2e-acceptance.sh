@@ -9,6 +9,8 @@ if ! command -v go >/dev/null 2>&1; then
   exit 1
 fi
 
+source "$repo_root/scripts/ci/test-guard.sh"
+
 runtime_dir="$(mktemp -d)"
 trap 'rm -rf "$runtime_dir"' EXIT
 
@@ -20,6 +22,6 @@ go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  go test -count=1 -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives' ./tests/integration
+  fail_if_no_tests ./tests/integration -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives'
 
 echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, large-body streaming, authorization-expiry fail-closed behavior, offline/error behavior and security negatives were exercised."

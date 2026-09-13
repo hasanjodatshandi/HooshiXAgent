@@ -116,14 +116,11 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	gateway.mu.RUnlock()
 
 	activeStreams := 0
-	var agentBytesTotal, publicBytesTotal uint64
 	var latencyNanos int64 = -1
 	for _, sess := range sessions {
 		sess.mu.Lock()
 		activeStreams += len(sess.streams)
 		sess.mu.Unlock()
-		agentBytesTotal += sess.agentBytes.Load()
-		publicBytesTotal += sess.publicBytes.Load()
 		if observed := sess.pingLatency.Load(); observed > 0 && (latencyNanos < 0 || observed < latencyNanos) {
 			latencyNanos = observed
 		}
@@ -174,10 +171,14 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_health_reports_total counter\nhooshix_gateway_health_reports_total %d\n", gateway.resources.healthReports.Load())
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_reconnects_total Total authenticated Agent reconnects that replaced a live session (full handshake or resume).\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_reconnects_total counter\nhooshix_gateway_reconnects_total %d\n", gateway.resources.reconnects.Load())
+	// Byte counters are process-lifetime monotonic (Prometheus `_total`
+	// contract): the gateway-level accumulators are authoritative and never
+	// decrease when sessions disconnect. Live-session accumulation would
+	// reset on every resume/replacement and break rate/alert correctness.
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_tunnel_bytes_from_agents_total Total protocol data-frame bytes received from Agents.\n")
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_from_agents_total counter\nhooshix_gateway_tunnel_bytes_from_agents_total %d\n", agentBytesTotal)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_from_agents_total counter\nhooshix_gateway_tunnel_bytes_from_agents_total %d\n", gateway.resources.agentBytes.Load())
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_tunnel_bytes_to_agents_total Total protocol data-frame bytes sent toward Agents.\n")
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_to_agents_total counter\nhooshix_gateway_tunnel_bytes_to_agents_total %d\n", publicBytesTotal)
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_tunnel_bytes_to_agents_total counter\nhooshix_gateway_tunnel_bytes_to_agents_total %d\n", gateway.resources.publicBytes.Load())
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_session_latency_ms Best observed heartbeat round-trip across live sessions in milliseconds; -1 while no pong has completed.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_latency_ms gauge\n")
 	if latencyNanos >= 0 {
@@ -405,6 +406,13 @@ func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn,
 	if existing == nil || !existing.authorized.Load() {
 		return nil, errResumeUnavailable
 	}
+	// One-shot replay protection: consume the armed resume slot before any
+	// further validation. A replayed/captured resume_session frame can never
+	// replace the live connection a second time; the slot is rearmed only
+	// when this resume succeeds (see resumeInto) or on a fresh handshake.
+	if !existing.resumeArmed.CompareAndSwap(true, false) {
+		return nil, errResumeUnavailable
+	}
 	if existing.deviceID != resume.DeviceID || existing.authorizationID != resume.AuthorizationID || existing.tokenID != resume.TokenID {
 		return nil, errors.New("resume subject mismatch")
 	}
@@ -414,16 +422,26 @@ func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn,
 	record, err := gateway.metadata.Authorization(ctx, resume.AuthorizationID, resume.DeviceID, resume.TokenID, time.Now().UTC())
 	if err != nil {
 		// Authorization lookup failures are authoritative rejections for a
-		// resume attempt: a resume may never bypass fresh validation.
+		// resume attempt: a resume may never bypass fresh validation. The
+		// consumed resume slot is returned so a transient metadata outage
+		// does not lock the legitimate Agent out of the fast path.
+		existing.resumeArmed.Store(true)
 		return nil, fmt.Errorf("resume authorization lookup: %w", err)
 	}
 	if record.AuthorizationID != resume.AuthorizationID || record.DeviceID != resume.DeviceID || record.TokenID != resume.TokenID {
+		existing.resumeArmed.Store(true)
 		return nil, errors.New("resume authorization mismatch")
 	}
 	if record.Disabled {
+		existing.resumeArmed.Store(true)
 		return nil, errors.New("resume authorization disabled")
 	}
 	if err := contractv1.VerifyResumeSignature(record.DevicePublicKey, resume); err != nil {
+		// A failed signature does not burn the legitimate resume slot: the
+		// real Agent may still be trying to reconnect while an attacker is
+		// probing with garbage signatures. Signature verification failure is
+		// therefore not treated as a consumed attempt.
+		existing.resumeArmed.Store(true)
 		return nil, err
 	}
 
@@ -547,7 +565,11 @@ func (gateway *Gateway) registerSession(sess *session) error {
 	}
 	isReconnect := replaced != nil && replaced != sess
 	isNewTunnel := !hasReplaced
-	if primary == nil && len(deviceTunnels) == 0 && totalSessions >= gateway.limits.MaxAgentSessions {
+	if isNewTunnel && totalSessions >= gateway.limits.MaxAgentSessions {
+		// The global capacity bound applies to every new tunnel: a device
+		// that already owns tunnels must not bypass the session ceiling by
+		// adding standby capacity (the effective limit would otherwise grow
+		// to MaxAgentSessions * MaxTunnelsPerDevice).
 		gateway.resources.sessionRejects.Add(1)
 		gateway.mu.Unlock()
 		return errors.New("agent session capacity reached")

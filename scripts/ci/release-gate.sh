@@ -11,6 +11,8 @@ for tool in go sha256sum tar unzip zip; do
   fi
 done
 
+source "$repo_root/scripts/ci/test-guard.sh"
+
 # Final scope lock: release acceptance must not silently introduce the external Control Panel.
 if find . -type d \( -name control-panel -o -name control_panel -o -name controlplane -o -name control-plane -o -name tenants -o -name users -o -name quotas -o -name billing -o -name migrations \) -not -path './.git/*' | grep -q .; then
   echo "AG-8 release gate found an out-of-scope implementation directory" >&2
@@ -18,13 +20,13 @@ if find . -type d \( -name control-panel -o -name control_panel -o -name control
 fi
 
 # Agent SSRF/local-target, secret storage, argument/token and update candidate security.
-go test -count=1 ./internal/agent -run 'Test(LocalTargetPolicy|ReleaseLocalTargetPolicyAdversarialCases|IdentityPersistsAndSecretStateIsProtected|SecretStoreRejectsUnsafePermissionsAndSymlink|CLIStatusDoesNotLeakSecrets|GatewayURLValidation|UpdateFoundationValidation|ReleaseUpdateCandidateFailsClosed)$'
+fail_if_no_tests ./internal/agent -run 'Test(LocalTargetPolicy|ReleaseLocalTargetPolicyAdversarialCases|IdentityPersistsAndSecretStateIsProtected|SecretStoreRejectsUnsafePermissionsAndSymlink|CLIStatusDoesNotLeakSecrets|GatewayURLValidation|UpdateFoundationValidation|ReleaseUpdateCandidateFailsClosed)$'
 
 # Language-neutral frame/control strictness, replay resistance, wrap rejection, raw-target rejection and strict schemas.
-go test -count=1 ./internal/contractv1 -run 'Test(FrameRejectsMalformedAndOversizedInput|SequenceTrackerRejectsReplayAndReordering|SequenceTrackerRequiresFirstSequenceOneAndRejectsWrap|ProtocolSequenceGapRejected|ProtocolInvalidUTF8Rejected|ProtocolDuplicateJSONKeysRejected|StrictJSONRejectsNestedAndEscapedDuplicateKeys|ExternalContractRejectsExpiredAuthorizationAndRawLocalTarget|ControlPayloadScopeAndStrictness|LanguageNeutralSchemaRejectsRawLocalTarget)$'
+fail_if_no_tests ./internal/contractv1 -run 'Test(FrameRejectsMalformedAndOversizedInput|SequenceTrackerRejectsReplayAndReordering|SequenceTrackerRequiresFirstSequenceOneAndRejectsWrap|ProtocolSequenceGapRejected|ProtocolInvalidUTF8Rejected|ProtocolDuplicateJSONKeysRejected|StrictJSONRejectsNestedAndEscapedDuplicateKeys|ExternalContractRejectsExpiredAuthorizationAndRawLocalTarget|ControlPayloadScopeAndStrictness|LanguageNeutralSchemaRejectsRawLocalTarget)$'
 
 # Gateway auth/TLS/replay, exact sequence/control parsing, request/stream limits, malformed protocol and pending-handshake exhaustion.
-go test -count=1 ./internal/gateway -run 'Test(GatewayRejectsUntrustedTLSInvalidTokenAndReplay|GatewayRejectsAuthenticatedProtocolStrictnessViolations|GatewaySequenceExhaustionTerminatesSession|GatewayRequestAndStreamLimits|GatewayRejectsMalformedProtocolAndHandshakeExhaustion)$'
+fail_if_no_tests ./internal/gateway -run 'Test(GatewayRejectsUntrustedTLSInvalidTokenAndReplay|GatewayRejectsAuthenticatedProtocolStrictnessViolations|GatewaySequenceExhaustionTerminatesSession|GatewayRequestAndStreamLimits|GatewayRejectsMalformedProtocolAndHandshakeExhaustion)$'
 
 # R-2 strict protocol gate includes authenticated negatives plus bounded fuzz smoke.
 bash scripts/ci/protocol-strictness.sh
@@ -76,7 +78,7 @@ go build -o "$work/bin/hooshix-agent" ./cmd/agent
 go build -o "$work/bin/hooshix-gateway" ./cmd/gateway
 HOOSHIX_AGENT_BINARY="$work/bin/hooshix-agent" \
 HOOSHIX_GATEWAY_BINARY="$work/bin/hooshix-gateway" \
-  go test -count=1 -timeout=60s ./tests/integration -run '^TestNetworkInterruptionAndColdRestartRecovery$'
+  fail_if_no_tests ./tests/integration -run '^TestNetworkInterruptionAndColdRestartRecovery$' -timeout=60s
 
 # Build the exact release artifact shapes and verify the manifest before any tamper test.
 bash scripts/release/build-release.sh v0.0.0-ag8 "$work/release"

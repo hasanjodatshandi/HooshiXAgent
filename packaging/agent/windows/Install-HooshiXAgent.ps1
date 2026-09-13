@@ -99,6 +99,20 @@ Ensure-SafeDirectory 'Agent state' $StateDir
 
 function Restart-HooshiXPersistence {
     if ($NoPersistence) { return }
+    # Stop the running task (if any) and wait for the process to exit so the
+    # replacement binary actually starts; a running task ignores
+    # Start-ScheduledTask and would keep the old in-memory version alive.
+    try {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $waited = 0
+        while ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).State -eq 'Running' -and $waited -lt 15) {
+            Start-Sleep -Milliseconds 500
+            $waited++
+        }
+    }
+    catch [System.Management.Automation.ActionPreferenceStopException] {
+        # First install: the task does not exist yet.
+    }
     $Action = New-ScheduledTaskAction -Execute $Target -Argument ('run --state-dir "{0}"' -f $StateDir)
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $Principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited

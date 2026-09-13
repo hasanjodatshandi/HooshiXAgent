@@ -71,9 +71,11 @@ openssl x509 -req -sha256 -days 397 \
   -out "$gateway_cert" >/dev/null 2>&1
 
 rm -f "$gateway_csr" "$ext_file" "$tls_dir/ca.srl"
-chmod 600 "$ca_key"
-# Parent directory is 0700; runtime containers receive only explicitly mounted files.
-chmod 644 "$ca_cert" "$gateway_cert" "$gateway_key"
+chmod 600 "$ca_key" "$gateway_key"
+# Certificates are public; private keys stay owner-only even though the
+# parent directory is 0700, so one ACL mistake on the host directory cannot
+# expose the deployment CA or the gateway TLS key.
+chmod 644 "$ca_cert" "$gateway_cert"
 
 echo "Gateway internal TLS initialized at $tls_dir"
 echo "Keep $ca_key private; it is not mounted into runtime containers."

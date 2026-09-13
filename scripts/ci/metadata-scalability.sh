@@ -8,7 +8,9 @@ for tool in go; do
   command -v "$tool" >/dev/null 2>&1 || { echo "required R-7 tool missing: $tool" >&2; exit 1; }
 done
 
-go test -count=1 ./internal/contractv1 ./internal/gateway \
+source "$repo_root/scripts/ci/test-guard.sh"
+
+fail_if_no_tests ./internal/contractv1 ./internal/gateway \
   -run 'Test(SnapshotDirectoryRejectsDuplicateAuthorizationIDs|SnapshotDirectoryRejectsCanonicalDuplicateHostRoutes|SnapshotMetadataRejectsMalformedAndDuplicateJSONMembers|SnapshotMetadataParsesStaticRecordsButEvaluatesTimeAtUse|SnapshotMetadataRevocationIndexEvaluatesEffectiveTimeAtUse|SnapshotMetadataRevocationIndexCollapsesEventsPerSubject|GatewayReadinessFailsClosedForUnusableSnapshot|OperationalReadinessAndMetrics)$'
 
 go test ./internal/gateway -run '^$' \

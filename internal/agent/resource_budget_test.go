@@ -39,10 +39,10 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 		streamBudget:  newAgentByteBudget(8),
 		sessionBudget: sessionBudget,
 	}
-	if !first.enqueue(context.Background(), bytes.Repeat([]byte{'a'}, 8), time.Millisecond) {
+	if !first.enqueue(bytes.Repeat([]byte{'a'}, 8)) {
 		t.Fatal("initial Agent queue reservation failed")
 	}
-	if second.enqueue(context.Background(), bytes.Repeat([]byte{'b'}, 5), time.Millisecond) {
+	if second.enqueue(bytes.Repeat([]byte{'b'}, 5)) {
 		t.Fatal("Agent session queue budget allowed overcommit")
 	}
 	if sessionBudget.Used() != 8 {
@@ -53,7 +53,7 @@ func TestAgentQueueBudgetsBoundPerStreamAndSession(t *testing.T) {
 	if sessionBudget.Used() != 0 {
 		t.Fatal("Agent dequeue did not release session byte budget")
 	}
-	if !second.enqueue(context.Background(), bytes.Repeat([]byte{'c'}, 5), time.Millisecond) {
+	if !second.enqueue(bytes.Repeat([]byte{'c'}, 5)) {
 		t.Fatal("Agent queue did not recover after release")
 	}
 	second.finishStream()
@@ -76,10 +76,10 @@ func TestAgentQueueFrameLimitDoesNotLeakBytes(t *testing.T) {
 		streamBudget:  newAgentByteBudget(64),
 		sessionBudget: sessionBudget,
 	}
-	if !stream.enqueue(context.Background(), []byte("first"), time.Millisecond) {
+	if !stream.enqueue([]byte("first")) {
 		t.Fatal("initial Agent frame enqueue failed")
 	}
-	if stream.enqueue(context.Background(), []byte("second"), time.Millisecond) {
+	if stream.enqueue([]byte("second")) {
 		t.Fatal("Agent frame queue over-capacity succeeded")
 	}
 	if got := sessionBudget.Used(); got != int64(len("first")) {
@@ -104,27 +104,29 @@ func TestAgentQueueBackpressureAllowsBoundedStreaming(t *testing.T) {
 		streamBudget:  newAgentByteBudget(64),
 		sessionBudget: sessionBudget,
 	}
-	if !stream.enqueue(context.Background(), []byte("first"), time.Second) {
+	if !stream.enqueue([]byte("first")) {
 		t.Fatal("initial frame enqueue failed")
 	}
-	result := make(chan bool, 1)
+	// A full per-stream queue must reject immediately (non-blocking): the
+	// single session reader must never stall behind a slow local target.
+	rejected := make(chan bool, 1)
 	go func() {
-		result <- stream.enqueue(context.Background(), []byte("second"), time.Second)
+		rejected <- stream.enqueue([]byte("second"))
 	}()
 	select {
-	case <-result:
-		t.Fatal("backpressured enqueue completed before queue space was released")
-	case <-time.After(25 * time.Millisecond):
+	case ok := <-rejected:
+		if ok {
+			t.Fatal("full stream queue accepted another frame")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enqueue against a full queue blocked the caller")
 	}
 	queued := <-stream.incoming
 	stream.releaseQueued(queued.Size)
-	select {
-	case ok := <-result:
-		if !ok {
-			t.Fatal("backpressured enqueue did not resume after queue space release")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("backpressured enqueue remained blocked after queue space release")
+	// After the local reader dequeues and releases the budget, enqueueing
+	// resumes without recreating the stream.
+	if !stream.enqueue([]byte("second")) {
+		t.Fatal("enqueue did not resume after queue space release")
 	}
 	stream.finishStream()
 	if sessionBudget.Used() != 0 {

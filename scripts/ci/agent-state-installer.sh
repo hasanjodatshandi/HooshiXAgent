@@ -8,6 +8,10 @@ for tool in go openssl python3 zip; do
   command -v "$tool" >/dev/null 2>&1 || { echo "required R-9 tool missing: $tool" >&2; exit 1; }
 done
 
+source "$repo_root/scripts/ci/test-guard.sh"
+
+fail_if_no_tests ./internal/agent \
+  -run 'Test(LoadConfigRejectsTrailingJSONData|ConfigFileSymlinkRejected|SecretStateRejectsTrailingAndUnknownJSON|StateMarkerAdoptsLegacyKnownStateFiles|ConcurrentConfigMutationPreservesEveryEndpoint|StateDirectorySafetyRejectsRootHomeAndSymlinks|StateDirectoryOwnershipRejectsUnrelatedNonEmptyDirectory|ConfigLockRejectsUnsafeLockObject|EntropyFailuresReturnErrorsWithoutPersistingWeakState)$'
 go test -race -count=10 ./internal/agent \
   -run 'Test(LoadConfigRejectsTrailingJSONData|ConfigFileSymlinkRejected|SecretStateRejectsTrailingAndUnknownJSON|StateMarkerAdoptsLegacyKnownStateFiles|ConcurrentConfigMutationPreservesEveryEndpoint|StateDirectorySafetyRejectsRootHomeAndSymlinks|StateDirectoryOwnershipRejectsUnrelatedNonEmptyDirectory|ConfigLockRejectsUnsafeLockObject|EntropyFailuresReturnErrorsWithoutPersistingWeakState)$'
 

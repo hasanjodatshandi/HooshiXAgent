@@ -64,6 +64,8 @@ For v1 public-ingress tunnel flows:
 
 Control payloads are UTF-8 JSON objects and must satisfy `tunnel-control.schema.json` plus the semantic rules below.
 
+Every v1 timestamp uses RFC3339 in UTC with the literal upper-case `Z` suffix. Seconds are required; an optional fractional second uses a dot (for example, `2026-08-29T12:00:00.123Z`). Numeric offsets, lower-case separators/suffixes, comma fractions, and leap-second spellings are not part of this contract.
+
 Invalid UTF-8 is rejected before JSON semantic processing. Duplicate JSON object member names are invalid and must be rejected, even when the duplicate values are identical. Unknown fields are rejected. Strings are length-bounded by the schema. Identifiers are opaque and must match the schema identifier pattern; implementations must not infer account, tenant, billing, or database semantics from them.
 
 ## 6. Session establishment
@@ -196,7 +198,7 @@ A revoked session must stop opening new streams and terminate according to the l
 - `generated_at` — RFC3339 UTC generation time;
 - `active_streams` — current registered streams (bounded by contract);
 - `queued_frames` — queued inbound frames across live streams (bounded by contract);
-- `reconnect_count` — completed reconnect cycles since Agent process start;
+- `reconnect_count` — completed reconnect cycles since Agent process start, in the inclusive range `0..2147483647`;
 - `last_reconnect_at` — optional RFC3339 UTC timestamp of the last reconnect;
 - `agent_version` — optional bounded version string.
 
@@ -226,7 +228,7 @@ The Gateway accepts the resume only when **all** of the following hold:
 2. the current external authorization record matches the resume subject, is active, unexpired, and not revoked;
 3. the signature verifies against the externally registered device public key.
 
-On success the Gateway replies `session_resumed` with the same `session_id`, a `next_sequence` value, and a `resumed_at` timestamp. Sequence numbering restarts independently on each new transport per Section 3: the resume reply itself is sequence `1` in the Gateway→Agent direction and the resume request is sequence `1` in the Agent→Gateway direction; `next_sequence` advertises the exact following value so the Agent can arm its inbound tracker deterministically.
+On success the Gateway replies `session_resumed` with the same `session_id`, a `next_sequence` value in the inclusive unsigned 64-bit range `1..18446744073709551615`, and a `resumed_at` timestamp. Sequence numbering restarts independently on each new transport per Section 3: the resume reply itself is sequence `1` in the Gateway→Agent direction and the resume request is sequence `1` in the Agent→Gateway direction; `next_sequence` advertises the exact following value so the Agent can arm its inbound tracker deterministically.
 
 Any rejection fails closed:
 
