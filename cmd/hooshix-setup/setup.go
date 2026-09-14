@@ -356,6 +356,12 @@ func installPairingCapability(user string) error {
 		if err := recaptureStateOwnership(stateDir); err != nil {
 			return fmt.Errorf("recover Agent state directory ownership: %w", err)
 		}
+		// Ownership now grants WRITE_DAC on every child, so replacing each
+		// legacy explicit DACL with the inheritable default cannot fail.
+		output, err := exec.Command("icacls.exe", stateDir, "/reset", "/T", "/Q").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("reset Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
+		}
 	}
 	capability, err := agent.GeneratePairingCapability()
 	if err != nil {
