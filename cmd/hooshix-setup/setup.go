@@ -401,8 +401,16 @@ func xmlEscape(value string) string {
 // privileges SeTakeOwnershipPrivilege and SeRestorePrivilege, which the
 // installer enables itself (no locale-dependent takeown /D prompt).
 func recaptureStateOwnership(root string) error {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		return fmt.Errorf("open process token: %w", err)
+	}
+	defer token.Close()
+	if !token.IsElevated() {
+		return errors.New("state ownership recovery requires the elevated installer token")
+	}
 	for _, privilege := range []string{"SeTakeOwnershipPrivilege", "SeRestorePrivilege"} {
-		if err := enableTokenPrivilege(privilege); err != nil {
+		if err := enableTokenPrivilege(token, privilege); err != nil {
 			return fmt.Errorf("enable %s: %w", privilege, err)
 		}
 	}
@@ -421,12 +429,7 @@ func recaptureStateOwnership(root string) error {
 	})
 }
 
-func enableTokenPrivilege(name string) error {
-	var token windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
-		return err
-	}
-	defer token.Close()
+func enableTokenPrivilege(token windows.Token, name string) error {
 	var luid windows.LUID
 	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
 		return err
