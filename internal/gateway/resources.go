@@ -65,8 +65,8 @@ type gatewayResources struct {
 	sessionRejects           atomicUint64
 	healthReports            atomicUint64
 	reconnects               atomicUint64
-	agentBytes              atomicUint64
-	publicBytes             atomicUint64
+	agentBytes               atomicUint64
+	publicBytes              atomicUint64
 }
 
 func newGatewayResources(limits Limits) gatewayResources {

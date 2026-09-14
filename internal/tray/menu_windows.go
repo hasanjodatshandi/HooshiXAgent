@@ -12,19 +12,19 @@ import (
 
 // menuHost owns the hidden window, tray icon, context menu, and message pump.
 type menuHost struct {
-	app       *App
-	instance  uintptr
-	window    windows.Handle
-	menu      windows.Handle
-	iconToken uint32
+	app            *App
+	instance       uintptr
+	window         windows.Handle
+	menu           windows.Handle
+	iconToken      uint32
 	taskbarCreated uint32
 }
 
 const (
-	wmTrayCallback   = 0x8000 // WM_APP
-	wmDestroy        = 0x0002
-	wmEndSession     = 0x0016
-	wmClose          = 0x0010
+	wmTrayCallback = 0x8000 // WM_APP
+	wmDestroy      = 0x0002
+	wmEndSession   = 0x0016
+	wmClose        = 0x0010
 )
 
 var (
@@ -36,30 +36,30 @@ var (
 
 // notifyIconData is NOTIFYICONDATAW as documented by the Windows SDK.
 type notifyIconData struct {
-	Size            uint32
-	Window          windows.Handle
-	ID              uint32
-	Flags           uint32
-	CallbackMessage uint32
-	Icon            windows.Handle
-	Tip             [128]uint16
-	State           uint32
-	StateMask       uint32
-	Info            [256]uint16
+	Size             uint32
+	Window           windows.Handle
+	ID               uint32
+	Flags            uint32
+	CallbackMessage  uint32
+	Icon             windows.Handle
+	Tip              [128]uint16
+	State            uint32
+	StateMask        uint32
+	Info             [256]uint16
 	VersionOrTimeout uint32
-	InfoTitle       [64]uint16
-	InfoFlags       uint32
-	GUIDItem        windows.GUID
-	BalloonIcon     windows.Handle
+	InfoTitle        [64]uint16
+	InfoFlags        uint32
+	GUIDItem         windows.GUID
+	BalloonIcon      windows.Handle
 }
 
 const (
-	nifMessage = 0x01
-	nifIcon    = 0x02
-	nifTip     = 0x04
-	nimAdd     = 0x00
-	nimDelete  = 0x02
-	nimSetVersion = 0x04
+	nifMessage         = 0x01
+	nifIcon            = 0x02
+	nifTip             = 0x04
+	nimAdd             = 0x00
+	nimDelete          = 0x02
+	nimSetVersion      = 0x04
 	notifyIconVersion4 = 4
 )
 
