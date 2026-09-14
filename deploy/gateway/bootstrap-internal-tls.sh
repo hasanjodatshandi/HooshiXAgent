@@ -73,11 +73,16 @@ openssl x509 -req -sha256 -days 397 \
 rm -f "$gateway_csr" "$ext_file" "$tls_dir/ca.srl"
 chmod 600 "$ca_key"
 chmod 640 "$gateway_key"
-chgrp 10001 "$gateway_key" 2>/dev/null || true
-# The CA key stays owner-only and is never mounted. The gateway TLS key is
-# group-readable only by the runtime container's fixed uid/gid (10001, per
-# the Dockerfile), so the process can load it over its read-only bind mount
-# while world access remains denied. Certificates are public.
+# The gateway TLS key must be readable by the runtime container's fixed
+# uid/gid (10001, per the Dockerfile) over its read-only bind mount, while
+# world access stays denied. chgrp needs root or group membership; CI gates
+# run unprivileged but hold passwordless sudo, so retry through sudo -n.
+# If neither works (developer machine without matching group), the compose
+# stack surfaces the unreadable key immediately at container start.
+if ! chgrp 10001 "$gateway_key" 2>/dev/null; then
+  sudo -n chgrp 10001 "$gateway_key" 2>/dev/null || true
+fi
+# The CA key stays owner-only and is never mounted. Certificates are public.
 chmod 644 "$ca_cert" "$gateway_cert"
 
 echo "Gateway internal TLS initialized at $tls_dir"

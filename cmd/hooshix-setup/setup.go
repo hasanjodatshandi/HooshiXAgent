@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -345,15 +346,16 @@ func installPairingCapability(user string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
-	// Repair access before touching the marker/capability. A previous setup
-	// may already have removed inherited ACLs from these files.
-	output, err := exec.Command("icacls.exe", stateDir,
-		"/grant:r", userSID+":(OI)(CI)(RX)",
-		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
-		"/grant:r", "*S-1-5-32-544:(OI)(CI)(F)",
-		"/T", "/Q").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("repair Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
+	// Recovery, not just repair: an earlier installation may have left files
+	// with a SYSTEM-only DACL (service-created state), where even an elevated
+	// administrator holds no WRITE_DAC, so icacls /grant alone fails with
+	// "Access is denied". Recapture ownership first (an elevated admin always
+	// holds SeTakeOwnershipPrivilege), then /reset replaces every explicit
+	// DACL with inheritable ones so the grants below can never fail.
+	if _, statErr := os.Stat(stateDir); statErr == nil {
+		if err := recaptureStateOwnership(stateDir); err != nil {
+			return fmt.Errorf("recover Agent state directory ownership: %w", err)
+		}
 	}
 	capability, err := agent.GeneratePairingCapability()
 	if err != nil {
@@ -362,7 +364,7 @@ func installPairingCapability(user string) error {
 	if err := agent.WritePairingCapability(stateDir, capability); err != nil {
 		return err
 	}
-	output, err = exec.Command("icacls.exe", stateDir,
+	output, err := exec.Command("icacls.exe", stateDir,
 		"/inheritance:r",
 		"/grant:r", userSID+":(OI)(CI)(RX)",
 		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
@@ -388,6 +390,54 @@ func xmlEscape(value string) string {
 	var escaped strings.Builder
 	_ = xml.EscapeText(&escaped, []byte(value))
 	return escaped.String()
+}
+
+// recaptureStateOwnership makes the elevated installer the owner of every
+// file and directory under root. Service-created state may carry a
+// SYSTEM-only DACL where icacls /grant fails with "Access is denied" because
+// even an administrator holds no WRITE_DAC. An object's owner always holds
+// implicit READ_CONTROL and WRITE_DAC, so transferring ownership first makes
+// every subsequent icacls repair succeed. Requires the elevated admin token
+// privileges SeTakeOwnershipPrivilege and SeRestorePrivilege, which the
+// installer enables itself (no locale-dependent takeown /D prompt).
+func recaptureStateOwnership(root string) error {
+	for _, privilege := range []string{"SeTakeOwnershipPrivilege", "SeRestorePrivilege"} {
+		if err := enableTokenPrivilege(privilege); err != nil {
+			return fmt.Errorf("enable %s: %w", privilege, err)
+		}
+	}
+	admins, err := windows.StringToSid("S-1-5-32-544")
+	if err != nil {
+		return fmt.Errorf("resolve Administrators SID: %w", err)
+	}
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+			return fmt.Errorf("take ownership of %s: %w", path, err)
+		}
+		return nil
+	})
+}
+
+func enableTokenPrivilege(name string) error {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		return err
+	}
+	defer token.Close()
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+		return err
+	}
+	tp := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges: [1]windows.LUIDAndAttributes{
+			{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED},
+		},
+	}
+	return windows.AdjustTokenPrivileges(token, false, &tp, uint32(unsafe.Sizeof(tp)), nil, nil)
 }
 
 func registerUninstall() error {
