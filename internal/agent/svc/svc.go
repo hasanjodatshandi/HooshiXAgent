@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package svc implements the HooshiX Edge Agent Windows service runtime.
 //
 // The service runs under LocalSystem and owns the complete Agent lifecycle:

@@ -7,6 +7,17 @@
 # selector matches zero tests. Go exits 0 for an empty match set, so a
 # renamed test would otherwise turn a hardening gate into a no-op that
 # silently passes.
+#
+# bin_suffix: CI gates build product binaries into temp dirs (e.g.
+# "$work/hooshix-agent"). Windows requires an explicit .exe suffix for
+# os/exec to find them; Unix must not add one. Callers append "${bin_suffix}"
+# to built binary names so every gate script runs on both developer Windows
+# machines and Linux CI runners.
+bin_suffix=""
+if [[ "$(go env GOOS 2>/dev/null || true)" == "windows" ]]; then
+  bin_suffix=".exe"
+fi
+
 fail_if_no_tests() {
   local output
   output="$(go test -count=1 -v "$@" 2>&1 | tee /dev/stderr)"

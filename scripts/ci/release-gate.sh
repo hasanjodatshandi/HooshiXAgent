@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -74,10 +74,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/release"
 
-go build -o "$work/bin/hooshix-agent" ./cmd/agent
-go build -o "$work/bin/hooshix-gateway" ./cmd/gateway
-HOOSHIX_AGENT_BINARY="$work/bin/hooshix-agent" \
-HOOSHIX_GATEWAY_BINARY="$work/bin/hooshix-gateway" \
+go build -o "$work/bin/hooshix-agent${bin_suffix}" ./cmd/agent
+go build -o "$work/bin/hooshix-gateway${bin_suffix}" ./cmd/gateway
+HOOSHIX_AGENT_BINARY="$work/bin/hooshix-agent${bin_suffix}" \
+HOOSHIX_GATEWAY_BINARY="$work/bin/hooshix-gateway${bin_suffix}" \
   fail_if_no_tests ./tests/integration -run '^TestNetworkInterruptionAndColdRestartRecovery$' -timeout=60s
 
 # Build the exact release artifact shapes and verify the manifest before any tamper test.

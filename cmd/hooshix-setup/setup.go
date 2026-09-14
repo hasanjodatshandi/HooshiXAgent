@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"embed"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
@@ -268,7 +271,7 @@ func registerTrayTask(user string) error {
 	// created via XML to avoid credential prompts.
 	userXML := xmlEscape(user)
 	commandXML := xmlEscape(filepath.Join(installDir, trayBinary))
-	taskXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	taskXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>HooshiX Agent tray auto-start at logon</Description>
@@ -299,11 +302,13 @@ func registerTrayTask(user string) error {
   </Actions>
 </Task>`, userXML, commandXML)
 	tempXML := filepath.Join(os.Getenv("TEMP"), "hooshix-tray-task.xml")
-	if err := os.WriteFile(tempXML, []byte(taskXML), 0o600); err != nil {
+	if err := writeUTF16LE(tempXML, taskXML); err != nil {
 		return err
 	}
 	defer os.Remove(tempXML)
-	args := []string{"/Create", "/F", "/TN", trayTaskName, "/XML", tempXML, "/RU", user}
+	// UserId + InteractiveToken in the XML is sufficient. Adding /RU makes
+	// schtasks prompt for that user's password even though none is required.
+	args := []string{"/Create", "/F", "/TN", trayTaskName, "/XML", tempXML}
 	output, err := exec.Command("schtasks.exe", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schtasks create: %w: %s", err, strings.TrimSpace(string(output)))
@@ -315,10 +320,40 @@ func registerTrayTask(user string) error {
 	return nil
 }
 
+func writeUTF16LE(path, value string) error {
+	encoded := utf16.Encode([]rune(value))
+	var data bytes.Buffer
+	if err := binary.Write(&data, binary.LittleEndian, uint16(0xfeff)); err != nil {
+		return err
+	}
+	if err := binary.Write(&data, binary.LittleEndian, encoded); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data.Bytes(), 0o600)
+}
+
 func installPairingCapability(user string) error {
 	stateDir := filepath.Join(os.Getenv("ProgramData"), "HooshiXAgent")
 	if os.Getenv("ProgramData") == "" {
 		stateDir = `C:\ProgramData\HooshiXAgent`
+	}
+	sid, _, _, err := windows.LookupSID("", user)
+	if err != nil {
+		return fmt.Errorf("resolve interactive user SID: %w", err)
+	}
+	userSID := "*" + sid.String()
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return err
+	}
+	// Repair access before touching the marker/capability. A previous setup
+	// may already have removed inherited ACLs from these files.
+	output, err := exec.Command("icacls.exe", stateDir,
+		"/grant:r", userSID+":(OI)(CI)(RX)",
+		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
+		"/grant:r", "*S-1-5-32-544:(OI)(CI)(F)",
+		"/T", "/Q").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("repair Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	capability, err := agent.GeneratePairingCapability()
 	if err != nil {
@@ -327,17 +362,12 @@ func installPairingCapability(user string) error {
 	if err := agent.WritePairingCapability(stateDir, capability); err != nil {
 		return err
 	}
-	sid, _, _, err := windows.LookupSID("", user)
-	if err != nil {
-		return fmt.Errorf("resolve interactive user SID: %w", err)
-	}
-	userSID := "*" + sid.String()
-	output, err := exec.Command("icacls.exe", stateDir,
+	output, err = exec.Command("icacls.exe", stateDir,
 		"/inheritance:r",
 		"/grant:r", userSID+":(OI)(CI)(RX)",
 		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
 		"/grant:r", "*S-1-5-32-544:(OI)(CI)(F)",
-		"/T", "/C").CombinedOutput()
+		"/T", "/Q").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("secure Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
 	}

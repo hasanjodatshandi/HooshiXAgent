@@ -39,8 +39,8 @@ fi
 runtime_dir="$(mktemp -d)"
 trap 'rm -rf "$runtime_dir"' EXIT
 
-gateway_binary="$runtime_dir/hooshix-gateway"
-agent_binary="$runtime_dir/hooshix-agent"
+gateway_binary="$runtime_dir/hooshix-gateway${bin_suffix}"
+agent_binary="$runtime_dir/hooshix-agent${bin_suffix}"
 go build -o "$gateway_binary" ./cmd/gateway
 go build -o "$agent_binary" ./cmd/agent
 

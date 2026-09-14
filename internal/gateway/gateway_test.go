@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -607,6 +608,9 @@ func TestGatewayStreamingUploadCancellationReleasesResources(t *testing.T) {
 }
 
 func TestExternalProcessRuntimeGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("external-process orchestration relies on POSIX interrupt semantics; the runtime gate runs on ubuntu CI")
+	}
 	binary := os.Getenv("HOOSHIX_GATEWAY_BINARY")
 	if binary == "" {
 		t.Skip("set HOOSHIX_GATEWAY_BINARY to exercise the real gateway executable")
