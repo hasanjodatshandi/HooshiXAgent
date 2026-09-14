@@ -360,11 +360,42 @@ func (sess *agentSession) handleData(parent context.Context, frame contractv1.Fr
 		}
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
 	}
-	if !stream.enqueue(frame.Payload) {
-		_ = sess.sendStreamTerminalError(stream, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
-		sess.finishStream(frame.StreamID)
+	if stream.enqueue(frame.Payload) {
+		return nil
 	}
+	if sess.waitForStreamSpace(stream, frame.Payload) {
+		return nil
+	}
+	_ = sess.sendStreamTerminalError(stream, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
+	sess.finishStream(frame.StreamID)
 	return nil
+}
+
+// enqueueRetryWait bounds how long the session read loop waits for a full
+// stream queue to drain before declaring the stream stalled. A fast burst
+// of gateway data frames must not kill a stream just because the bounded
+// per-stream buffer is momentarily full (the local writer drains it within
+// milliseconds on healthy targets); only a genuinely stalled consumer
+// should fail the stream. The wait is capped so a stalled local target
+// cannot pin the single session read loop indefinitely.
+const enqueueRetryWait = 2 * time.Second
+
+func (sess *agentSession) waitForStreamSpace(stream *agentStream, payload []byte) bool {
+	deadline := time.After(enqueueRetryWait)
+	for {
+		select {
+		case <-stream.ctx.Done():
+			return false
+		case <-sess.closed:
+			return false
+		case <-deadline:
+			return false
+		case <-stream.space:
+			if stream.enqueue(payload) {
+				return true
+			}
+		}
+	}
 }
 
 func (stream *agentStream) enqueue(data []byte) bool {
