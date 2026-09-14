@@ -353,14 +353,8 @@ func installPairingCapability(user string) error {
 	// holds SeTakeOwnershipPrivilege), then /reset replaces every explicit
 	// DACL with inheritable ones so the grants below can never fail.
 	if _, statErr := os.Stat(stateDir); statErr == nil {
-		if err := recaptureStateOwnership(stateDir); err != nil {
+		if err := recaptureStateOwnership(stateDir, userSID); err != nil {
 			return fmt.Errorf("recover Agent state directory ownership: %w", err)
-		}
-		// Ownership now grants WRITE_DAC on every child, so replacing each
-		// legacy explicit DACL with the inheritable default cannot fail.
-		output, err := exec.Command("icacls.exe", stateDir, "/reset", "/T", "/Q").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("reset Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 	}
 	capability, err := agent.GeneratePairingCapability()
@@ -398,15 +392,21 @@ func xmlEscape(value string) string {
 	return escaped.String()
 }
 
-// recaptureStateOwnership makes the elevated installer the owner of every
-// file and directory under root. Service-created state may carry a
-// SYSTEM-only DACL where icacls /grant fails with "Access is denied" because
-// even an administrator holds no WRITE_DAC. An object's owner always holds
-// implicit READ_CONTROL and WRITE_DAC, so transferring ownership first makes
-// every subsequent icacls repair succeed. Requires the elevated admin token
-// privileges SeTakeOwnershipPrivilege and SeRestorePrivilege, which the
-// installer enables itself (no locale-dependent takeown /D prompt).
-func recaptureStateOwnership(root string) error {
+// recaptureStateOwnership recovers the Agent state tree from legacy
+// SYSTEM-only or otherwise inaccessible DACLs left by earlier builds. Even an
+// elevated administrator holds no WRITE_DAC on such files, so icacls /grant
+// and /reset both fail with "Access is denied"; transferring ownership first
+// (always possible for an elevated admin via SeTakeOwnershipPrivilege) makes
+// every subsequent repair succeed.
+//
+// Owner and DACL must be set in the SAME SetNamedSecurityInfo call: setting
+// only the owner installs an empty (deny-all) DACL on the object and locks
+// out the service. The replacement DACL grants SYSTEM and Administrators
+// full control plus the interactive user read/execute, matching the grants
+// the repair step below would otherwise apply through inheritance.
+// Requires the elevated installer token; the privileges are enabled here so
+// no locale-dependent takeown prompt is involved.
+func recaptureStateOwnership(root, userSID string) error {
 	var token windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
 		return fmt.Errorf("open process token: %w", err)
@@ -420,16 +420,29 @@ func recaptureStateOwnership(root string) error {
 			return fmt.Errorf("enable %s: %w", privilege, err)
 		}
 	}
-	admins, err := windows.StringToSid("S-1-5-32-544")
+	// O:BA owner = BUILTIN\Administrators; DACL: SYSTEM and Administrators
+	// full control (inherited), interactive user read+execute (inherited).
+	sddl := "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;" + strings.TrimPrefix(userSID, "*") + ")"
+	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		return fmt.Errorf("resolve Administrators SID: %w", err)
+		return fmt.Errorf("build recovery security descriptor: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("extract recovery owner: %w", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("extract recovery DACL: %w", err)
 	}
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
-			return fmt.Errorf("take ownership of %s: %w", path, err)
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+			owner, nil, dacl, nil); err != nil {
+			return fmt.Errorf("recover ownership and ACL of %s: %w", path, err)
 		}
 		return nil
 	})
