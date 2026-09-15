@@ -639,6 +639,25 @@ func permanentAgentFailure(err error) error {
 	return fmt.Errorf("%w: %w", ErrPermanentAgentFailure, err)
 }
 
+// permanentPolicyViolation classifies gateway policy closes. Only genuine
+// agent-side protocol/authorization breaches are unrecoverable; operational
+// policy closes the gateway emits for infra/health reasons (idle timeout
+// after laptop sleep, NAT teardown, generic session end) are transient and
+// must reconnect with backoff instead of terminating the service.
+func permanentPolicyViolation(err error) bool {
+	var closeError websocket.CloseError
+	if !errors.As(err, &closeError) {
+		// No reason string available: treat as a genuine protocol breach.
+		return true
+	}
+	switch closeError.Reason {
+	case "idle timeout", "session ended":
+		return false
+	default:
+		return true
+	}
+}
+
 func permanentDialError(err error, response *http.Response) bool {
 	if errors.Is(err, errGatewayRedirect) {
 		return true
@@ -660,8 +679,10 @@ func permanentRemoteSessionError(err error) bool {
 		return false
 	}
 	switch status := websocket.CloseStatus(err); status {
-	case websocket.StatusProtocolError, websocket.StatusUnsupportedData, websocket.StatusInvalidFramePayloadData, websocket.StatusPolicyViolation, websocket.StatusMessageTooBig, websocket.StatusMandatoryExtension:
+	case websocket.StatusProtocolError, websocket.StatusUnsupportedData, websocket.StatusInvalidFramePayloadData, websocket.StatusMessageTooBig, websocket.StatusMandatoryExtension:
 		return true
+	case websocket.StatusPolicyViolation:
+		return permanentPolicyViolation(err)
 	case websocket.StatusNormalClosure, websocket.StatusGoingAway, websocket.StatusNoStatusRcvd, websocket.StatusAbnormalClosure, websocket.StatusInternalError, websocket.StatusServiceRestart, websocket.StatusTryAgainLater, websocket.StatusBadGateway:
 		return false
 	default:

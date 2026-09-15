@@ -507,11 +507,17 @@ readLoop:
 		if localReadErr == nil {
 			_ = sess.sendStreamTerminalClose(stream, "completed")
 		} else {
-			code := "local_target_read_error"
+			// The contract restricts stream_error codes to a fixed enum
+		// (contracts/v1/tunnel-control.schema.json): local_target_unavailable,
+		// route_revoked, protocol_error, resource_limit, internal_error. The
+		// gateway validates agent-originated control messages and kills the
+		// whole session with a policy violation on any out-of-enum code, so a
+		// mid-stream local read failure MUST map onto an allowed code. The
+		// specific failure detail stays in the free-form message field.
+			code := "local_target_unavailable"
 			message := "approved local target read failed"
 			var networkError net.Error
 			if errors.As(localReadErr, &networkError) && networkError.Timeout() {
-				code = "local_target_timeout"
 				message = "approved local target read timed out"
 			}
 			_ = sess.sendStreamTerminalError(stream, code, message, true)
