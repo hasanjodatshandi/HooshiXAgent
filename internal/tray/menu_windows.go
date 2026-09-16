@@ -58,11 +58,16 @@ const (
 	nifMessage         = 0x01
 	nifIcon            = 0x02
 	nifTip             = 0x04
+	nifInfo            = 0x10
 	nimAdd             = 0x00
 	nimModify          = 0x01
 	nimDelete          = 0x02
 	nimSetVersion      = 0x04
 	notifyIconVersion4 = 4
+
+	// NIIF_* balloon modifiers (partial set actually used).
+	niifWarning = 0x00000002
+	niifError   = 0x00000003
 )
 
 var (
@@ -393,9 +398,77 @@ func statusDisplayText(state TrayState) string {
 	}
 }
 
+// showBalloon displays a tray balloon notification with the given title,
+// message, and NIIF severity icon. Balloons are fire-and-forget: Windows
+// decides whether to render them (Focus Assist / policy may suppress), so
+// they are an addition to, never a replacement for, the menu status rows.
+func (host *menuHost) showBalloon(title, message string, infoFlags uint32) {
+	var data notifyIconData
+	data.Window = host.window
+	data.ID = host.iconToken
+	data.Flags = nifMessage | nifInfo
+	data.InfoFlags = infoFlags
+	copy(data.InfoTitle[:], syscall.StringToUTF16(title))
+	copy(data.Info[:], syscall.StringToUTF16(message))
+	data.Size = uint32(unsafe.Sizeof(data))
+	result, _, err := shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
+	if result == 0 {
+		host.app.logger.Debug("show tray balloon failed", "error", err)
+	}
+}
+
+// notifyTunnelEvent posts a balloon for a tunnel state transition. Called
+// on the poll goroutine via refreshMenu; Shell_NotifyIcon is thread-safe.
+func (host *menuHost) notifyTunnelEvent(from, to TrayState) {
+	fromDown, toDown := isDownState(from), isDownState(to)
+	fromUp := isUpState(from)
+	switch {
+	case toDown && fromUp:
+		host.showBalloon("HooshiX tunnel disconnected", disconnectText(to), niifWarning)
+	case toDown && fromDown && to.Phase != from.Phase:
+		// Escalation only: stopped → terminal gets one balloon; silent
+		// churn between disconnected and reconnecting stays silent.
+		if strings.HasSuffix(to.Phase, "terminal") {
+			host.showBalloon("HooshiX Agent stopped", disconnectText(to), niifError)
+		}
+	case fromDown && isUpState(to):
+		host.showBalloon("HooshiX tunnel reconnected", "The tunnel is connected again.", 0)
+	}
+}
+
+// isUpState reports whether the tunnel is (service running +) connected.
+func isUpState(state TrayState) bool {
+	return strings.HasSuffix(state.Phase, "running") && state.State == "connected"
+}
+
+// isDownState reports whether the tunnel is service-running but not
+// connected (reconnecting, waiting for pairing, terminal, ...).
+func isDownState(state TrayState) bool {
+	return strings.HasSuffix(state.Phase, "running") ||
+		strings.HasSuffix(state.Phase, "reconnecting") ||
+		strings.HasSuffix(state.Phase, "terminal")
+}
+
+// disconnectText summarizes the reason shown in disconnect balloons.
+func disconnectText(state TrayState) string {
+	if errText := strings.TrimSpace(state.LastError); errText != "" {
+		const maxLen = 180
+		if len(errText) > maxLen {
+			errText = errText[:maxLen] + "..."
+		}
+		return errText
+	}
+	return statusDisplayText(state)
+}
+
 // refreshMenu applies state to the tray tooltip and rebuilds the menu so the
 // health header always reflects the latest status.json snapshot.
 func (host *menuHost) refreshMenu(state TrayState) {
+	host.app.mu.Lock()
+	previous := host.app.state
+	host.app.state = state
+	host.app.mu.Unlock()
+	host.notifyTunnelEvent(previous, state)
 	host.rebuildMenu()
 	var tip [128]uint16
 	copy(tip[:], syscall.StringToUTF16("HooshiX Agent — "+statusDisplayText(state)))
