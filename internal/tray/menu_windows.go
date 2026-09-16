@@ -329,7 +329,7 @@ func (host *menuHost) notify(op uint32) error {
 		ID:              host.iconToken,
 		Flags:           nifMessage | nifIcon | nifTip,
 		CallbackMessage: wmTrayCallback,
-		Icon:            loadAppIcon(host.instance),
+		Icon:            statusIcon(readinessFromState(host.app.currentState())),
 	}
 	copy(data.Tip[:], syscall.StringToUTF16("HooshiX Agent"))
 	data.Size = uint32(unsafe.Sizeof(data))
@@ -461,8 +461,15 @@ func disconnectText(state TrayState) string {
 	return statusDisplayText(state)
 }
 
-// refreshMenu applies state to the tray tooltip and rebuilds the menu so the
-// health header always reflects the latest status.json snapshot.
+// currentState returns the latest status snapshot (thread-safe read).
+func (app *App) currentState() TrayState {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.state
+}
+
+// refreshMenu applies state to the tray icon, tooltip, and menu so tunnel
+// health is visible at a glance and up to date on every poll.
 func (host *menuHost) refreshMenu(state TrayState) {
 	host.app.mu.Lock()
 	previous := host.app.state
@@ -472,21 +479,17 @@ func (host *menuHost) refreshMenu(state TrayState) {
 	host.rebuildMenu()
 	var tip [128]uint16
 	copy(tip[:], syscall.StringToUTF16("HooshiX Agent — "+statusDisplayText(state)))
-	host.updateTooltip(tip)
-}
-
-// updateTooltip re-adds the icon with a new tooltip text in place.
-func (host *menuHost) updateTooltip(tip [128]uint16) {
 	data := notifyIconData{
 		Window: host.window,
 		ID:     host.iconToken,
 		Flags:  nifMessage | nifIcon | nifTip,
+		Icon:   statusIcon(readinessFromState(state)),
 		Tip:    tip,
 	}
 	data.Size = uint32(unsafe.Sizeof(data))
 	result, _, err := shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
 	if result == 0 {
-		host.app.logger.Debug("update tray tooltip failed", "error", err)
+		host.app.logger.Debug("update tray icon failed", "error", err)
 	}
 }
 

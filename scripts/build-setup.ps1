@@ -35,6 +35,21 @@ if (Test-Path $makeIco) {
 } elseif (-not (Test-Path $ico)) {
   throw "tray icon missing: $ico (scripts\make-ico.ps1 not found)"
 }
+# Status-tinted variants (green/yellow/red) let the tray icon show tunnel
+# health at a glance. Tinting is deterministic from the base ICO; outputs
+# land in internal/tray for go:embed and are also committed so a clean
+# checkout without Python still builds.
+$tintScript = Join-Path $repo "scripts\tint_ico.py"
+if (Test-Path $tintScript) {
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if ($python) {
+    & $python.Source $tintScript $ico `
+      --green (Join-Path $repo "internal\tray\hooshix-green.ico") `
+      --yellow (Join-Path $repo "internal\tray\hooshix-yellow.ico") `
+      --red (Join-Path $repo "internal\tray\hooshix-red.ico")
+    if ($LASTEXITCODE -ne 0) { throw "icon tinting failed" }
+  }
+}
 # Resolve rsrc.exe (embeds the icon/manifest resources) from GOPATH or PATH
 # so the build works on any machine, not just one specific user profile.
 function Find-Rsrc {
