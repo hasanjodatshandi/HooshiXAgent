@@ -130,6 +130,19 @@ const (
 	// and new color after a reconnect, so the transition is visible.
 	reconnectFlashDuration = 4 * time.Second
 	reconnectFlashInterval = 300 * time.Millisecond
+
+	// NOTIFYICON_VERSION_4 notification codes delivered in LOWORD(lParam)
+	// of the callback message (uVersion=4 changes the payload layout:
+	// wParam packs icon id + x/y, lParam packs notification code + bounds).
+	ninSelect           = 0x0400 // left click (v4 replaces WM_LBUTTONDOWN/UP)
+	ninKeySelect        = 0x0402 // keyboard activation (aliases NIN_BALLOONSHOW)
+	wmContextMenu       = 0x007B // right click (v4 replaces WM_RBUTTONUP)
+	ninBalloonTimeout   = 0x0404
+	ninBalloonUserClick = 0x0405
+	wmLButtonUp         = 0x0202 // legacy (versions 0-3) raw mouse messages
+	wmLButtonDblClk     = 0x0203
+	wmRButtonUp         = 0x0205
+	wmRButtonDblClk     = 0x0206
 )
 
 var (
@@ -302,6 +315,12 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	if host == nil {
 		return 0
 	}
+	// Diagnostics for the flaky menu: log every callback message arrival and
+	// each dispatch stage. These lines are cheap (Info level, tray.log) and
+	// pinpoint exactly where a click dies when the menu fails to show.
+	if message == wmTrayCallback {
+		host.app.logger.Info("tray callback", "code", fmt.Sprintf("0x%04x", uint32(lParam)&0xFFFF))
+	}
 	if message == host.taskbarCreated {
 		_ = host.notify(nimAdd)
 		_ = host.setNotifyVersion()
@@ -312,22 +331,25 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 		host.drainUiWork()
 		return 0
 	case wmTrayCallback:
-		// Tray mouse events arrive in the LOWORD of lParam: WM_LBUTTONUP,
-		// WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_RBUTTONDBLCLK (and NIN_SELECT /
-		// NIN_KEYSELECT for keyboard-invoked tray activation). Menu display
-		// is queued to the message-pump thread: TrackPopupMenu must run
-		// there, and running it inline while the wndproc is on the stack
-		// re-enters the pump — the race that made the menu appear only
-		// sometimes. Balloon interaction arrives as NIN_BALLOONUSERCLICK
-		// (user click) and NIN_BALLOONTIMEUP (auto-hide).
+		// NOTIFYICON_VERSION_4 delivers NOTIFICATION CODES in LOWORD(lParam),
+		// not the raw mouse messages of versions 0-3: left-click arrives as
+		// NIN_SELECT, keyboard activation as NIN_KEYSELECT, right-click as
+		// WM_CONTEXTMENU. Balloon lifecycle arrives as NIN_BALLOONTIMEOUT and
+		// NIN_BALLOONUSERCLICK. Matching only the legacy raw messages (e.g.
+		// WM_LBUTTONUP) meant real icon clicks were silently dropped and the
+		// menu appeared only when a balloon event happened to masquerade as a
+		// click — the exact flaky behavior reported. Balloon codes are routed
+		// to balloon handling; NIN_KEYSELECT is deliberately NOT a menu
+		// trigger because it aliases NIN_BALLOONSHOW and would open the menu
+		// on every balloon.
 		switch code := uint32(lParam) & 0xFFFF; code {
-		case 0x0202, 0x0203, 0x0206, // WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK
-			0x0205,         // WM_RBUTTONUP
-			0x0404, 0x0405: // NIN_SELECT, NIN_KEYSELECT
+		case ninSelect, wmContextMenu, // version 4 clicks
+			wmLButtonUp, wmLButtonDblClk, // legacy clicks (versions 0-3)
+			wmRButtonUp, wmRButtonDblClk:
 			host.runOnUi(host.showMenu)
-		case 0x0406: // NIN_BALLOONUSERCLICK: user dismissed the balloon
+		case ninBalloonUserClick: // user dismissed the balloon
 			host.stopBalloonRepeat()
-		case 0x0403: // NIN_BALLOONTIMEUP: persistence timer re-issues
+		case ninBalloonTimeout: // persistence timer re-issues
 		default:
 			_ = code
 		}
