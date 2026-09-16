@@ -4,6 +4,7 @@ package tray
 
 import (
 	"fmt"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -58,6 +59,7 @@ const (
 	nifIcon            = 0x02
 	nifTip             = 0x04
 	nimAdd             = 0x00
+	nimModify          = 0x01
 	nimDelete          = 0x02
 	nimSetVersion      = 0x04
 	notifyIconVersion4 = 4
@@ -172,11 +174,20 @@ func (host *menuHost) rebuildMenu() {
 	appendMenu := user32.NewProc("AppendMenuW")
 	const mfString = 0x0000
 	const mfSeparator = 0x0800
+	const mfGrayed = 0x0002
+	const menuStatus = 1000
 	const menuPairing = 1001
 	const menuStart = 1002
 	const menuStop = 1003
 	const menuExit = 1004
 
+	// Disabled header rows surface the live tunnel health (connection
+	// state, reconnect count, and last error) without opening a window.
+	for _, line := range host.app.statusTextLines() {
+		utf16Line := syscall.StringToUTF16Ptr(line)
+		appendMenu.Call(uintptr(host.menu), mfString|mfGrayed, menuStatus, uintptr(unsafe.Pointer(utf16Line)))
+	}
+	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuPairing, uintptr(unsafe.Pointer(pairingLabel)))
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuStart, uintptr(unsafe.Pointer(startLabel)))
@@ -335,12 +346,75 @@ func (host *menuHost) quit() {
 	}
 }
 
-// refreshMenu applies state to the tray tooltip (cheap, non-blocking).
+// statusTextLines renders the current tunnel health as short tray-menu
+// header rows: connection state, reconnect count, and the last error when
+// present. Tray menu strings should stay short (no CRLF); long errors are
+// truncated so the menu does not become unusable.
+func (app *App) statusTextLines() []string {
+	app.mu.Lock()
+	state := app.state
+	app.mu.Unlock()
+	lines := []string{"Tunnel: " + statusDisplayText(state)}
+	if state.Reconnects > 0 {
+		lines = append(lines, fmt.Sprintf("Reconnects: %d", state.Reconnects))
+	}
+	if errText := strings.TrimSpace(state.LastError); errText != "" {
+		const maxLen = 60
+		if len(errText) > maxLen {
+			errText = errText[:maxLen] + "..."
+		}
+		lines = append(lines, "Last error: "+errText)
+	}
+	return lines
+}
+
+// statusDisplayText converts the raw phase/state pair into a compact,
+// user-friendly tunnel status string.
+func statusDisplayText(state TrayState) string {
+	switch {
+	case state.Phase == "service:unknown":
+		return "service status unavailable"
+	case state.Phase == "exiting":
+		return "exiting"
+	case strings.HasSuffix(state.Phase, "running") && state.State == "connected":
+		return "connected"
+	case strings.HasSuffix(state.Phase, "running"):
+		return state.State
+	case strings.HasSuffix(state.Phase, "pending_config"):
+		return "waiting for pairing"
+	case strings.HasSuffix(state.Phase, "reconnecting"):
+		return "reconnecting"
+	case strings.HasSuffix(state.Phase, "terminal"):
+		return "stopped (error)"
+	case strings.HasSuffix(state.Phase, "stopped"):
+		return "stopped"
+	default:
+		return state.Phase
+	}
+}
+
+// refreshMenu applies state to the tray tooltip and rebuilds the menu so the
+// health header always reflects the latest status.json snapshot.
 func (host *menuHost) refreshMenu(state TrayState) {
-	host.app.mu.Lock()
-	defer host.app.mu.Unlock()
-	// The static tooltip keeps the implementation simple; dynamic per-state
-	// balloons can be layered on later without protocol changes.
+	host.rebuildMenu()
+	var tip [128]uint16
+	copy(tip[:], syscall.StringToUTF16("HooshiX Agent — "+statusDisplayText(state)))
+	host.updateTooltip(tip)
+}
+
+// updateTooltip re-adds the icon with a new tooltip text in place.
+func (host *menuHost) updateTooltip(tip [128]uint16) {
+	data := notifyIconData{
+		Window: host.window,
+		ID:     host.iconToken,
+		Flags:  nifMessage | nifIcon | nifTip,
+		Tip:    tip,
+	}
+	data.Size = uint32(unsafe.Sizeof(data))
+	result, _, err := shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
+	if result == 0 {
+		host.app.logger.Debug("update tray tooltip failed", "error", err)
+	}
 }
 
 func loadAppIcon(instance uintptr) windows.Handle {

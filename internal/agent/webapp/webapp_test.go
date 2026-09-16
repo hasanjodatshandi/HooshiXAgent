@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,6 +56,63 @@ func TestPairingRejectsCrossSiteFormPosts(t *testing.T) {
 		if recorder.Code != http.StatusForbidden {
 			t.Fatalf("%s cross-site POST status=%d want=403", path, recorder.Code)
 		}
+	}
+}
+
+// TestTunnelHealthRendersStatusSnapshot proves the pairing page surfaces the
+// service-written status.json fields (connection, reconnects, last error) and
+// escapes error text derived from remote input.
+func TestTunnelHealthRendersStatusSnapshot(t *testing.T) {
+	app, capability := newTestApp(t)
+	health := TunnelHealth{
+		Phase:        "running",
+		State:        "connected",
+		Reconnects:   7,
+		LastError:    `failed dial <script>alert("x")</script>`,
+		LastUpdateAt: "2026-09-16T07:00:00Z",
+	}
+	data, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app.StateDir(), "status.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/?cap="+capability, nil)
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("root GET status=%d want=200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{"Tunnel status", "connected", "7", "Tunnel status"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page missing %q in body:\n%s", want, body)
+		}
+	}
+	// Error text must be escaped, never rendered as markup.
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("last error rendered unescaped:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatalf("expected escaped error text in body:\n%s", body)
+	}
+}
+
+// TestTunnelHealthMissingFileShowsNeutralRow proves a missing status.json
+// (service stopped, first boot) renders the neutral "status unavailable"
+// row instead of failing the page.
+func TestTunnelHealthMissingFileShowsNeutralRow(t *testing.T) {
+	app, capability := newTestApp(t)
+	request := httptest.NewRequest(http.MethodGet, "/?cap="+capability, nil)
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("root GET status=%d want=200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "status unavailable") {
+		t.Fatalf("missing neutral status row:\n%s", recorder.Body.String())
 	}
 }
 

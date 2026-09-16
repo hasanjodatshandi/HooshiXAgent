@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -202,7 +204,73 @@ func (app *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 		htmlEscape(csrf),
 		exposeRowsHTML(config.Endpoints, csrf, app.capability),
 		exposeOptionsHTML(config.Endpoints),
+		tunnelHealthHTML(loadTunnelHealth(app.stateDir)),
 	)
+}
+
+// TunnelHealth mirrors the service-written status.json snapshot.
+type TunnelHealth struct {
+	Phase        string `json:"phase"`
+	State        string `json:"state"`
+	Reconnects   int64  `json:"reconnects"`
+	LastError    string `json:"last_error,omitempty"`
+	LastUpdateAt string `json:"last_update_at"`
+}
+
+// loadTunnelHealth reads the supervisor-written status.json from the state
+// directory. A missing or unreadable file is not an error for rendering: the
+// UI shows a neutral "status unavailable" row instead (the service may be
+// stopped or the status writer has not run yet).
+func loadTunnelHealth(stateDir string) TunnelHealth {
+	health := TunnelHealth{Phase: "unknown", State: "status-unavailable"}
+	data, err := os.ReadFile(filepath.Join(stateDir, "status.json"))
+	if err != nil {
+		return health
+	}
+	if jsonErr := json.Unmarshal(data, &health); jsonErr != nil {
+		return TunnelHealth{Phase: "unknown", State: "status-unavailable"}
+	}
+	return health
+}
+
+// tunnelHealthHTML renders the tunnel health block for the pairing page.
+// Every interpolated value is HTML-escaped: status fields can embed
+// error strings derived from remote input.
+func tunnelHealthHTML(health TunnelHealth) string {
+	var builder strings.Builder
+	builder.WriteString("<h2>Tunnel status</h2>\n<table>")
+	builder.WriteString("<tr><th>connection</th><th>reconnects</th><th>last error</th></tr>")
+	connection := htmlEscape(displayConnection(health))
+	lastError := strings.TrimSpace(health.LastError)
+	if lastError == "" {
+		lastError = "—"
+	}
+	fmt.Fprintf(&builder, "<tr><td>%s</td><td>%d</td><td>%s</td></tr></table>\n",
+		connection, health.Reconnects, htmlEscape(lastError))
+	return builder.String()
+}
+
+// displayConnection converts the raw phase/state pair into a short,
+// user-friendly connection description.
+func displayConnection(health TunnelHealth) string {
+	switch {
+	case health.Phase == "unknown":
+		return "status unavailable"
+	case health.Phase == "running" && health.State == "connected":
+		return "connected"
+	case health.Phase == "running":
+		return health.State
+	case health.Phase == "reconnecting":
+		return "reconnecting"
+	case health.Phase == "pending_config":
+		return "waiting for pairing"
+	case health.Phase == "terminal":
+		return "stopped (error)"
+	case health.Phase == "stopped":
+		return "stopped"
+	default:
+		return health.Phase + ": " + health.State
+	}
 }
 
 func keyErrText(err error) string {
@@ -541,6 +609,7 @@ var pageTemplate = `<!doctype html>
 %s
 </table>
 <datalist id="expose-ids">%s</datalist>
+%s
 </body>
 </html>
 `

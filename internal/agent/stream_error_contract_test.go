@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 	"github.com/coder/websocket"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 // TestAgentStreamErrorCodesAreContractValid pins the fix for session-killing

@@ -508,12 +508,12 @@ readLoop:
 			_ = sess.sendStreamTerminalClose(stream, "completed")
 		} else {
 			// The contract restricts stream_error codes to a fixed enum
-		// (contracts/v1/tunnel-control.schema.json): local_target_unavailable,
-		// route_revoked, protocol_error, resource_limit, internal_error. The
-		// gateway validates agent-originated control messages and kills the
-		// whole session with a policy violation on any out-of-enum code, so a
-		// mid-stream local read failure MUST map onto an allowed code. The
-		// specific failure detail stays in the free-form message field.
+			// (contracts/v1/tunnel-control.schema.json): local_target_unavailable,
+			// route_revoked, protocol_error, resource_limit, internal_error. The
+			// gateway validates agent-originated control messages and kills the
+			// whole session with a policy violation on any out-of-enum code, so a
+			// mid-stream local read failure MUST map onto an allowed code. The
+			// specific failure detail stays in the free-form message field.
 			code := "local_target_unavailable"
 			message := "approved local target read failed"
 			var networkError net.Error
