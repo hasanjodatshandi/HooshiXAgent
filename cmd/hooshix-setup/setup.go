@@ -142,21 +142,39 @@ func commitStagedPayload(stage string) (map[string]string, error) {
 	backups := make(map[string]string)
 	for _, name := range []string{agentBinary, trayBinary, uninstallBinary} {
 		target := filepath.Join(installDir, name)
+		staged := filepath.Join(stage, name)
+		stagedData, err := os.ReadFile(staged)
+		if err != nil {
+			rollbackFiles(backups)
+			return nil, fmt.Errorf("read staged %s: %w", name, err)
+		}
 		backup := target + ".previous"
 		_ = os.Remove(backup)
 		if _, err := os.Stat(target); err == nil {
 			if err := os.Rename(target, backup); err != nil {
 				rollbackFiles(backups)
-				return nil, err
+				return nil, fmt.Errorf("move aside %s (is the agent or tray still running?): %w", name, err)
 			}
 			backups[target] = backup
 		}
-		if err := os.Rename(filepath.Join(stage, name), target); err != nil {
+		if err := os.Rename(staged, target); err != nil {
 			rollbackFiles(backups)
-			return nil, err
+			return nil, fmt.Errorf("move %s into place: %w", name, err)
 		}
 		if _, existed := backups[target]; !existed {
 			backups[target] = ""
+		}
+		// Verify the deployed bytes actually match the payload. Windows can
+		// report success while an antivirus or filter driver silently reverts
+		// or replaces a just-written executable; a silent mismatch here means
+		// the service would keep running the previous (possibly vulnerable)
+		// build while setup prints "done".
+		installed, err := os.ReadFile(target)
+		if err != nil {
+			return nil, fmt.Errorf("verify installed %s: %w", name, err)
+		}
+		if !bytes.Equal(installed, stagedData) {
+			return nil, fmt.Errorf("installed %s does not match the payload (an antivirus or policy may be reverting the file); aborting", name)
 		}
 	}
 	return backups, nil
