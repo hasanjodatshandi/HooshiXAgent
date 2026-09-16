@@ -50,6 +50,12 @@ func main() {
 
 func run() error {
 	fmt.Println("=== HooshiX Agent Setup ===")
+	if promptUninstall() {
+		if err := exec.Command(os.Args[0], "--uninstall").Run(); err != nil {
+			return fmt.Errorf("uninstall: %w", err)
+		}
+		return nil
+	}
 	stage, err := stagePayload()
 	if err != nil {
 		return fmt.Errorf("stage binaries: %w", err)
