@@ -11,7 +11,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)// menuHost owns the hidden window, tray icon, context menu, and message pump.
+) // menuHost owns the hidden window, tray icon, context menu, and message pump.
 type menuHost struct {
 	app            *App
 	instance       uintptr
@@ -25,17 +25,17 @@ type menuHost struct {
 	// messages; calling it from another thread (the wndproc callback runs
 	// on the message thread, but prior versions dispatched into goroutines)
 	// made the menu fail to appear or vanish instantly.
-	uiMu     sync.Mutex
-	uiWork   []func()
+	uiMu   sync.Mutex
+	uiWork []func()
 
 	// balloon persistence: when enabled, a state-change balloon is re-issued
 	// on a timer until the user dismisses it or the repeat cap is reached.
-	balloonMu       sync.Mutex
-	balloonTimer    *time.Timer
-	balloonTitle    string
-	balloonMessage  string
-	balloonFlags    uint32
-	balloonRounds   int
+	balloonMu      sync.Mutex
+	balloonTimer   *time.Timer
+	balloonTitle   string
+	balloonMessage string
+	balloonFlags   uint32
+	balloonRounds  int
 
 	// icon flash state (reconnect blink).
 	flashStop chan struct{}
@@ -229,37 +229,57 @@ func newMenuHost(app *App) (*menuHost, error) {
 	return host, nil
 }
 
+// Menu command IDs (fixed, dispatched in dispatchMenu) and MF_* flags.
+const (
+	mfString          = 0x0000
+	mfSeparator       = 0x0800
+	mfGrayed          = 0x0002
+	mfChecked         = 0x0008
+	mfByposition      = 0x400
+	menuStatus        = 1000
+	menuPairing       = 1001
+	menuStart         = 1002
+	menuStop          = 1003
+	menuExit          = 1004
+	menuNotifications = 1005
+	// Menu layout (positions): 0..2 status rows, then the static items.
+	statusRowCount = 3
+)
+
 var currentHost *menuHost
 
-// rebuildMenu rewrites the menu contents. It runs on the UI thread only
-// (via refreshMenu from the poll goroutine being marshaled below) because
-// RemoveMenu/AppendMenu while the menu is tracked corrupts display.
+// rebuildMenu updates the live status rows in place. The static items are
+// appended exactly once at startup; only the disabled status header rows
+// (which change) are replaced per poll, via DeleteMenu+InsertMenu with fixed
+// positions. Rebuilding the WHOLE menu from scratch on every poll was the
+// second menu bug: RemoveMenu iterating by position while a TrackPopupMenu
+// was opening (right-click) truncated the menu, so later clicks hit a menu
+// with zero items and nothing appeared. TrackPopupMenu only ever runs on
+// the UI thread and refreshMenu marshals here, so mutation is serialized.
 func (host *menuHost) rebuildMenu() {
-	removeMenu := user32.NewProc("RemoveMenu")
-	for {
-		result, _, _ := removeMenu.Call(uintptr(host.menu), 0, 0x400) // MF_BYPOSITION
-		if result == 0 {
-			break
-		}
-	}
+	deleteMenu := user32.NewProc("DeleteMenu")
+	insertMenu := user32.NewProc("InsertMenuW")
 	appendMenu := user32.NewProc("AppendMenuW")
-	const mfString = 0x0000
-	const mfSeparator = 0x0800
-	const mfGrayed = 0x0002
-	const mfChecked = 0x0008
-	const menuStatus = 1000
-	const menuPairing = 1001
-	const menuStart = 1002
-	const menuStop = 1003
-	const menuExit = 1004
-	const menuNotifications = 1005
+	getMenuItemCount := user32.NewProc("GetMenuItemCount")
 
-	// Disabled header rows surface the live tunnel health (connection
-	// state, reconnect count, and last error) without opening a window.
-	for _, line := range host.app.statusTextLines() {
-		utf16Line := syscall.StringToUTF16Ptr(line)
-		appendMenu.Call(uintptr(host.menu), mfString|mfGrayed, menuStatus, uintptr(unsafe.Pointer(utf16Line)))
+	count, _, _ := getMenuItemCount.Call(uintptr(host.menu))
+	if count == 0 {
+		host.appendStaticMenuItems(appendMenu)
 	}
+	// Replace the status rows (positions 0..2) with current text.
+	for index := 0; index < statusRowCount; index++ {
+		deleteMenu.Call(uintptr(host.menu), uintptr(index), mfByposition)
+	}
+	lines := host.app.statusTextLines()
+	for index, line := range lines {
+		utf16Line := syscall.StringToUTF16Ptr(line)
+		insertMenu.Call(uintptr(host.menu), uintptr(index), uintptr(mfString|mfGrayed), menuStatus, uintptr(unsafe.Pointer(utf16Line)))
+	}
+}
+
+// appendStaticMenuItems adds the fixed items exactly once: pairing,
+// notification toggle, service start/stop, and exit.
+func (host *menuHost) appendStaticMenuItems(appendMenu *windows.LazyProc) {
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuPairing, uintptr(unsafe.Pointer(pairingLabel)))
 	// Notification preference: checked when balloons are enabled. The check
@@ -362,7 +382,11 @@ func (host *menuHost) showMenu() {
 		0,
 	)
 	postMessage.Call(uintptr(host.window), uintptr(wmNull), 0, 0)
-	go host.dispatchMenu(uint32(chosen))
+	// Dispatch on the UI thread itself (we are already there — showMenu runs
+	// through the wmUiWork queue): the previous "go dispatchMenu" raced the
+	// next tray click and could handle the chosen item after the menu was
+	// already rebuilt for a newer snapshot.
+	host.dispatchMenu(uint32(chosen))
 }
 
 func (host *menuHost) dispatchMenu(id uint32) {
