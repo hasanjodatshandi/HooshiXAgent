@@ -5,7 +5,9 @@ package tray
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,6 +21,18 @@ type menuHost struct {
 	menu           windows.Handle
 	iconToken      uint32
 	taskbarCreated uint32
+
+	// balloon persistence: when enabled, a state-change balloon is re-issued
+	// on a timer until the user dismisses it or the repeat cap is reached.
+	balloonMu      sync.Mutex
+	balloonTimer   *time.Timer
+	balloonTitle   string
+	balloonMessage string
+	balloonFlags   uint32
+	balloonRounds  int
+
+	// icon flash state (reconnect blink).
+	flashStop chan struct{}
 }
 
 const (
@@ -59,6 +73,7 @@ const (
 	nifIcon            = 0x02
 	nifTip             = 0x04
 	nifInfo            = 0x10
+	nifRealtime        = 0x40
 	nimAdd             = 0x00
 	nimModify          = 0x01
 	nimDelete          = 0x02
@@ -68,16 +83,31 @@ const (
 	// NIIF_* balloon modifiers (partial set actually used).
 	niifWarning = 0x00000002
 	niifError   = 0x00000003
+
+	// Windows shows a balloon for ~10s then fades it. Re-issuing the same
+	// balloon at this interval keeps the notice on screen until the user
+	// interacts with it (click, ESC, or it times out after several rounds
+	// on builds where Windows caps repeats).
+	balloonRepeatInterval = 9 * time.Second
+	// balloonMaxRepeats caps a persistent notice so a genuinely unattended
+	// session does not pop a balloon forever; 6 rounds ≈ 1 minute.
+	balloonMaxRepeats = 6
+
+	// reconnectFlashDuration is how long the icon blinks between the old
+	// and new color after a reconnect, so the transition is visible.
+	reconnectFlashDuration = 4 * time.Second
+	reconnectFlashInterval = 300 * time.Millisecond
 )
 
 var (
-	className    = syscall.StringToUTF16Ptr("HooshiXAgentTray")
-	windowTitle  = syscall.StringToUTF16Ptr("HooshiX Agent Tray")
-	pairingLabel = syscall.StringToUTF16Ptr("Open pairing page")
-	startLabel   = syscall.StringToUTF16Ptr("Start service")
-	stopLabel    = syscall.StringToUTF16Ptr("Stop service")
-	exitLabel    = syscall.StringToUTF16Ptr("Exit")
-	menuSepLabel = syscall.StringToUTF16Ptr("-")
+	className          = syscall.StringToUTF16Ptr("HooshiXAgentTray")
+	windowTitle        = syscall.StringToUTF16Ptr("HooshiX Agent Tray")
+	pairingLabel       = syscall.StringToUTF16Ptr("Open pairing page")
+	notificationsLabel = syscall.StringToUTF16Ptr("Show balloon notifications")
+	startLabel         = syscall.StringToUTF16Ptr("Start service")
+	stopLabel          = syscall.StringToUTF16Ptr("Stop service")
+	exitLabel          = syscall.StringToUTF16Ptr("Exit")
+	menuSepLabel       = syscall.StringToUTF16Ptr("-")
 )
 
 // wndClassEx mirrors the Win32 WNDCLASSEXW structure exactly.
@@ -180,11 +210,13 @@ func (host *menuHost) rebuildMenu() {
 	const mfString = 0x0000
 	const mfSeparator = 0x0800
 	const mfGrayed = 0x0002
+	const mfChecked = 0x0008
 	const menuStatus = 1000
 	const menuPairing = 1001
 	const menuStart = 1002
 	const menuStop = 1003
 	const menuExit = 1004
+	const menuNotifications = 1005
 
 	// Disabled header rows surface the live tunnel health (connection
 	// state, reconnect count, and last error) without opening a window.
@@ -194,6 +226,14 @@ func (host *menuHost) rebuildMenu() {
 	}
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuPairing, uintptr(unsafe.Pointer(pairingLabel)))
+	// Notification preference: checked when balloons are enabled. The check
+	// mark renders by MF_CHECKED; the label never changes so the menu row
+	// stays stable for the user.
+	notifyFlags := uintptr(mfString)
+	if host.app.settings.enabled() {
+		notifyFlags |= uintptr(mfChecked)
+	}
+	appendMenu.Call(uintptr(host.menu), notifyFlags, menuNotifications, uintptr(unsafe.Pointer(notificationsLabel)))
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuStart, uintptr(unsafe.Pointer(startLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuStop, uintptr(unsafe.Pointer(stopLabel)))
@@ -215,14 +255,24 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	case wmTrayCallback:
 		// Tray mouse events arrive in the LOWORD of lParam: WM_LBUTTONUP,
 		// WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_RBUTTONDBLCLK (and NIN_SELECT /
-		// NIN_KEYSELECT for keyboard-invoked tray activation).
-		switch uint32(lParam) & 0xFFFF {
+		// NIN_KEYSELECT for keyboard-invoked tray activation). Balloon
+		// interaction arrives as NIN_BALLOONUSERCLICK (user click) and
+		// NIN_BALLOONTIMEUP (auto-hide): both end the persistence cycle.
+		switch code := uint32(lParam) & 0xFFFF; code {
 		case 0x0202, 0x0203, 0x0206, // WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK
-			0x0205,         // WM_RBUTTONUP
-			0x0404, 0x0405: // NIN_SELECT, NIN_KEYSELECT (keyboard/Space/Enter)
+			0x0205: // WM_RBUTTONUP
 			host.showMenu()
+		case 0x0406: // NIN_BALLOONUSERCLICK
+			host.stopBalloonRepeat()
+		case 0x0403: // NIN_BALLOONTIMEUP
+			// Plain auto-hide: persistence timer re-issues (unless the
+			// user already dismissed, in which case the cycle is cleared).
+		default:
+			_ = code
 		}
 	case wmDestroy:
+		host.stopBalloonRepeat()
+		host.stopFlash()
 		_ = host.notify(nimDelete)
 		postQuitMessage()
 		return 0
@@ -284,7 +334,22 @@ func (host *menuHost) dispatchMenu(id uint32) {
 		host.app.serviceStop()
 	case 1004:
 		host.app.exit()
+	case 1005:
+		host.toggleNotifications()
 	}
+}
+
+// toggleNotifications flips the persisted balloon preference and refreshes
+// the menu check mark. Disabling also cancels any pending balloon repeat
+// and the reconnect blink so the change applies immediately.
+func (host *menuHost) toggleNotifications() {
+	newValue := !host.app.settings.enabled()
+	host.app.settings.setEnabled(newValue)
+	if !newValue {
+		host.stopBalloonRepeat()
+		host.stopFlash()
+	}
+	host.app.refresh()
 }
 
 func (host *menuHost) run() error {
@@ -417,21 +482,95 @@ func (host *menuHost) showBalloon(title, message string, infoFlags uint32) {
 	}
 }
 
+// showPersistentBalloon keeps a balloon on screen until the user dismisses
+// it: Windows auto-fades a balloon after ~10 seconds, so while the user has
+// not closed it we re-issue the identical balloon on a timer, up to a cap
+// (balloonMaxRepeats) so an unattended desktop does not pop forever.
+// Dismissal detection: Windows posts NIN_BALLOONUSERCLICK (user clicked) or
+// NIN_BALLOONTIMEOUT. The wndproc cancels repeats on user click; on plain
+// timeout the timer naturally re-issues.
+func (host *menuHost) showPersistentBalloon(title, message string, infoFlags uint32) {
+	host.balloonMu.Lock()
+	defer host.balloonMu.Unlock()
+	// Identical content already cycling: nothing to do.
+	if host.balloonTimer != nil && host.balloonTitle == title && host.balloonMessage == message {
+		return
+	}
+	host.stopBalloonRepeatLocked()
+	host.balloonTitle = title
+	host.balloonMessage = message
+	host.balloonFlags = infoFlags
+	host.balloonRounds = 1
+	host.showBalloon(title, message, infoFlags)
+	host.scheduleBalloonRepeatLocked()
+}
+
+// scheduleBalloonRepeatLocked arms the re-issue timer. Caller holds balloonMu.
+func (host *menuHost) scheduleBalloonRepeatLocked() {
+	if host.balloonRounds >= balloonMaxRepeats {
+		host.clearBalloonStateLocked()
+		return
+	}
+	title, message, flags := host.balloonTitle, host.balloonMessage, host.balloonFlags
+	host.balloonTimer = time.AfterFunc(balloonRepeatInterval, func() {
+		host.balloonMu.Lock()
+		defer host.balloonMu.Unlock()
+		if host.balloonTitle == "" {
+			return // dismissed
+		}
+		host.balloonRounds++
+		host.showBalloon(title, message, flags)
+		host.scheduleBalloonRepeatLocked()
+	})
+}
+
+// stopBalloonRepeat cancels any pending balloon re-issue (user dismissed or
+// the state changed). Safe to call from any goroutine.
+func (host *menuHost) stopBalloonRepeat() {
+	host.balloonMu.Lock()
+	defer host.balloonMu.Unlock()
+	host.stopBalloonRepeatLocked()
+}
+
+// stopBalloonRepeatLocked is stopBalloonRepeat with balloonMu held.
+func (host *menuHost) stopBalloonRepeatLocked() {
+	if host.balloonTimer != nil {
+		host.balloonTimer.Stop()
+		host.balloonTimer = nil
+	}
+	host.clearBalloonStateLocked()
+}
+
+// clearBalloonStateLocked resets the balloon cycle state. Caller holds balloonMu.
+func (host *menuHost) clearBalloonStateLocked() {
+	host.balloonTitle = ""
+	host.balloonMessage = ""
+	host.balloonFlags = 0
+	host.balloonRounds = 0
+}
+
 // notifyTunnelEvent posts a balloon for a tunnel state transition. Called
 // on the poll goroutine via refreshMenu; Shell_NotifyIcon is thread-safe.
 func (host *menuHost) notifyTunnelEvent(from, to TrayState) {
+	if !host.app.settings.enabled() {
+		host.stopBalloonRepeat()
+		host.stopFlash()
+		return
+	}
 	fromDown, toDown := isDownState(from), isDownState(to)
 	fromUp := isUpState(from)
 	switch {
 	case toDown && fromUp:
-		host.showBalloon("HooshiX tunnel disconnected", disconnectText(to), niifWarning)
+		host.showPersistentBalloon("HooshiX tunnel disconnected", disconnectText(to), niifWarning)
 	case toDown && fromDown && to.Phase != from.Phase:
 		// Escalation only: stopped → terminal gets one balloon; silent
 		// churn between disconnected and reconnecting stays silent.
 		if strings.HasSuffix(to.Phase, "terminal") {
-			host.showBalloon("HooshiX Agent stopped", disconnectText(to), niifError)
+			host.showPersistentBalloon("HooshiX Agent stopped", disconnectText(to), niifError)
 		}
 	case fromDown && isUpState(to):
+		host.stopBalloonRepeat()
+		host.startFlash()
 		host.showBalloon("HooshiX tunnel reconnected", "The tunnel is connected again.", 0)
 	}
 }
@@ -443,7 +582,13 @@ func isUpState(state TrayState) bool {
 
 // isDownState reports whether the tunnel is service-running but not
 // connected (reconnecting, waiting for pairing, terminal, ...).
+// isDownState reports whether the tunnel is degraded: the supervisor is
+// alive but not connected (or the supervisor itself failed). A running+
+// connected snapshot is up, not down.
 func isDownState(state TrayState) bool {
+	if isUpState(state) {
+		return false
+	}
 	return strings.HasSuffix(state.Phase, "running") ||
 		strings.HasSuffix(state.Phase, "reconnecting") ||
 		strings.HasSuffix(state.Phase, "terminal")
@@ -466,6 +611,69 @@ func (app *App) currentState() TrayState {
 	app.mu.Lock()
 	defer app.mu.Unlock()
 	return app.state
+}
+
+// startFlash blinks the tray icon between the current and adjacent color
+// for reconnectFlashDuration so the transition is visible. The blink cycle
+// ends on the target color (the icon settles on the new state color).
+func (host *menuHost) startFlash() {
+	host.stopFlash()
+	stop := make(chan struct{})
+	host.flashStop = stop
+	state := host.app.currentState()
+	target := statusIcon(readinessFromState(state))
+	// The alternate color is the same-hue dimmed variant: reuse the yellow
+	// icon for contrast against green/red endpoints.
+	alternate := statusIcon(readinessYellow)
+	if readinessFromState(state) == readinessYellow {
+		alternate = statusIcon(readinessGreen)
+	}
+	go func() {
+		ticker := time.NewTicker(reconnectFlashInterval)
+		defer ticker.Stop()
+		deadline := time.After(reconnectFlashDuration)
+		showAlternate := true
+		for {
+			select {
+			case <-stop:
+				setTrayIcon(target)
+				return
+			case <-deadline:
+				setTrayIcon(target)
+				return
+			case <-ticker.C:
+				if showAlternate {
+					setTrayIcon(alternate)
+				} else {
+					setTrayIcon(target)
+				}
+				showAlternate = !showAlternate
+			}
+		}
+	}()
+}
+
+// stopFlash cancels any running blink and settles the icon on the state color.
+func (host *menuHost) stopFlash() {
+	if host.flashStop != nil {
+		close(host.flashStop)
+		host.flashStop = nil
+		setTrayIcon(statusIcon(readinessFromState(host.app.currentState())))
+	}
+}
+
+// setTrayIcon swaps only the icon portion of the tray entry.
+func setTrayIcon(icon windows.Handle) {
+	if icon == 0 {
+		return
+	}
+	var data notifyIconData
+	data.Window = currentHost.window
+	data.ID = currentHost.iconToken
+	data.Flags = nifMessage | nifIcon
+	data.Icon = icon
+	data.Size = uint32(unsafe.Sizeof(data))
+	shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
 }
 
 // refreshMenu applies state to the tray icon, tooltip, and menu so tunnel

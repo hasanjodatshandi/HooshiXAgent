@@ -36,12 +36,24 @@ type TrayState struct {
 
 // App owns the tray lifecycle.
 type App struct {
-	logger *slog.Logger
-	menu   *menuHost
-	state  TrayState
+	logger   *slog.Logger
+	menu     *menuHost
+	state    TrayState
+	settings *settingsStore
 
 	mu sync.Mutex
 }
+
+// currentTrayLogger returns the package logger for helpers outside App.
+func currentTrayLogger() *slog.Logger {
+	if packageLogger == nil {
+		return nil
+	}
+	return packageLogger
+}
+
+// packageLogger is set at startup for non-App helpers (settings store).
+var packageLogger *slog.Logger
 
 // Run starts the tray app and blocks until the message loop ends.
 func Run() error {
@@ -53,7 +65,8 @@ func Run() error {
 	}
 	logDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "HooshiXAgent")
 	logger := newTrayLogger(logDir)
-	app := &App{logger: logger}
+	packageLogger = logger
+	app := &App{logger: logger, settings: newSettingsStore(logDir)}
 
 	host, err := newMenuHost(app)
 	if err != nil {
