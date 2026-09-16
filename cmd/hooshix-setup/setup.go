@@ -50,8 +50,12 @@ func main() {
 
 func run() error {
 	fmt.Println("=== HooshiX Agent Setup ===")
-	if promptUninstall() {
-		if err := exec.Command(os.Args[0], "--uninstall").Run(); err != nil {
+	if uninstall, keepConfig := promptUninstall(); uninstall {
+		args := []string{"--uninstall"}
+		if keepConfig {
+			args = append(args, keepConfigFlag)
+		}
+		if err := exec.Command(os.Args[0], args...).Run(); err != nil {
 			return fmt.Errorf("uninstall: %w", err)
 		}
 		return nil

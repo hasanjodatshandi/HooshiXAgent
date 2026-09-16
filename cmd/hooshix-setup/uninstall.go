@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,8 +25,24 @@ func userStateDir() string {
 	return ""
 }
 
+// uninstallOptions carries the user's cleanup choices into the worker.
+type uninstallOptions struct {
+	KeepConfig bool
+}
+
+// keepConfigFlag is passed to the worker process (argument lists cannot hold
+// bools) so the interactive choice survives the parent→worker handoff. The
+// scripted --uninstall path defaults to full cleanup unless this flag is set.
+const keepConfigFlag = "--keep-config"
+
 func runUninstall() error {
-	if len(os.Args) < 2 || os.Args[1] != "--uninstall-worker" {
+	keepConfig := false
+	for _, arg := range os.Args[1:] {
+		if arg == keepConfigFlag {
+			keepConfig = true
+		}
+	}
+	if len(os.Args) < 2 || (os.Args[1] != "--uninstall-worker" && os.Args[1] != keepConfigFlag) {
 		// The parent copies itself to %TEMP% so the installer EXE can be
 		// deleted from the install directory while it is still running. The
 		// worker self-deletes after uninstall so no scheduled task or stale
@@ -42,7 +59,11 @@ func runUninstall() error {
 		if err := os.WriteFile(worker, data, 0o755); err != nil {
 			return err
 		}
-		cmd := exec.Command(worker, "--uninstall-worker", self)
+		args := []string{"--uninstall-worker", self}
+		if keepConfig {
+			args = append(args, keepConfigFlag)
+		}
+		cmd := exec.Command(worker, args...)
 		if err := cmd.Start(); err != nil {
 			_ = os.Remove(worker)
 			return err
@@ -86,10 +107,17 @@ func runUninstall() error {
 	// State cleanup runs last and is best-effort: leftover credentials in
 	// ProgramData are machine-scoped secrets (DPAPI under LocalSystem) and
 	// the LOCALAPPDATA copy holds per-user logs; both must go on uninstall.
-	// The service may have left SYSTEM-only DACLs on ProgramData files, so
+	// KeepConfig preserves the pairing/configuration files so a reinstall
+	// reconnects without re-pairing, while credentials stay local. The
+	// service may have left SYSTEM-only DACLs on ProgramData files, so
 	// ownership is recaptured first where the state tree still exists.
-	fmt.Println("removing agent state (ProgramData) ...")
-	record("remove service state", removeAllState(stateDataDir()))
+	if keepConfig {
+		fmt.Println("keeping configuration (keep-config selected) ...")
+		record("preserve configuration", preserveStateConfig(stateDataDir()))
+	} else {
+		fmt.Println("removing agent state (ProgramData) ...")
+		record("remove service state", removeAllState(stateDataDir()))
+	}
 	fmt.Println("removing agent state (per-user) ...")
 	if dir := userStateDir(); dir != "" {
 		record("remove user state", os.RemoveAll(dir))
@@ -98,7 +126,51 @@ func runUninstall() error {
 	if len(failures) != 0 {
 		return fmt.Errorf("uninstall incomplete: %s", strings.Join(failures, "; "))
 	}
-	fmt.Println("HooshiX Agent has been removed from this computer.")
+	if keepConfig {
+		fmt.Println("HooshiX Agent has been removed. Configuration was kept and will be reused by the next install.")
+	} else {
+		fmt.Println("HooshiX Agent has been removed from this computer.")
+	}
+	return nil
+}
+
+// preserveStateConfig repairs ownership of the state tree (see
+// removeAllState) and then removes everything except the pairing/config
+// records: config.json, the secret store, and the state marker stay so the
+// next install reconnects without re-pairing. Logs, status, and the
+// capability file are dropped (they are regenerated on install).
+func preserveStateConfig(root string) error {
+	if _, err := os.Lstat(root); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := recaptureStateOwnership(root, ""); err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall: state ownership recovery skipped:", err)
+	}
+	keep := map[string]bool{
+		"config.json":          true,
+		"secrets.dpapi":        true,
+		"secrets.json":         true,
+		".hooshix-agent-state": true,
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, entry := range entries {
+		if keep[entry.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			failures = append(failures, entry.Name())
+		}
+	}
+	if len(failures) != 0 {
+		return errors.New("could not remove: " + strings.Join(failures, ", "))
+	}
 	return nil
 }
 
@@ -146,33 +218,34 @@ func scheduleSelfDelete(path string) {
 	_ = exec.Command("cmd.exe", "/D", "/C", command).Start()
 }
 
-// uninstallInvoked reports whether this run should perform an uninstall
-// rather than an install (explicit flag or the interactive menu choice).
-func uninstallInvoked() bool {
-	if len(os.Args) > 1 && (os.Args[1] == "--uninstall" || os.Args[1] == "--uninstall-worker") {
-		return true
-	}
-	return false
-}
-
-// promptUninstall asks the user at the console whether to uninstall. Only the
-// interactive (console) path can reach this; stdin redirection skips the
-// prompt and returns false so scripted runs keep installing.
-func promptUninstall() bool {
+// promptUninstall asks the user at the console what to do, and whether an
+// uninstall should keep the configuration (so the next install reconnects
+// without re-pairing). Only the interactive (console) path can reach this;
+// stdin redirection skips the prompt and returns false so scripted runs
+// keep installing.
+func promptUninstall() (uninstall, keepConfig bool) {
 	if stdinInfo, err := os.Stdin.Stat(); err != nil || stdinInfo.Mode()&os.ModeCharDevice == 0 {
-		return false
+		return false, false
 	}
 	fmt.Println("  1) install / repair the HooshiX Agent (default)")
-	fmt.Println("  2) uninstall the HooshiX Agent (removes service, tray, and state)")
+	fmt.Println("  2) uninstall and remove everything (service, tray, config, credentials)")
+	fmt.Println("  3) uninstall but keep the configuration (next install reconnects without re-pairing)")
 	fmt.Print("choose an option [1]: ")
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(line)
-	return line == "2" || strings.EqualFold(line, "uninstall")
+	switch {
+	case line == "2" || strings.EqualFold(line, "uninstall"):
+		return true, false
+	case line == "3" || strings.EqualFold(line, "keep"):
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 func init() {
-	if len(os.Args) > 1 && (os.Args[1] == "--uninstall" || os.Args[1] == "--uninstall-worker") {
+	if len(os.Args) > 1 && (os.Args[1] == "--uninstall" || os.Args[1] == "--uninstall-worker" || os.Args[1] == keepConfigFlag) {
 		err := runUninstall()
 		if os.Args[1] == "--uninstall-worker" {
 			if self, selfErr := os.Executable(); selfErr == nil {

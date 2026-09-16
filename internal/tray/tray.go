@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -57,6 +58,16 @@ var packageLogger *slog.Logger
 
 // Run starts the tray app and blocks until the message loop ends.
 func Run() error {
+	// The window, its message pump, and every TrackPopupMenu call must run
+	// on ONE OS thread: Windows delivers a window's messages to the thread
+	// that created it. Without thread pinning the Go scheduler can resume
+	// the pump goroutine on a different thread, so the tray window's
+	// messages (icon clicks!) are delivered to a thread nobody pumps —
+	// the menu then appears only when the scheduler happens to cooperate.
+	// This is the root cause of the "menu sometimes never shows" report.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if !acquireSingletonLock() {
 		// Another tray instance already owns the session tray slot (login
 		// task racing a manual launch, or a double start). Silently exit:

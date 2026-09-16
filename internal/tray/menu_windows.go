@@ -11,9 +11,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
-
-// menuHost owns the hidden window, tray icon, context menu, and message pump.
+)// menuHost owns the hidden window, tray icon, context menu, and message pump.
 type menuHost struct {
 	app            *App
 	instance       uintptr
@@ -22,21 +20,56 @@ type menuHost struct {
 	iconToken      uint32
 	taskbarCreated uint32
 
+	// uiWork serializes menu/window work onto the message-loop thread.
+	// TrackPopupMenu must run on the thread that pumps the owner window's
+	// messages; calling it from another thread (the wndproc callback runs
+	// on the message thread, but prior versions dispatched into goroutines)
+	// made the menu fail to appear or vanish instantly.
+	uiMu     sync.Mutex
+	uiWork   []func()
+
 	// balloon persistence: when enabled, a state-change balloon is re-issued
 	// on a timer until the user dismisses it or the repeat cap is reached.
-	balloonMu      sync.Mutex
-	balloonTimer   *time.Timer
-	balloonTitle   string
-	balloonMessage string
-	balloonFlags   uint32
-	balloonRounds  int
+	balloonMu       sync.Mutex
+	balloonTimer    *time.Timer
+	balloonTitle    string
+	balloonMessage  string
+	balloonFlags    uint32
+	balloonRounds   int
 
 	// icon flash state (reconnect blink).
 	flashStop chan struct{}
 }
 
+// runOnUi queues a closure to execute on the message-loop thread and posts
+// the UI-work message so the pump picks it up on the next iteration.
+func (host *menuHost) runOnUi(work func()) {
+	host.uiMu.Lock()
+	host.uiWork = append(host.uiWork, work)
+	host.uiMu.Unlock()
+	postMessageProc := user32.NewProc("PostMessageW")
+	postMessageProc.Call(uintptr(host.window), wmUiWork, 0, 0)
+}
+
+// drainUiWork runs every queued closure on the message-loop thread. Called
+// from trayWndProc when the UI-work message arrives.
+func (host *menuHost) drainUiWork() {
+	for {
+		host.uiMu.Lock()
+		if len(host.uiWork) == 0 {
+			host.uiMu.Unlock()
+			return
+		}
+		work := host.uiWork[0]
+		host.uiWork = host.uiWork[1:]
+		host.uiMu.Unlock()
+		work()
+	}
+}
+
 const (
 	wmTrayCallback = 0x8000 // WM_APP
+	wmUiWork       = 0x8001 // WM_APP+1: run a queued UI-thread closure
 	wmDestroy      = 0x0002
 	wmEndSession   = 0x0016
 	wmClose        = 0x0010
@@ -198,6 +231,9 @@ func newMenuHost(app *App) (*menuHost, error) {
 
 var currentHost *menuHost
 
+// rebuildMenu rewrites the menu contents. It runs on the UI thread only
+// (via refreshMenu from the poll goroutine being marshaled below) because
+// RemoveMenu/AppendMenu while the menu is tracked corrupts display.
 func (host *menuHost) rebuildMenu() {
 	removeMenu := user32.NewProc("RemoveMenu")
 	for {
@@ -252,21 +288,26 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 		return 0
 	}
 	switch message {
+	case wmUiWork:
+		host.drainUiWork()
+		return 0
 	case wmTrayCallback:
 		// Tray mouse events arrive in the LOWORD of lParam: WM_LBUTTONUP,
 		// WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_RBUTTONDBLCLK (and NIN_SELECT /
-		// NIN_KEYSELECT for keyboard-invoked tray activation). Balloon
-		// interaction arrives as NIN_BALLOONUSERCLICK (user click) and
-		// NIN_BALLOONTIMEUP (auto-hide): both end the persistence cycle.
+		// NIN_KEYSELECT for keyboard-invoked tray activation). Menu display
+		// is queued to the message-pump thread: TrackPopupMenu must run
+		// there, and running it inline while the wndproc is on the stack
+		// re-enters the pump — the race that made the menu appear only
+		// sometimes. Balloon interaction arrives as NIN_BALLOONUSERCLICK
+		// (user click) and NIN_BALLOONTIMEUP (auto-hide).
 		switch code := uint32(lParam) & 0xFFFF; code {
 		case 0x0202, 0x0203, 0x0206, // WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK
-			0x0205: // WM_RBUTTONUP
-			host.showMenu()
-		case 0x0406: // NIN_BALLOONUSERCLICK
+			0x0205,         // WM_RBUTTONUP
+			0x0404, 0x0405: // NIN_SELECT, NIN_KEYSELECT
+			host.runOnUi(host.showMenu)
+		case 0x0406: // NIN_BALLOONUSERCLICK: user dismissed the balloon
 			host.stopBalloonRepeat()
-		case 0x0403: // NIN_BALLOONTIMEUP
-			// Plain auto-hide: persistence timer re-issues (unless the
-			// user already dismissed, in which case the cycle is cleared).
+		case 0x0403: // NIN_BALLOONTIMEUP: persistence timer re-issues
 		default:
 			_ = code
 		}
@@ -557,16 +598,24 @@ func (host *menuHost) notifyTunnelEvent(from, to TrayState) {
 		host.stopFlash()
 		return
 	}
-	fromDown, toDown := isDownState(from), isDownState(to)
-	fromUp := isUpState(from)
+	// A zero Phase means no previous snapshot (tray just started): treat it
+	// as "unknown", which is down — the user must be told the tunnel is
+	// not connected at startup instead of only when it later drops. The
+	// reconnect case below fires the moment the tunnel first connects,
+	// which also proves the notification path works end to end.
+	fromKnown := from.Phase != ""
+	fromDown := !fromKnown || isDownState(from)
+	toDown := isDownState(to)
+	fromUp := fromKnown && isUpState(from)
 	switch {
 	case toDown && fromUp:
 		host.showPersistentBalloon("HooshiX tunnel disconnected", disconnectText(to), niifWarning)
-	case toDown && fromDown && to.Phase != from.Phase:
-		// Escalation only: stopped → terminal gets one balloon; silent
-		// churn between disconnected and reconnecting stays silent.
-		if strings.HasSuffix(to.Phase, "terminal") {
-			host.showPersistentBalloon("HooshiX Agent stopped", disconnectText(to), niifError)
+	case toDown && fromDown && (!fromKnown || to.Phase != from.Phase):
+		// On startup (unknown → down) tell the user why the icon is yellow;
+		// afterwards only escalate stopped → terminal, keeping churn between
+		// reconnecting/waiting states silent.
+		if !fromKnown || strings.HasSuffix(to.Phase, "terminal") {
+			host.showPersistentBalloon("HooshiX tunnel not connected", disconnectText(to), niifWarning)
 		}
 	case fromDown && isUpState(to):
 		host.stopBalloonRepeat()
