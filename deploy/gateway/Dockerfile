@@ -18,5 +18,7 @@ RUN apk add --no-cache ca-certificates curl libcrypto3=3.5.8-r0 libssl3=3.5.8-r0
 COPY --from=build /out/hooshix-gateway /usr/local/bin/hooshix-gateway
 
 USER 10001:10001
-EXPOSE 8443
+# 8443 is the public TLS/WSS listener; 9090 is the loopback-only
+# administrative listener (liveness/readiness/metrics).
+EXPOSE 8443 9090
 ENTRYPOINT ["/usr/local/bin/hooshix-gateway"]

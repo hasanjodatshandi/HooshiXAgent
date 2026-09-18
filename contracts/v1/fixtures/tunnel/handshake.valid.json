@@ -26,6 +26,7 @@
     "message_type": "session_ready",
     "session_id": "session-001",
     "heartbeat_interval_seconds": 15,
-    "idle_timeout_seconds": 45
+    "idle_timeout_seconds": 45,
+    "resume_challenge": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
   }
 }

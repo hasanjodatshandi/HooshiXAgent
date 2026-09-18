@@ -21,6 +21,38 @@ mkdir -p "$stage"
 go build -o "$stage/hooshix-agent" ./cmd/agent
 cp packaging/agent/unix/install.sh packaging/agent/unix/uninstall.sh "$stage/"
 chmod 755 "$stage/hooshix-agent" "$stage/install.sh" "$stage/uninstall.sh"
+# Release packages always ship SHA256SUMS next to the binary and the installer
+# verifies against it, so the smoke package stages the same shape.
+(cd "$stage" && sha256sum hooshix-agent >SHA256SUMS)
+
+# A tampered or unmanifested package must be refused before any replacement.
+tampered_stage="$work/tampered-package"
+mkdir -p "$tampered_stage"
+cp packaging/agent/unix/install.sh "$tampered_stage/install.sh"
+printf '%s\n' '#!/bin/sh' 'echo tampered-agent' >"$tampered_stage/hooshix-agent"
+chmod 755 "$tampered_stage/install.sh" "$tampered_stage/hooshix-agent"
+printf '%s\n' "$(printf '0%.0s' $(seq 1 64))  hooshix-agent" >"$tampered_stage/SHA256SUMS"
+if HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$tampered_stage/hooshix-agent" \
+  "$tampered_stage/install.sh" --prefix "$work/tampered-bin" --state-dir "$work/tampered-state" \
+  --service-path "$work/tampered-service" --no-service >/dev/null 2>&1; then
+  echo "Agent installer accepted a binary that does not match the package SHA256SUMS" >&2
+  exit 1
+fi
+printf '%s\n' '0000000000000000000000000000000000000000000000000000000000000000  other-binary' >"$tampered_stage/SHA256SUMS"
+if HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$tampered_stage/hooshix-agent" \
+  "$tampered_stage/install.sh" --prefix "$work/tampered-bin" --state-dir "$work/tampered-state" \
+  --service-path "$work/tampered-service" --no-service >/dev/null 2>&1; then
+  echo "Agent installer accepted a SHA256SUMS manifest with no entry for the Agent binary" >&2
+  exit 1
+fi
+rm -f "$tampered_stage/SHA256SUMS"
+if HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$tampered_stage/hooshix-agent" \
+  "$tampered_stage/install.sh" --prefix "$work/tampered-bin" --state-dir "$work/tampered-state" \
+  --service-path "$work/tampered-service" --no-service >/dev/null 2>&1; then
+  echo "Agent installer accepted a package with no SHA256SUMS manifest" >&2
+  exit 1
+fi
+[[ ! -e "$work/tampered-bin/hooshix-agent" ]]
 
 unsafe_home="$work/unsafe-home"
 mkdir -p "$unsafe_home"

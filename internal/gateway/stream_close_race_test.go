@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -19,7 +20,7 @@ func TestStreamFinishRacesPreserveQueuedData(t *testing.T) {
 		global := newByteBudget(1 << 20)
 		session := newByteBudget(1 << 20)
 		var rejects atomic.Uint64
-		stream := newStream(1, 8, 1<<20, session, global, &rejects)
+		stream := newStream(context.Background(), 1, 8, 1<<20, session, global, &rejects)
 
 		header := bytes.Repeat([]byte{'H'}, 156)
 		body := bytes.Repeat([]byte{'B'}, 4448)
@@ -56,7 +57,7 @@ func TestStreamFinishDeliversTerminalErrorAfterData(t *testing.T) {
 	global := newByteBudget(1 << 20)
 	session := newByteBudget(1 << 20)
 	var rejects atomic.Uint64
-	stream := newStream(2, 8, 1<<20, session, global, &rejects)
+	stream := newStream(context.Background(), 2, 8, 1<<20, session, global, &rejects)
 
 	payload := []byte("partial-response")
 	if err := stream.enqueue(payload); err != nil {
@@ -84,7 +85,7 @@ func TestStreamReadBlocksUntilTerminal(t *testing.T) {
 	global := newByteBudget(1 << 20)
 	session := newByteBudget(1 << 20)
 	var rejects atomic.Uint64
-	stream := newStream(3, 8, 1<<20, session, global, &rejects)
+	stream := newStream(context.Background(), 3, 8, 1<<20, session, global, &rejects)
 
 	done := make(chan error, 1)
 	go func() {

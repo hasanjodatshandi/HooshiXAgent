@@ -50,7 +50,9 @@ The Docker Compose profile keeps both Gateway and Caddy at 256 MiB memory, 1 CPU
 
 ## Runtime, packaging and recovery
 
-The Agent supports persistent identity/configuration, explicit local exposure mappings, `status`, `doctor`, native user-scoped persistence definitions and packaged rollback. Release packages are built for Linux/macOS/Windows on amd64/arm64.
+The Agent supports persistent identity/configuration, explicit local exposure mappings, `status`, `doctor`, native persistence definitions and packaged rollback. Release packages are built for Linux/macOS/Windows on amd64/arm64.
+
+Agent persistence is user-scoped on Linux (`systemd --user`) and macOS (LaunchAgent). **On Windows the Agent runs as the `HooshiXAgent` service under the LocalSystem default account, with state at `%ProgramData%\HooshiXAgent`**, as decided in `docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md`. That ADR supersedes the Windows clauses of ADR-0010: a device with no interactive logon session still has to serve its loopback services, which a logon-triggered per-user task cannot do. Windows secrets stay protected by DPAPI in the service account's user scope (not machine scope) and no password-bearing service account is used. The supported Windows distribution channel is `HooshiXAgent-Setup.exe`, which is a **published** release artifact (built, checksummed, SBOM-scanned and attested by `.github/workflows/release.yml`), and the Windows zip's `Install-HooshiXAgent.ps1` now installs the same service model at the same machine-wide paths — ADR-0014 rollout steps R1 and R5. Windows binaries are still **not** Authenticode-signed; that accepted MVP risk is recorded in `docs/runtime/packaging-and-operations.md`.
 
 The server deployment remains **Docker Compose only**, with exactly Caddy and Tunnel Gateway. Caddy owns public ports/TLS and verifies the Gateway over deployment-local CA trust. The CA private key remains host-only.
 

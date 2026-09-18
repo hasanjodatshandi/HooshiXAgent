@@ -45,7 +45,7 @@ func TestGatewayOperationalMetricsExposure(t *testing.T) {
 	}
 
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	body := metrics.Body.String()
 
 	for _, metric := range []string{
@@ -86,7 +86,7 @@ func TestGatewayOperationalMetricsExposure(t *testing.T) {
 	sess.pendingPing.Store(time.Now().Add(-2 * time.Millisecond))
 	sess.pingLatency.Store(2 * time.Millisecond.Nanoseconds())
 	metrics = httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_session_latency_ms 2.000") {
 		t.Fatalf("observed latency not rendered:\n%s", metrics.Body.String())
 	}
@@ -117,7 +117,7 @@ func TestGatewayReconnectCounterIncrements(t *testing.T) {
 		t.Fatalf("initial reconnects=%d want 0", got)
 	}
 
-	resumer, ok := connectResumingMockAgent(t, tlsServer, identity, originalID, local.URL)
+	resumer, ok := connectResumingMockAgent(t, tlsServer, identity, originalID, first.resumeChallenge, local.URL)
 	defer resumer.close()
 	if !ok {
 		t.Fatal("resume of a live session was rejected")
@@ -125,7 +125,7 @@ func TestGatewayReconnectCounterIncrements(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return gateway.resources.reconnects.Load() == 1 })
 
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_reconnects_total 1") {
 		t.Fatalf("reconnect metric missing:\n%s", metrics.Body.String())
 	}

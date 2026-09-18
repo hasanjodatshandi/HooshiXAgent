@@ -11,6 +11,29 @@ import (
 	"syscall"
 )
 
+// Windows state-file confidentiality policy
+//
+// The confidentiality boundary for agent state on Windows is:
+//
+//  1. DPAPI with CRYPTPROTECT_UI_FORBIDDEN under the CurrentUser scope, owned
+//     by the account that wrote the blob (LocalSystem for the service), so the
+//     secret store is readable only by that account; and
+//  2. the explicit ACLs the installer applies to the state directory and to
+//     pairing.capability (SYSTEM, Administrators, and the interactive desktop
+//     user — nobody else), in cmd/hooshix-setup.
+//
+// The agent runtime therefore does NOT touch DACLs. The previous
+// grantAdministratorsRead helper rewrote the DACL of every state file on every
+// read with only DACL_SECURITY_INFORMATION: that ADDED two explicit Full-Access
+// ACEs and KEPT every inherited ACE (it never protected or replaced the DACL,
+// despite the SDDL looking like a replacement), and it discarded the
+// SetNamedSecurityInfo return value, so it silently widened access and could
+// never report failure. Its caller protectPrivateStateFile ran from the read
+// path and was named as if it restricted access.
+//
+// What remains here is the part the agent itself can enforce and report:
+// validating that a state path is a real, non-reparse file or directory.
+
 func readTrustedStateFile(path string) ([]byte, os.FileMode, error) {
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
@@ -79,15 +102,21 @@ func validateStateDirectoryPath(path string, allowMissing bool) error {
 	return nil
 }
 
-// DPAPI CurrentUser remains the confidentiality boundary on Windows. POSIX mode bits
-// are not treated as a Windows ACL substitute; path/reparse validation is enforced here.
+// protectPrivateDirectory validates the state directory path. Windows mode bits
+// are not an ACL substitute, so nothing is chmod-ed (the install-time ACL is
+// authoritative).
 func protectPrivateDirectory(path string) error {
 	return validateStateDirectoryPath(path, false)
 }
 
+// protectPrivateStateFile verifies that the state file exists and is a regular,
+// non-reparse file, and reports any failure to the caller. It deliberately does
+// not modify the file's DACL: see the policy note at the top of this file.
 func protectPrivateStateFile(path string) error {
-	_, _, err := readTrustedStateFile(path)
-	return err
+	if _, _, err := readTrustedStateFile(path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func splitStatePathComponents(relative string) []string {

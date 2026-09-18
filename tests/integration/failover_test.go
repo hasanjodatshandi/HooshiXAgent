@@ -61,14 +61,14 @@ func TestAgentGatewayFailoverBetweenGateways(t *testing.T) {
 	writeValidatedMetadata(t, metadataPrimary, publicKey, token, metadataOptions{})
 	writeValidatedMetadata(t, metadataSecondary, publicKey, token, metadataOptions{})
 
-	primary := startProcess(t, gatewayBinary,
+	primary, primaryOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", primaryAddress,
 		"-tls-cert", certPrimary,
 		"-tls-key", keyPrimary,
 		"-metadata-dir", metadataPrimary,
 		"-metadata-mode", "static",
 	)
-	secondary := startProcess(t, gatewayBinary,
+	secondary, secondaryOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", secondaryAddress,
 		"-tls-cert", certSecondary,
 		"-tls-key", keySecondary,
@@ -78,9 +78,9 @@ func TestAgentGatewayFailoverBetweenGateways(t *testing.T) {
 	defer secondary.stop(t)
 
 	primaryClient := trustedClient(rootsPrimary)
-	waitGatewayHealth(t, primaryClient, primaryBase)
+	waitGatewayHealth(t, primaryClient, primaryOpsURL)
 	secondaryClient := trustedClientFromBundle(t, bundlePath)
-	waitGatewayHealth(t, secondaryClient, secondaryBase)
+	waitGatewayHealth(t, secondaryClient, secondaryOpsURL)
 
 	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	defer agent.stop(t)

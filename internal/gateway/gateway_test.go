@@ -146,7 +146,11 @@ func TestGatewayWSSAuthenticationMultiplexingAndReconnect(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req := newPublicRequest(t, tlsServer.URL+path, testRouteHost, strings.NewReader("payload"+path))
+			req, err := newPublicRequestAsync(t, tlsServer.URL+path, testRouteHost, strings.NewReader("payload"+path))
+			if err != nil {
+				errorsCh <- err
+				return
+			}
 			resp, err := client.Do(req)
 			if err != nil {
 				errorsCh <- err
@@ -312,7 +316,7 @@ func TestGatewayAcceptsHealthReportTelemetry(t *testing.T) {
 	}
 
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	if !strings.Contains(metrics.Body.String(), "hooshix_gateway_health_reports_total 1") {
 		t.Fatalf("health report metric missing: %s", metrics.Body.String())
 	}
@@ -360,7 +364,11 @@ func TestGatewayRequestAndStreamLimits(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		request := newPublicRequest(t, tlsServer.URL+"/hold", testRouteHost, nil)
+		request, err := newPublicRequestAsync(t, tlsServer.URL+"/hold", testRouteHost, nil)
+		if err != nil {
+			firstDone <- err
+			return
+		}
 		response, err := tlsServer.Client().Do(request)
 		if err == nil {
 			response.Body.Close()
@@ -621,9 +629,11 @@ func TestExternalProcessRuntimeGate(t *testing.T) {
 	writeMetadataSnapshot(t, metadataDir, identity, testRouteHost)
 	certPath, keyPath, roots := writeTestCertificate(t)
 	address := reserveAddress(t)
+	opsAddress := reserveAddress(t)
 
 	cmd := exec.Command(binary,
 		"-listen", address,
+		"-ops-listen", opsAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
@@ -644,8 +654,13 @@ func TestExternalProcessRuntimeGate(t *testing.T) {
 
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}}
 	baseURL := "https://" + address
+	// Liveness is served only on the plaintext administrative listener: the
+	// public listener treats /healthz as an ordinary ingress path, so probing
+	// it there would never become ready.
+	opsClient := &http.Client{Timeout: 3 * time.Second}
+	opsURL := "http://" + opsAddress
 	waitFor(t, 5*time.Second, func() bool {
-		resp, err := client.Get(baseURL + "/healthz")
+		resp, err := opsClient.Get(opsURL + "/healthz")
 		if err != nil {
 			return false
 		}
@@ -700,6 +715,7 @@ func TestExecutableRefusesPlaintextStartup(t *testing.T) {
 type mockAgent struct {
 	conn                  *websocket.Conn
 	identity              testIdentity
+	resumeChallenge       string
 	localURL              *url.URL
 	httpClient            *http.Client
 	writeMu               sync.Mutex
@@ -731,7 +747,7 @@ func connectMockAgent(t testing.TB, parent context.Context, baseURL string, clie
 	agent := &mockAgent{
 		identity:   identity,
 		localURL:   parsed,
-		httpClient: localHTTPClient(localServiceURL),
+		httpClient: localHTTPClient(t, localServiceURL),
 		streams:    make(map[uint32]*mockStream),
 		done:       make(chan struct{}),
 	}
@@ -775,6 +791,11 @@ func connectMockAgent(t testing.TB, parent context.Context, baseURL string, clie
 	if err := contractv1.ValidateControlPayload(ready.Payload, 0, time.Now().UTC()); err != nil {
 		t.Fatalf("session_ready: %v", err)
 	}
+	var readyMessage contractv1.SessionReady
+	if err := json.Unmarshal(ready.Payload, &readyMessage); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
+	agent.resumeChallenge = readyMessage.ResumeChallenge
 
 	go agent.readLoop()
 	return agent
@@ -1084,7 +1105,7 @@ func dialRawAgent(t testing.TB, client *http.Client, baseURL string) *websocket.
 	wssURL := "wss" + strings.TrimPrefix(baseURL, "https") + agentPath
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled})
+	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.ResumeProofSubprotocol}})
 	if err != nil {
 		t.Fatalf("dial agent WSS: %v", err)
 	}
@@ -1144,21 +1165,42 @@ func readFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame, err
 	return contractv1.DecodeFrame(data)
 }
 
+// newPublicRequest builds a request addressed to the tenant host. It reports
+// construction failures through t.Fatal, which may only be called from the
+// goroutine running the test; use newPublicRequestAsync from any other
+// goroutine.
 func newPublicRequest(t testing.TB, rawURL, host string, body io.Reader) *http.Request {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, rawURL, body)
-	if body == nil {
-		request, err = http.NewRequest(http.MethodGet, rawURL, nil)
-	}
+	request, err := newPublicRequestAsync(t, rawURL, host, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Host = host
 	return request
 }
 
-func localHTTPClient(rawURL string) *http.Client {
-	parsed, _ := url.Parse(rawURL)
+// newPublicRequestAsync is the goroutine-safe form of newPublicRequest: the
+// construction error is returned to the caller instead of reporting it through
+// t.Fatal/t.FailNow, which is documented as test-goroutine-only.
+func newPublicRequestAsync(t testing.TB, rawURL, host string, body io.Reader) (*http.Request, error) {
+	t.Helper()
+	method := http.MethodPost
+	if body == nil {
+		method = http.MethodGet
+	}
+	request, err := http.NewRequest(method, rawURL, body)
+	if err != nil {
+		return nil, err
+	}
+	request.Host = host
+	return request, nil
+}
+
+func localHTTPClient(t testing.TB, rawURL string) *http.Client {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse local service URL %q: %v", rawURL, err)
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if parsed.Scheme == "https" {
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}

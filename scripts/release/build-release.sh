@@ -83,11 +83,16 @@ package_agent() {
   local package_base="hooshix-agent_${version}_${goos}_${goarch}"
   mkdir -p "$stage"
 
+  # A per-package SHA256SUMS travels inside every archive next to the binary:
+  # both installers verify the binary they are about to promote against it and
+  # fail closed on a mismatch, so a package without the manifest could not be
+  # installed at all.
   if [[ "$goos" == windows ]]; then
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "$stage/hooshix-agent.exe" ./cmd/agent
     cp packaging/agent/windows/Install-HooshiXAgent.ps1 "$stage/"
     cp packaging/agent/windows/Uninstall-HooshiXAgent.ps1 "$stage/"
     cp packaging/agent/README.md "$stage/README.md"
+    (cd "$stage" && sha256sum hooshix-agent.exe >SHA256SUMS)
     (cd "$stage" && zip -X -q "$out_dir/${package_base}.zip" ./*)
   else
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "$stage/hooshix-agent" ./cmd/agent
@@ -95,6 +100,7 @@ package_agent() {
     cp packaging/agent/unix/uninstall.sh "$stage/uninstall.sh"
     cp packaging/agent/README.md "$stage/README.md"
     chmod 755 "$stage/hooshix-agent" "$stage/install.sh" "$stage/uninstall.sh"
+    (cd "$stage" && sha256sum hooshix-agent >SHA256SUMS)
     tar --sort=name --mtime='UTC 2000-01-01' --owner=0 --group=0 --numeric-owner -C "$stage" -cf - . | gzip -n >"$out_dir/${package_base}.tar.gz"
   fi
 }

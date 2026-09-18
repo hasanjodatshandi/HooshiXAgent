@@ -3,14 +3,27 @@
 }
 
 {$HOOSHIX_PUBLIC_HOST:localhost} {
+	# Response hardening for everything the edge emits. HSTS is deliberately
+	# neither preloaded nor extended to subdomains: this edge serves
+	# operator-supplied hostnames and either option would force HTTPS for names
+	# the operator may not control yet.
+	header {
+		Strict-Transport-Security "max-age=15552000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# Defence in depth: the Gateway never serves Gateway-local endpoints on the
+	# public listener, and the edge refuses the genuinely internal /readyz and
+	# /metrics paths so a misrouted request can never publish readiness or
+	# metrics on a tenant hostname. /healthz is deliberately NOT refused: it is a
+	# common tenant health path and the separate ops listener already removed the
+	# Gateway-local shadowing, so refusing it here would break tenant apps.
 	@internal_ops path /readyz /metrics
 	respond @internal_ops 404
 
 	reverse_proxy https://gateway:8443 {
 		header_up Host {host}
-		health_uri /readyz
-		health_interval 10s
-		health_timeout 3s
 		transport http {
 			tls_trust_pool file /etc/caddy/gateway-ca.pem
 			tls_server_name gateway

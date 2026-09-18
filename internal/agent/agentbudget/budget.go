@@ -4,14 +4,25 @@
 // network, filesystem, or OS dependencies.
 package agentbudget
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync/atomic"
+)
+
+// ErrUnderflow reports a release larger than the outstanding reservation. It is
+// always a caller bug (typically a double release), never a runtime condition.
+var ErrUnderflow = errors.New("agent byte budget underflow")
 
 // ByteBudget is a bounded byte accounting primitive. Acquiring beyond the
-// limit fails closed; releasing more than was acquired is a programming error
-// and panics, mirroring the fail-closed budget policy used across the runtime.
+// limit fails closed. Releasing more than was acquired is a caller bug: the
+// budget is CLAMPED to zero and ErrUnderflow is returned rather than panicking,
+// so one accounting mistake can no longer crash the whole tunnel process (a
+// panic here killed the agent, which is a far worse outcome than a clamped
+// counter plus a logged anomaly).
 type ByteBudget struct {
-	limit int64
-	used  atomic.Int64
+	limit      int64
+	used       atomic.Int64
+	underflows atomic.Int64
 }
 
 // New returns a budget with the given hard limit.
@@ -39,13 +50,26 @@ func (budget *ByteBudget) TryAcquire(size int64) bool {
 	}
 }
 
-// Release returns previously reserved bytes to the budget.
-func (budget *ByteBudget) Release(size int64) {
+// Release returns previously reserved bytes to the budget. An underflow is
+// clamped to zero and reported as ErrUnderflow; the returned value is useful
+// only for diagnostics.
+func (budget *ByteBudget) Release(size int64) error {
 	if size <= 0 {
-		return
+		return nil
 	}
-	if used := budget.used.Add(-size); used < 0 {
-		panic("agent byte budget underflow")
+	for {
+		used := budget.used.Load()
+		next := used - size
+		if next < 0 {
+			if budget.used.CompareAndSwap(used, 0) {
+				budget.underflows.Add(1)
+				return ErrUnderflow
+			}
+			continue
+		}
+		if budget.used.CompareAndSwap(used, next) {
+			return nil
+		}
 	}
 }
 
@@ -54,6 +78,9 @@ func (budget *ByteBudget) Used() int64 { return budget.used.Load() }
 
 // Limit returns the hard reservation limit.
 func (budget *ByteBudget) Limit() int64 { return budget.limit }
+
+// Underflows returns how many releases were clamped to zero.
+func (budget *ByteBudget) Underflows() int64 { return budget.underflows.Load() }
 
 // QueuedPayload is one bounded frame queued for a local stream.
 type QueuedPayload struct {

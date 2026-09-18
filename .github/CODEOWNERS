@@ -1,0 +1,29 @@
+# Default owner for everything in this repository.
+#
+# The HooshiXAgent scope lock (docs/governance/plan-roadmap-scope-lock.md) and
+# the architecture/authority governance rules make the boundaries below
+# review-sensitive: a change to them must not land without the owner's review.
+
+* @hasanjodatshandi
+
+# Architecture authority, scope lock and registered runtime-gate gaps.
+/docs/governance/ @hasanjodatshandi
+/docs/adr/ @hasanjodatshandi
+/docs/engineering/executable-runtime-gate.md @hasanjodatshandi
+
+# Protocol and external integration contracts: the external Control Panel
+# integration boundary and wire compatibility depend on these.
+/contracts/ @hasanjodatshandi
+/internal/contractv1/ @hasanjodatshandi
+
+# CI gates, release workflow and the release/deploy scripts: these are the
+# controls the launch gate depends on.
+/.github/ @hasanjodatshandi
+/scripts/ci/ @hasanjodatshandi
+/scripts/release/ @hasanjodatshandi
+
+# Installer and deployment surface (elevated code, destructive paths, edge
+# configuration).
+/packaging/ @hasanjodatshandi
+/cmd/hooshix-setup/ @hasanjodatshandi
+/deploy/ @hasanjodatshandi

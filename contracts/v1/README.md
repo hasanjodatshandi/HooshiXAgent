@@ -15,6 +15,14 @@ It contains only contracts required for Edge Agent↔Tunnel Gateway operation an
 - `external/gateway-status-signal.schema.json` — bounded operational/traffic status signal emitted by the Gateway.
 - `fixtures/` — deterministic valid and invalid examples used by contract tests.
 
+## Fixtures
+
+`fixtures/tunnel/` holds Agent↔Gateway framing and control examples, `fixtures/external/` holds valid external records, and `fixtures/invalid/` holds records every consumer must reject.
+
+`fixtures/tunnel/frame-vectors.json` pins the byte-exact v1 frame encoding. A vector states the whole frame as `frame_hex`, or — for payloads too large to inline — the normative 24-byte header as `header_hex` plus `payload_repeat` (`byte` repeated `count` times). An implementation in any language must reproduce those bytes, and the file is the reference for the section 2 payload ceilings because it contains one vector at each maximum.
+
+Fixtures are stand-ins for the external source, never a live authority, and cannot extend an expired authorization.
+
 ## Authority and ownership
 
 These files do **not** implement the HooshiX Control Panel. They do not define users, tenants, plans, billing, quotas, dashboard models, database schemas, CRUD APIs, or Control Panel persistence.

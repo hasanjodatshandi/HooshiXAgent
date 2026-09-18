@@ -2,6 +2,13 @@
 	admin off
 	on_demand_tls {
 		ask {$HOOSHIX_TLS_ASK_URL}
+		# Deliberately no interval/burst/rate_limit sub-directive here. Caddy
+		# v2.11.4 (the pinned image) accepts only "ask" and "permission" under
+		# on_demand_tls: interval and burst are rejected as no longer supported
+		# and there is no rate_limit option, so adding one would fail
+		# `caddy adapt` and the edge would never start. Issuance rate limiting
+		# is therefore enforced by the ask authority at HOOSHIX_TLS_ASK_URL,
+		# which is a documented deployment requirement (see README.md).
 	}
 }
 
@@ -10,14 +17,29 @@ https:// {
 		on_demand
 	}
 
+	# Response hardening for everything the edge emits. HSTS is deliberately
+	# neither preloaded nor extended to subdomains: this edge serves
+	# operator-supplied hostnames and either option would force HTTPS for names
+	# the operator may not control yet.
+	header {
+		Strict-Transport-Security "max-age=15552000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# Defence in depth: the Gateway serves no Gateway-local endpoint on the
+	# public listener, so these paths are ordinary tenant paths there. The edge
+	# still refuses /readyz and /metrics — rarely legitimate tenant paths — so a
+	# future Gateway (or a misrouted request) can never publish readiness or
+	# metrics on a tenant hostname. /healthz is deliberately NOT refused: it is
+	# one of the most common tenant health paths, and the separate ops listener
+	# already removed the Gateway-local shadowing, so refusing it here would only
+	# make a tenant's own /healthz unreachable.
 	@internal_ops path /readyz /metrics
 	respond @internal_ops 404
 
 	reverse_proxy https://gateway:8443 {
 		header_up Host {host}
-		health_uri /readyz
-		health_interval 10s
-		health_timeout 3s
 		transport http {
 			tls_trust_pool file /etc/caddy/gateway-ca.pem
 			tls_server_name gateway

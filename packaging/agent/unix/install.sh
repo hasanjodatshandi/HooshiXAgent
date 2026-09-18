@@ -4,6 +4,7 @@ set -euo pipefail
 os_name="${HOOSHIX_AGENT_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_binary="${HOOSHIX_AGENT_BINARY:-$script_dir/hooshix-agent}"
+checksum_manifest="${HOOSHIX_AGENT_CHECKSUMS:-}"
 no_service=false
 rollback=false
 
@@ -29,11 +30,67 @@ while (($#)); do
     --prefix) prefix="$2"; shift 2 ;;
     --state-dir) state_dir="$2"; shift 2 ;;
     --service-path) service_path="$2"; shift 2 ;;
+    --checksums) checksum_manifest="$2"; shift 2 ;;
     --no-service) no_service=true; shift ;;
     --rollback) rollback=true; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+# hash_file prints the SHA-256 of a file, using whichever digest tool the
+# platform provides (coreutils on Linux, shasum on macOS).
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "sha256sum or shasum is required to verify the Agent binary" >&2
+    exit 1
+  fi
+}
+
+# verify_source_binary checks the binary about to be promoted to the
+# persistence path against the SHA256SUMS manifest shipped inside the package.
+# Installing an unverified binary would let a corrupted or substituted build
+# reach the service path with no evidence trail, so a missing manifest, a
+# missing entry and a digest mismatch are all fatal (fail closed).
+verify_source_binary() {
+  local manifest="$1"
+  local binary_name expected actual
+  binary_name="$(basename "$source_binary")"
+  expected="$(awk -v name="$binary_name" '{ entry = $2; sub(/^\*/, "", entry); if (entry == name) { print $1; exit } }' "$manifest")"
+  if [[ -z "$expected" ]]; then
+    echo "checksum manifest $manifest has no entry for $binary_name; refusing to install an unverified Agent binary" >&2
+    exit 1
+  fi
+  actual="$(hash_file "$source_binary")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Agent binary SHA-256 mismatch for $binary_name: manifest=$expected actual=$actual; refusing to install" >&2
+    exit 1
+  fi
+  echo "verified $binary_name SHA-256 against $manifest"
+}
+
+resolve_checksum_manifest() {
+  local candidate
+  if [[ -n "$checksum_manifest" ]]; then
+    if [[ ! -f "$checksum_manifest" ]]; then
+      echo "Agent checksum manifest not found: $checksum_manifest" >&2
+      exit 1
+    fi
+    printf '%s\n' "$checksum_manifest"
+    return
+  fi
+  for candidate in "$script_dir/SHA256SUMS" "$script_dir/../SHA256SUMS"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  echo "no SHA256SUMS next to $source_binary: pass --checksums <path> or set HOOSHIX_AGENT_CHECKSUMS; refusing to install an unverified Agent binary" >&2
+  exit 1
+}
 
 validate_safe_dir() {
   local label="$1"
@@ -113,6 +170,8 @@ if [[ ! -f "$source_binary" ]]; then
   echo "Agent binary not found: $source_binary" >&2
   exit 1
 fi
+
+verify_source_binary "$(resolve_checksum_manifest)"
 
 if [[ -f "$target" ]]; then
   cp "$target" "$previous"

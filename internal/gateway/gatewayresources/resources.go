@@ -347,3 +347,87 @@ func (buffer *BudgetBuffer) Release() {
 	}
 	buffer.buffer = bytes.Buffer{}
 }
+
+// KeyedTokenBuckets is a per-key refill-rate limiter with bounded key state.
+// It is the rate-only counterpart of KeyedAdmissionLimiter: it bounds how
+// often one key may act without also bounding that key's concurrency, which is
+// what a pre-authentication connection throttle needs (the global handshake
+// slot ceiling remains the concurrency bound).
+type KeyedTokenBuckets struct {
+	mu             sync.Mutex
+	rate           float64
+	burst          float64
+	states         map[string]*keyedBucketState
+	maxTrackedKeys int
+	idleAfter      time.Duration
+	rejected       atomic.Uint64
+}
+
+type keyedBucketState struct {
+	tokens float64
+	last   time.Time
+}
+
+// NewKeyedTokenBuckets returns a per-key bucket with the given per-second rate
+// and burst. New keys start with a full burst allowance.
+func NewKeyedTokenBuckets(rate, burst int) *KeyedTokenBuckets {
+	if rate < 1 {
+		rate = 1
+	}
+	if burst < 1 {
+		burst = 1
+	}
+	return &KeyedTokenBuckets{
+		rate:           float64(rate),
+		burst:          float64(burst),
+		states:         make(map[string]*keyedBucketState),
+		maxTrackedKeys: 65536,
+		idleAfter:      time.Minute,
+	}
+}
+
+// Allow consumes one token for the key at the observation time. Peer keys come
+// from the network and rotate, so idle entries are swept once the map exceeds
+// its bound; a swept key simply refills from a full burst on its next use.
+func (buckets *KeyedTokenBuckets) Allow(key string, now time.Time) bool {
+	buckets.mu.Lock()
+	defer buckets.mu.Unlock()
+
+	state := buckets.states[key]
+	if state == nil {
+		state = &keyedBucketState{tokens: buckets.burst, last: now}
+		buckets.states[key] = state
+		if len(buckets.states) > buckets.maxTrackedKeys {
+			cutoff := now.Add(-buckets.idleAfter)
+			for idleKey, idleState := range buckets.states {
+				if idleKey != key && idleState.last.Before(cutoff) {
+					delete(buckets.states, idleKey)
+				}
+			}
+		}
+	}
+	if now.Before(state.last) {
+		now = state.last
+	}
+	state.tokens += now.Sub(state.last).Seconds() * buckets.rate
+	if state.tokens > buckets.burst {
+		state.tokens = buckets.burst
+	}
+	state.last = now
+	if state.tokens < 1 {
+		buckets.rejected.Add(1)
+		return false
+	}
+	state.tokens--
+	return true
+}
+
+// Rejected returns the number of rejected observations.
+func (buckets *KeyedTokenBuckets) Rejected() uint64 { return buckets.rejected.Load() }
+
+// States returns the number of keys with bucket state.
+func (buckets *KeyedTokenBuckets) States() int {
+	buckets.mu.Lock()
+	defer buckets.mu.Unlock()
+	return len(buckets.states)
+}

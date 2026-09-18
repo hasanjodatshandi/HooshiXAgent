@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/gateway/gatewayresources"
 )
 
 func TestDefaultResourceEnvelopeFitsDeploymentMemoryLimit(t *testing.T) {
@@ -71,7 +74,7 @@ func TestByteBudgetAndIngressBufferFailClosedAndRelease(t *testing.T) {
 	}
 
 	ingress := newByteBudget(10)
-	buffer := newBudgetBuffer(ingress)
+	buffer := gatewayresources.NewBudgetBuffer(ingress)
 	if _, err := buffer.Write(bytes.Repeat([]byte{'x'}, 6)); err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +91,8 @@ func TestStreamQueueBudgetsBoundPerStreamSessionAndGlobal(t *testing.T) {
 	global := newByteBudget(16)
 	session := newByteBudget(12)
 	var rejects atomic.Uint64
-	first := newStream(1, 4, 8, session, global, &rejects)
-	second := newStream(2, 4, 8, session, global, &rejects)
+	first := newStream(context.Background(), 1, 4, 8, session, global, &rejects)
+	second := newStream(context.Background(), 2, 4, 8, session, global, &rejects)
 
 	if err := first.enqueue(bytes.Repeat([]byte{'a'}, 8)); err != nil {
 		t.Fatal(err)
@@ -124,8 +127,8 @@ func TestStreamQueueBudgetsBoundPerStreamSessionAndGlobal(t *testing.T) {
 	global = newByteBudget(10)
 	sessionA := newByteBudget(10)
 	sessionB := newByteBudget(10)
-	streamA := newStream(3, 2, 10, sessionA, global, &rejects)
-	streamB := newStream(4, 2, 10, sessionB, global, &rejects)
+	streamA := newStream(context.Background(), 3, 2, 10, sessionA, global, &rejects)
+	streamB := newStream(context.Background(), 4, 2, 10, sessionB, global, &rejects)
 	if err := streamA.enqueue(bytes.Repeat([]byte{'d'}, 6)); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +153,7 @@ func TestStreamQueueFrameLimitReleasesRejectedReservation(t *testing.T) {
 	global := newByteBudget(64)
 	session := newByteBudget(64)
 	var rejects atomic.Uint64
-	stream := newStream(1, 1, 64, session, global, &rejects)
+	stream := newStream(context.Background(), 1, 1, 64, session, global, &rejects)
 	if err := stream.enqueue([]byte("first")); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +244,7 @@ func TestGatewayResourceMetricsAreAggregateAndLowCardinality(t *testing.T) {
 	gateway.resources.sessionRejects.Add(5)
 
 	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://gateway.invalid/metrics", nil))
 	body := recorder.Body.String()
 	for _, metric := range []string{
 		"hooshix_gateway_queued_bytes 7",

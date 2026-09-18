@@ -52,5 +52,10 @@ func (store *fileSecretStore) Save(state SecretState) error {
 	if err != nil {
 		return err
 	}
+	// The encoded form is the plaintext seed and session token; zero it once
+	// the write returns, exactly as the Windows DPAPI store does with its
+	// plaintext buffer. Without this the secret stayed readable in the heap for
+	// the lifetime of the process.
+	defer zeroBytes(data)
 	return writePrivateFile(store.stateDir, store.path, data)
 }

@@ -14,9 +14,11 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | Dependency vulnerabilities | `govulncheck ./...` via `scripts/ci/go-quality.sh` | Go quality / tests / vulnerability | Yes |
 | Secret/static security | `scripts/ci/security.sh` | Gitleaks / Semgrep | Yes |
 | Architecture/scope boundaries | architecture tests | Architecture fitness | Yes |
+| Windows Agent delivery docs vs accepted ADR-0014 | `tests/architecture/windows_delivery_test.go` | Architecture fitness | Yes |
 | Real executable behavior | `scripts/ci/runtime-gate.sh` | Executable runtime gate guard | Yes |
 | Real Agent↔Gateway integration | `scripts/ci/e2e-acceptance.sh` | Agent↔Gateway E2E acceptance | Yes |
 | Cross-platform Agent/package behavior | platform tests/package smoke | Ubuntu/Windows/macOS Agent platform jobs | Yes |
+| Windows Agent service distribution (install/run/restart/uninstall) | `scripts/ci/windows-service-install-smoke.ps1` (elevated Windows host; fails closed, never skips) | `windows-distribution-build` invokes the gate after its build-integrity steps, reusing the already-built distribution via `-SetupExe`. The gate is wired, but no workflow run has been observed since, so its CI evidence is pending the next Windows CI run | Yes |
 | Packaging/Compose deployment | `scripts/ci/packaging-ops.sh` | Packaging / clean deployment / rollback | Yes |
 | Dynamic multi-host public edge | `scripts/ci/multi-host-public-edge.sh` | RA-4 multi-host public edge gate | Yes |
 | Agent state transactions / retry safety | `scripts/ci/agent-state-transaction.sh` | RA-5 Agent state transaction hardening gate | Yes |
@@ -33,7 +35,7 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | R-6 release / supply-chain gate | exact-commit policy, immutable pins, privilege separation, SBOM/scanning/provenance policy |
 | R-7 metadata scalability / determinism gate | typed/indexed metadata, duplicate rejection, readiness and large-index lookup behavior |
 | RA-3 live metadata lifecycle gate | immutable generations, atomic activation, freshness fail-closed/recovery and existing-session live revocation |
-| RA-4 multi-host public edge gate | restricted On-Demand TLS, simultaneous hostname routing, TLS/route authority separation, unknown-host denial and private operational endpoints |
+| RA-4 public edge / TLS authority gate | restricted On-Demand TLS, simultaneous hostname routing, TLS/route authority separation, unknown-host denial, response hardening (HSTS/nosniff/no Server) and private operational endpoints. The Gateway runs in static compatibility metadata mode, so this gate does not exercise the production live-metadata path and must not be cited for live multi-host behavior |
 | R-8 observability / writer isolation gate | non-blocking bounded telemetry and single-writer control-priority scheduling |
 | R-9 Agent state / installer hardening gate | strict state/config, mutation lock, destructive-path and bootstrap safety |
 | RA-5 Agent state transaction hardening gate | config+secret rollback/recovery, read-only diagnostics, stale-lock ownership, terminal permanent errors and credential redaction |
@@ -61,11 +63,11 @@ The `AG-8 final security / resilience / release gate` job currently depends on s
 - packaging/clean deployment/rollback;
 - executable runtime gate.
 
-The AG-9 first-prototype smoke is also a blocking CI job but is an operator-visible product smoke rather than a prerequisite in the release-gate `needs` list.
+The AG-9 first-prototype smoke is also a blocking CI job but is an operator-visible product smoke rather than a prerequisite in the release-gate `needs` list, so it is the single documented exception in the list above. `scripts/ci/release-gate.sh` asserts that dependency graph rather than merely asserting the presence of a `needs:` key: every other job in `.github/workflows/ci.yml` must appear in the release-gate `needs` list, every entry in that list must name a real job, and the exception list is code, so adding a job without making it a prerequisite fails the gate.
 
 ## Runtime precedence
 
-Static checks, compilation and unit tests do not replace executable runtime evidence when the capability is runnable. The runtime and E2E gates launch real `cmd/gateway` and `cmd/agent` processes over TLS/WSS, exercise an approved loopback target and verify fail-closed/reconnect behavior.
+Static checks, compilation and unit tests do not replace executable runtime evidence when the capability is runnable. The runtime and E2E gates launch real `cmd/gateway` and `cmd/agent` processes over TLS/WSS, exercise an approved loopback target and verify fail-closed/reconnect behavior. The Windows Agent service distribution follows the same rule through `scripts/ci/windows-service-install-smoke.ps1`, which installs, runs, restarts and uninstalls the real `HooshiXAgent-Setup.exe` on an elevated Windows host. That gate is invoked by the `windows-distribution-build` CI job, so its automated CI evidence is pending the next Windows CI run — no workflow run has been observed since the wiring landed — rather than absent because nothing invokes it. The job's build-integrity steps are unchanged. See `docs/engineering/executable-runtime-gate.md` section 7 (G1).
 
 ## Release and supply-chain boundary
 

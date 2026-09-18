@@ -14,14 +14,12 @@ fi
 
 echo "--- Gateway readiness ---"
 "${compose[@]}" exec -T gateway curl --fail --silent --show-error \
-  --cacert /run/hooshix-tls/ca.crt \
-  https://gateway:8443/readyz
+  http://127.0.0.1:9090/readyz
 printf '\n'
 
 echo "--- Gateway aggregate metrics ---"
 "${compose[@]}" exec -T gateway curl --fail --silent --show-error \
-  --cacert /run/hooshix-tls/ca.crt \
-  https://gateway:8443/metrics
+  http://127.0.0.1:9090/metrics
 
 echo "--- Recent Gateway logs ---"
 "${compose[@]}" logs --tail=50 gateway

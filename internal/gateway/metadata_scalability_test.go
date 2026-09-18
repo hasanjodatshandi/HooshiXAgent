@@ -163,7 +163,7 @@ func TestGatewayReadinessFailsClosedForUnusableSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	gateway.OpsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if recorder.Code != http.StatusServiceUnavailable || strings.TrimSpace(recorder.Body.String()) != `{"status":"not_ready"}` {
 		t.Fatalf("unusable metadata readiness status=%d body=%q", recorder.Code, recorder.Body.String())
 	}

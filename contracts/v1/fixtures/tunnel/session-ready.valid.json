@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "message_type": "session_ready",
+  "session_id": "session-001",
+  "heartbeat_interval_seconds": 60,
+  "idle_timeout_seconds": 120,
+  "resume_challenge": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+}

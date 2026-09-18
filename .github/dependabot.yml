@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # Go module dependencies (github.com/coder/websocket,
+  # github.com/santhosh-tekuri/jsonschema/v5, golang.org/x/sys). Patch and
+  # minor updates are grouped so a routine bump is one reviewable PR, while a
+  # major bump stays separate because it needs the release/security gates read
+  # against the new behaviour.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'deps'
+    groups:
+      go-modules:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  # The workflows pin every action to a reviewed commit SHA with the semantic
+  # version in a trailing comment. A Dependabot bump must therefore update BOTH
+  # the SHA and that comment, and scripts/ci/supply-chain.sh plus the release
+  # workflow assert the pinned-SHA shape.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+
+  # Base images are digest-pinned in deploy/gateway/Dockerfile and
+  # docker-compose.yml, and scripts/ci/supply-chain.sh asserts the pinning. Keep
+  # this ecosystem enabled so digest updates arrive as reviewable PRs.
+  - package-ecosystem: docker
+    directory: /deploy/gateway
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'docker'

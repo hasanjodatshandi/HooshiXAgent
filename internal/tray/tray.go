@@ -11,13 +11,19 @@
 package tray
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -169,32 +175,113 @@ func (app *App) refresh() {
 		return
 	}
 	state := TrayState{Phase: "service:" + scmState}
+	var parsed TrayState
+	parsedOK := false
 	if status, readErr := os.ReadFile(filepath.Join(agentsvc.StateDir(), "status.json")); readErr == nil {
-		var parsed TrayState
 		if jsonErr := json.Unmarshal(status, &parsed); jsonErr == nil {
-			state.State = parsed.State
-			state.Reconnects = parsed.Reconnects
-			state.LastError = parsed.LastError
+			parsedOK = true
 		}
 	}
+	state = mergeAgentStatus(scmState, parsed, parsedOK)
 	app.mu.Lock()
 	app.state = state
 	app.mu.Unlock()
 	app.menu.refreshMenu(state)
 }
 
+// mergeAgentStatus combines the SCM service state with the agent's own
+// status.json snapshot.
+//
+// The agent phase is adopted only while SCM reports the service running: a
+// stopped service leaves its last status.json behind, and a stale phase must
+// never be shown as current — "service:stopped" has to win. Before this, the
+// agent phase was dropped entirely and only its state name was kept, so the
+// menu rendered the internal token of the unpaired agent ("init") instead of
+// "not paired yet", and every agent-phase branch in statusDisplayText was
+// unreachable.
+func mergeAgentStatus(scmState string, parsed TrayState, parsedOK bool) TrayState {
+	state := TrayState{Phase: "service:" + scmState}
+	if !parsedOK {
+		return state
+	}
+	state.State = parsed.State
+	state.Reconnects = parsed.Reconnects
+	state.LastError = parsed.LastError
+	if scmState == "running" && parsed.Phase != "" {
+		state.Phase = parsed.Phase
+	}
+	return state
+}
+
 // Menu actions (invoked from the Win32 menu on the UI thread).
 
+// openPairing opens the loopback pairing page in the default browser.
+//
+// The pairing capability is a full-control credential for the pairing UI, and
+// the loopback port is bindable by ANY local process. The URL is therefore
+// built only after the listener has been attributed to the agent service (see
+// pairingLaunchPlan), so a port squatter never receives the capability.
 func (app *App) openPairing() {
-	capability, err := agent.LoadPairingCapability(agentsvc.StateDir())
+	launchURL, err := pairingLaunchPlan(agentsvc.StateDir())
 	if err != nil {
-		app.logger.Warn("read pairing capability failed", "error", err)
+		app.logger.Error("refusing to open the pairing page", "error", err)
 		return
 	}
-	pairingURL := "http://" + agentsvc.PairingListenAddr + "/?cap=" + url.QueryEscape(capability)
-	if err := openBrowser(pairingURL); err != nil {
+	if err := openBrowser(launchURL); err != nil {
 		app.logger.Warn("open pairing page failed", "error", err)
 	}
+}
+
+// pairingLaunchPlan resolves the published pairing endpoint, challenges the
+// listener that holds the port, and only then builds the capability URL.
+//
+// Before this check the tray concatenated "http://127.0.0.1:8799/?cap=<token>"
+// unconditionally: any local process that bound that port first (the service
+// stopped, a lost boot race) received the capability in the query string, and
+// the capability can re-point this device at an attacker-controlled gateway.
+func pairingLaunchPlan(stateDir string) (string, error) {
+	endpoint, err := agent.LoadPairingEndpoint(stateDir)
+	if err != nil {
+		return "", err
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(endpoint.Port))
+	if err := verifyPairingListener(address, endpoint.Token); err != nil {
+		return "", fmt.Errorf("the loopback port is not served by the agent service: %w", err)
+	}
+	capability, err := agent.LoadPairingCapability(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("read pairing capability: %w", err)
+	}
+	return "http://" + address + "/?cap=" + url.QueryEscape(capability), nil
+}
+
+// pairingVerifyTimeout bounds the identity challenge so a squatted port that
+// simply never answers cannot block the tray.
+const pairingVerifyTimeout = 3 * time.Second
+
+// verifyPairingListener requests the listener identity and compares it with the
+// published token in constant time.
+func verifyPairingListener(address, expectedToken string) error {
+	client := &http.Client{Timeout: pairingVerifyTimeout}
+	response, err := client.Get("http://" + address + "/pairing/identity")
+	if err != nil {
+		return fmt.Errorf("challenge listener identity: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("listener identity probe status=%d", response.StatusCode)
+	}
+	var identity struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&identity); err != nil {
+		return fmt.Errorf("decode listener identity: %w", err)
+	}
+	if len(expectedToken) != 43 || len(identity.Token) != len(expectedToken) ||
+		subtle.ConstantTimeCompare([]byte(expectedToken), []byte(identity.Token)) != 1 {
+		return errors.New("listener identity mismatch")
+	}
+	return nil
 }
 
 func (app *App) serviceStart() {

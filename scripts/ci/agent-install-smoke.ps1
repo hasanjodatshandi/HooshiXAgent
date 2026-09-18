@@ -17,6 +17,30 @@ try {
     }
     Copy-Item packaging\agent\windows\Install-HooshiXAgent.ps1 $Stage
     Copy-Item packaging\agent\windows\Uninstall-HooshiXAgent.ps1 $Stage
+    # Release packages always ship SHA256SUMS next to the binary and the
+    # installer verifies against it, so the smoke package stages the same shape.
+    $StageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Stage 'hooshix-agent.exe')).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath (Join-Path $Stage 'SHA256SUMS') -Value "$StageHash  hooshix-agent.exe" -Encoding ascii
+
+    # A tampered or unmanifested package must be refused before any replacement.
+    $Tampered = Join-Path $Work 'tampered-package'
+    New-Item -ItemType Directory -Force -Path $Tampered | Out-Null
+    Copy-Item packaging\agent\windows\Install-HooshiXAgent.ps1 $Tampered
+    Set-Content -LiteralPath (Join-Path $Tampered 'hooshix-agent.exe') -Value 'tampered-agent' -Encoding ascii
+    $Zeros = '0' * 64
+    Set-Content -LiteralPath (Join-Path $Tampered 'SHA256SUMS') -Value "$Zeros  hooshix-agent.exe" -Encoding ascii
+    $Rejected = $false
+    try { & (Join-Path $Tampered 'Install-HooshiXAgent.ps1') -Prefix (Join-Path $Work 'tampered-bin') -StateDir (Join-Path $Work 'tampered-state') -NoPersistence | Out-Null } catch { $Rejected = $true }
+    if (-not $Rejected) { throw 'Windows installer accepted a binary that does not match the package SHA256SUMS' }
+    Set-Content -LiteralPath (Join-Path $Tampered 'SHA256SUMS') -Value "$Zeros  other-binary.exe" -Encoding ascii
+    $Rejected = $false
+    try { & (Join-Path $Tampered 'Install-HooshiXAgent.ps1') -Prefix (Join-Path $Work 'tampered-bin') -StateDir (Join-Path $Work 'tampered-state') -NoPersistence | Out-Null } catch { $Rejected = $true }
+    if (-not $Rejected) { throw 'Windows installer accepted a SHA256SUMS manifest with no entry for the Agent binary' }
+    Remove-Item -Force -LiteralPath (Join-Path $Tampered 'SHA256SUMS')
+    $Rejected = $false
+    try { & (Join-Path $Tampered 'Install-HooshiXAgent.ps1') -Prefix (Join-Path $Work 'tampered-bin') -StateDir (Join-Path $Work 'tampered-state') -NoPersistence | Out-Null } catch { $Rejected = $true }
+    if (-not $Rejected) { throw 'Windows installer accepted a package with no SHA256SUMS manifest' }
+    if (Test-Path -LiteralPath (Join-Path $Work 'tampered-bin\hooshix-agent.exe')) { throw 'a rejected package still installed the Agent binary' }
 
     $UnsafeHome = Join-Path $Work 'unsafe-home'
     New-Item -ItemType Directory -Force -Path $UnsafeHome | Out-Null
@@ -81,9 +105,18 @@ try {
     if (-not $Rejected -or (Get-Content -Raw -LiteralPath (Join-Path $Victim 'sentinel')) -ne 'keep') {
         throw 'Windows uninstaller did not protect reparse-point state directory'
     }
-    $Spec = & $Installed service-spec --state-dir $State --binary $Installed
-    if ($Spec -notmatch 'schtasks.exe' -or $Spec -notmatch 'ONLOGON') {
-        throw "Windows persistence spec does not preserve the current-user Scheduled Task model: $Spec"
+    # The installed Agent's own persistence definition must describe the
+    # accepted Windows model (ADR-0014): the LocalSystem SCM service registered
+    # by `hooshix-agent service install`. This leg runs with -NoPersistence so it
+    # never mutates the runner; the real service install/run/uninstall gate is
+    # scripts/ci/windows-service-install-smoke.ps1.
+    $Spec = (& $Installed service-spec --state-dir $State --binary $Installed) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) { throw "service-spec failed with exit code $LASTEXITCODE" }
+    if ($Spec -notmatch 'sc\.exe create HooshiXAgent' -or $Spec -notmatch 'start= auto') {
+        throw "Windows persistence spec does not describe the accepted HooshiXAgent service model: $Spec"
+    }
+    if ($Spec -match 'schtasks' -or $Spec -match 'ONLOGON') {
+        throw "Windows persistence spec still describes the superseded logon Scheduled Task model: $Spec"
     }
 
     if ($env:HOOSHIX_AGENT_OLD_TEST_BINARY) {

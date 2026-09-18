@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent/tunnelstates"
 )
 
 // TestRunSpawnsPinnedWorkersForAliases proves the Phase-3 HA supervisor: a
@@ -38,7 +40,7 @@ func TestRunSpawnsPinnedWorkersForAliases(t *testing.T) {
 		primaryAttempts.Add(1)
 		return errors.New("synthetic primary outage")
 	}
-	runner.pinnedAttempt = func(ctx context.Context, index int) error {
+	runner.pinnedAttempt = func(ctx context.Context, index int, _ *tunnelstates.Machine) error {
 		standbyAttempts.Add(1)
 		if index == 1 {
 			<-ctx.Done()
@@ -80,7 +82,7 @@ func TestRunSingleWorkerWithoutAliases(t *testing.T) {
 	}
 
 	pinnedCalls := atomic.Int32{}
-	runner.pinnedAttempt = func(context.Context, int) error {
+	runner.pinnedAttempt = func(context.Context, int, *tunnelstates.Machine) error {
 		pinnedCalls.Add(1)
 		return errors.New("unexpected pinned call")
 	}
@@ -126,7 +128,7 @@ func TestSupervisorStopsOnTerminalWorkerError(t *testing.T) {
 		<-ctx.Done() // park the primary worker until the supervisor stops
 		return nil
 	}
-	runner.pinnedAttempt = func(context.Context, int) error {
+	runner.pinnedAttempt = func(context.Context, int, *tunnelstates.Machine) error {
 		return ErrSessionRevoked
 	}
 
@@ -139,6 +141,55 @@ func TestSupervisorStopsOnTerminalWorkerError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("supervisor did not stop on the worker's terminal error")
+	}
+}
+
+func TestPermanentAliasFailureDoesNotCancelHealthyPrimary(t *testing.T) {
+	dir := t.TempDir()
+	config := DefaultConfig()
+	config.GatewayURL = "wss://primary.example/agent/v1/connect"
+	config.GatewayAliases = []string{"wss://secondary.example/agent/v1/connect"}
+	if err := SaveConfig(dir, config); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(dir, DefaultLimits(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected := make(chan struct{})
+	runner.attempt = func(ctx context.Context) error {
+		if err := runner.health.Transition(tunnelstates.Connected); err != nil {
+			return err
+		}
+		close(connected)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	runner.pinnedAttempt = func(ctx context.Context, _ int, _ *tunnelstates.Machine) error {
+		select {
+		case <-connected:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return permanentAgentFailure(errors.New("alias certificate invalid"))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	select {
+	case err := <-done:
+		t.Fatalf("one failed alias killed the supervisor: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if !runner.HealthyTunnel() {
+		t.Error("surviving primary is not healthy")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not stop")
 	}
 }
 
@@ -163,7 +214,7 @@ func TestRunPinnedAttemptBoundsIndices(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err = runner.runPinnedAttempt(ctx, 2)
+	err = runner.runPinnedAttempt(ctx, 2, tunnelstates.New())
 	if err == nil || !errors.Is(err, ErrPermanentAgentFailure) {
 		t.Fatalf("out-of-range pinned worker error=%v want permanent failure", err)
 	}
@@ -199,7 +250,7 @@ func TestSupervisorBoundsWorkersByMaxTunnels(t *testing.T) {
 		primaryRan.Store(true)
 		return errors.New("synthetic outage")
 	}
-	runner.pinnedAttempt = func(ctx context.Context, index int) error {
+	runner.pinnedAttempt = func(ctx context.Context, index int, _ *tunnelstates.Machine) error {
 		workers.Store(index, struct{}{})
 		<-ctx.Done()
 		return nil

@@ -40,7 +40,8 @@ func RunService(stateDir string) error {
 	if err != nil {
 		return err
 	}
-	ctx := signalContext()
+	ctx, stop := signalContext()
+	defer stop()
 	go sup.LoopStatusWriter(ctx, statusInterval)
 	return sup.Run(ctx)
 }
@@ -56,7 +57,9 @@ func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(stdout, "pairing ui: http://"+PairingListenAddr)
-	return app.Serve(signalContext(), PairingListenAddr, logger)
+	ctx, stop := signalContext()
+	defer stop()
+	return app.Serve(ctx, PairingListenAddr, logger)
 }
 
 // SCM management commands are Windows-only.

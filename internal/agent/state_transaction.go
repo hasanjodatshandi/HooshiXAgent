@@ -71,7 +71,14 @@ func configureAgentState(stateDir string, store SecretStore, requested Config, t
 			}
 			current.GatewayURL = requested.GatewayURL
 			current.GatewayAliases = requested.GatewayAliases
-			current.CAFile = requested.CAFile
+			// An empty requested CA file means "the request does not carry a
+			// trust anchor", not "remove the configured one". A caller that
+			// supplies no CA file — the pairing UI when the operator leaves
+			// the field empty, or `configure` without --ca-file — must never
+			// silently drop the trust anchor an operator already configured.
+			if requested.CAFile != "" {
+				current.CAFile = requested.CAFile
+			}
 			current.DeviceID = requested.DeviceID
 			current.AuthorizationID = requested.AuthorizationID
 			current.TokenID = requested.TokenID
@@ -160,6 +167,38 @@ type stateTransaction struct {
 
 func stateTransactionPath(stateDir string) string {
 	return filepath.Join(stateDir, stateTransactionName)
+}
+
+// RecoverState rolls back an interrupted state mutation, under the same config
+// lock every mutation takes, and reports any failure. It is idempotent: with
+// no transaction journal present it does nothing.
+//
+// Recovery is reachable only through the lock, and the read path deliberately
+// fails closed while a journal exists (ensureStateReadable), so a process that
+// discovers ErrStateTransactionPending — most importantly the service
+// supervisor at startup — must call this before it can read state again.
+func RecoverState(stateDir string) error {
+	normalized, err := NormalizeStateDir(stateDir)
+	if err != nil {
+		return err
+	}
+	return withConfigLock(normalized, func() error { return nil })
+}
+
+// RecoveryWatchPaths returns the state paths whose change means the agent's
+// configuration or identity changed: the config, the platform secret store,
+// and the mutation journal.
+//
+// Volatile files (status.json, logs, locks, pairing records, temp files) are
+// deliberately excluded: they change on every status tick, so a watcher using
+// this list is woken by an operator recovery and not by the supervisor's own
+// status writes.
+func RecoveryWatchPaths(stateDir string) []string {
+	return []string{
+		ConfigPath(stateDir),
+		platformSecretPath(stateDir),
+		stateTransactionPath(stateDir),
+	}
 }
 
 func ensureStateReadable(stateDir string) error {
@@ -294,6 +333,18 @@ func recoverStateTransaction(stateDir string) error {
 	return syncDirectory(stateDir)
 }
 
+// snapshotStateFile copies a state file into the rollback journal.
+//
+// The secret store IS copied deliberately: rollback must restore the previous
+// credential byte-for-byte, and there is no way to do that without a copy. The
+// copy is created with O_EXCL at 0600 inside the same private state directory,
+// so on POSIX it is exactly as protected as the secret file itself (which is
+// also plaintext at 0600); it never widens the confidentiality boundary. On
+// Windows the platform store is a DPAPI CurrentUser blob, so the copy is the
+// protected ciphertext. A crash can leave the journal behind, but a leftover
+// journal fails the read path closed (ErrStateTransactionPending) and the
+// supervisor now rolls it back at startup (agent.RecoverState), which deletes
+// the copy.
 func snapshotStateFile(source, backup string) (bool, error) {
 	data, err := readStateFile(source)
 	if errors.Is(err, os.ErrNotExist) {

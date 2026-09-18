@@ -33,7 +33,11 @@ trap 'rm -rf "$work_dir"' EXIT
 trivy_cache="${HOOSHIX_TRIVY_CACHE_DIR:-$work_dir/trivy-cache}"
 mkdir -p "$trivy_cache" "$work_dir/extracted"
 
-mapfile -t primary_artifacts < <(find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
+# Every published release artifact is a scan subject. The Windows installer is a
+# bare .exe rather than an archive, and it is the supported Windows distribution
+# (docs/adr/ADR-0014-...), so it is matched here too: an artifact that ships but
+# is not scanned would be the one gap in the release's supply-chain coverage.
+mapfile -t primary_artifacts < <(find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' \) -printf '%f\n' | LC_ALL=C sort)
 if (( ${#primary_artifacts[@]} == 0 )); then
   echo "no release archives found for SBOM generation" >&2
   exit 1

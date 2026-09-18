@@ -12,3 +12,32 @@ cmd/hooshix-setup/payload/
 /cmd/hooshix-agent-tray/hooshix.ico
 /cmd/hooshix-agent-tray/rsrc_windows_*.syso
 /cmd/hooshix-setup/rsrc_windows_*.syso
+
+# Local operator scratch that must never be committed: captured tokens, VPS
+# metadata projections and one-off deployment helpers. /bin/ already covers
+# these, but they are called out explicitly so removing that rule cannot
+# silently start tracking live credentials or unverified deploy scripts.
+bin/token.txt
+bin/vps/
+bin/deploy-*.bat
+bin/deploy-*.ps1
+bin/fix-perms.*
+
+# Local tool session state (a generated project id), not project content.
+/.freebuff/
+
+# Local gateway debug capture.
+diag_output.txt
+
+# The HooshiX Control Panel is a separate repository with its own history and
+# a node_modules tree. It is kept inside the workspace as a working copy only,
+# so it must never be tracked here (a nested .git would silently become a
+# broken gitlink) and must stay out of the Go build, gitleaks/semgrep scans
+# and packaging input.
+/hooshix-panel/
+
+# AutoCoder build/deploy scratch - never repository content.
+/.openclaw/
+
+# Local security-audit binaries and reports.
+/.audit-runtime-*/

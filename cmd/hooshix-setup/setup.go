@@ -5,8 +5,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"embed"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -24,8 +25,10 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-//go:embed payload/hooshix-agent.exe payload/hooshix-agent-tray.exe
-var payload embed.FS
+// payload is the embedded Agent and tray distribution. It is supplied by
+// payload_embed.go (release builds, -tags hooshix_release_payload) or by the
+// non-release payload_stub.go, so a clean checkout builds without the
+// gitignored payload binaries. See scripts/build-setup.ps1.
 
 const (
 	installDir      = `C:\Program Files\HooshiXAgent`
@@ -35,6 +38,15 @@ const (
 	trayBinary      = "hooshix-agent-tray.exe"
 	uninstallBinary = "uninstall.exe"
 	trayTaskName    = "HooshiXAgentTray"
+	// stateDirName is the fixed leaf the service, the uninstaller and the
+	// Agent's own ServiceStateDir() all agree on.
+	stateDirName = "HooshiXAgent"
+	// payloadManifest is embedded next to the payload binaries by
+	// scripts/build-setup.ps1 and records their SHA-256 digests. Setup verifies
+	// every payload byte against it before anything is written to the install
+	// directory, so a truncated or corrupted embed cannot be promoted to
+	// C:\Program Files as a silently different executable.
+	payloadManifest = "SHA256SUMS"
 )
 
 var setupVersion = "dev"
@@ -65,9 +77,16 @@ func run() error {
 		return fmt.Errorf("stage binaries: %w", err)
 	}
 	defer os.RemoveAll(stage)
-	interactiveAccount, err := interactiveUser()
-	if err != nil {
-		return fmt.Errorf("determine interactive user: %w", err)
+	// The interactive desktop user is only needed for the tray auto-start and
+	// for the read+execute ACE that lets that user's tray read status. Neither
+	// is required by the product: the service runs under LocalSystem. An
+	// unattended/headless host (no interactive logon session at all) must still
+	// be installable, so an unresolvable desktop user downgrades the install to
+	// SYSTEM+Administrators-only state access instead of failing it.
+	interactiveAccount, userErr := interactiveUser()
+	if userErr != nil {
+		fmt.Println("note: no interactive desktop user resolved:", userErr)
+		fmt.Println("      the tray auto-start and its state grant will be skipped; the service does not need them.")
 	}
 
 	stopPreviousInstallation()
@@ -90,6 +109,9 @@ func run() error {
 	}
 	if err := runAgentCommand("service", "start"); err != nil {
 		return fmt.Errorf("start service: %w", err)
+	}
+	if err := waitForServiceRunning(serviceRunningTimeout); err != nil {
+		return err
 	}
 
 	// Desktop integration is best-effort: the tunnel (service + binaries) is
@@ -120,11 +142,20 @@ func stagePayload() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	manifest, err := fs.ReadFile(payload, "payload/"+payloadManifest)
+	if err != nil {
+		os.RemoveAll(stage)
+		return "", fmt.Errorf("read embedded payload manifest: %w", err)
+	}
 	for _, name := range []string{agentBinary, trayBinary} {
-		data, readErr := payload.ReadFile("payload/" + name)
+		data, readErr := fs.ReadFile(payload, "payload/"+name)
 		if readErr != nil {
 			os.RemoveAll(stage)
 			return "", readErr
+		}
+		if verifyErr := verifyPayloadDigest(string(manifest), name, data); verifyErr != nil {
+			os.RemoveAll(stage)
+			return "", verifyErr
 		}
 		if writeErr := os.WriteFile(filepath.Join(stage, name), data, 0o755); writeErr != nil {
 			os.RemoveAll(stage)
@@ -146,6 +177,40 @@ func stagePayload() (string, error) {
 		return "", err
 	}
 	return stage, nil
+}
+
+// verifyPayloadDigest checks one embedded payload binary against its entry in
+// the embedded SHA256SUMS manifest. A missing manifest entry and a digest
+// mismatch are both fatal: the whole point of installing from an embedded
+// payload is that the bytes written to the install directory are the bytes the
+// distribution build produced.
+func verifyPayloadDigest(manifest, name string, data []byte) error {
+	expected, err := manifestDigest(manifest, name)
+	if err != nil {
+		return err
+	}
+	actual := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(actual[:]), expected) {
+		return fmt.Errorf("embedded %s does not match the embedded %s manifest (%s); refusing to install", name, payloadManifest, expected)
+	}
+	return nil
+}
+
+// manifestDigest returns the lower-case SHA-256 recorded for name in a
+// sha256sum-compatible manifest ("<digest>  <name>", optional leading '*' for
+// binary mode). Lines without a digest/name pair are ignored.
+func manifestDigest(manifest, name string) (string, error) {
+	for _, line := range strings.Split(manifest, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		entry := strings.TrimPrefix(fields[len(fields)-1], "*")
+		if entry == name || entry == "./"+name {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("embedded %s manifest has no entry for %s; refusing to install", payloadManifest, name)
 }
 
 func commitStagedPayload(stage string) (map[string]string, error) {
@@ -181,9 +246,11 @@ func commitStagedPayload(stage string) (map[string]string, error) {
 		// build while setup prints "done".
 		installed, err := os.ReadFile(target)
 		if err != nil {
+			rollbackFiles(backups)
 			return nil, fmt.Errorf("verify installed %s: %w", name, err)
 		}
 		if !bytes.Equal(installed, stagedData) {
+			rollbackFiles(backups)
 			return nil, fmt.Errorf("installed %s does not match the payload (an antivirus or policy may be reverting the file); aborting", name)
 		}
 	}
@@ -200,16 +267,63 @@ func rollbackFiles(backups map[string]string) {
 }
 
 func runAgentCommand(args ...string) error {
-	output, err := exec.Command(filepath.Join(installDir, agentBinary), args...).CombinedOutput()
+	output, err := runAgentCommandOutput(args...)
 	if err != nil {
-		return fmt.Errorf("%v: %w: %s", args, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%v: %w: %s", args, err, strings.TrimSpace(output))
 	}
 	return nil
 }
 
+// runAgentCommandOutput runs the installed Agent binary and returns its
+// combined output together with the execution error, so callers that must
+// inspect what the Agent reported (service status) do not have to re-implement
+// the invocation.
+func runAgentCommandOutput(args ...string) (string, error) {
+	output, err := exec.Command(filepath.Join(installDir, agentBinary), args...).CombinedOutput()
+	return string(output), err
+}
+
+// serviceRunningTimeout bounds how long setup waits for SCM to report the
+// service Running after a successful start request.
+const serviceRunningTimeout = 30 * time.Second
+
+// waitForServiceRunning polls the Agent's own `service status` until SCM
+// reports Running. Setup starts the service and previously printed "done. The
+// HooshiX Agent service and tray are running." without ever observing that: a
+// service that starts and immediately exits (Agent initialization failure —
+// the service exits non-zero on purpose so SCM recovery can act) would be
+// reported as a running product. The bounded wait turns that into an install
+// failure the operator can act on.
+func waitForServiceRunning(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	last := "no status was observed"
+	for {
+		output, err := runAgentCommandOutput("service", "status")
+		if err != nil {
+			last = strings.TrimSpace(output + " " + err.Error())
+		} else {
+			last = strings.TrimSpace(output)
+			if strings.HasSuffix(last, "running") {
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("the %s service did not report Running within %s (last SCM status: %s); inspect `sc.exe query %s` and the Agent log in its state directory",
+				agent.WindowsServiceName, timeout, last, agent.WindowsServiceName)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// stopPreviousInstallation stops whatever from a previous installation still
+// holds the payload files open, so the staged replacement below can rename
+// them. It is deliberately tolerant: on a fresh machine there is no service
+// and no process to stop, which is not an error.
 func stopPreviousInstallation() {
-	if err := runAgentCommand("service", "stop"); err != nil {
-		fmt.Println("note: stopping previous service:", err)
+	if _, err := os.Stat(filepath.Join(installDir, agentBinary)); err == nil {
+		if err := runAgentCommand("service", "stop"); err != nil {
+			fmt.Println("note: stopping previous service:", err)
+		}
 	}
 	_ = exec.Command("schtasks.exe", "/End", "/TN", trayTaskName).Run()
 	killProcessByName(trayBinary)
@@ -294,6 +408,9 @@ func firstActiveSessionUser() string {
 }
 
 func registerTrayTask(user string) error {
+	if strings.TrimSpace(user) == "" {
+		return errors.New("no interactive desktop user was resolved to run the tray")
+	}
 	// Run as the interactive user without storing their password: schtasks
 	// only permits /RU with a password or for the current user with /IT.
 	// The logon-trigger task under the console user's own account is
@@ -330,8 +447,12 @@ func registerTrayTask(user string) error {
     </Exec>
   </Actions>
 </Task>`, userXML, commandXML)
-	tempXML := filepath.Join(os.Getenv("TEMP"), "hooshix-tray-task.xml")
-	if err := writeUTF16LE(tempXML, taskXML); err != nil {
+	// Stage the task XML in a uniquely named temp file: the previous fixed
+	// "%TEMP%\hooshix-tray-task.xml" name let any process running as the same
+	// account pre-create or replace the file an ELEVATED setup then handed to
+	// schtasks.exe (a pre-creation/link attack on a privileged process).
+	tempXML, err := stageTaskXML(taskXML)
+	if err != nil {
 		return err
 	}
 	defer os.Remove(tempXML)
@@ -349,7 +470,29 @@ func registerTrayTask(user string) error {
 	return nil
 }
 
-func writeUTF16LE(path, value string) error {
+// stageTaskXML writes the task definition to a uniquely named file created with
+// O_EXCL and returns its path. The caller owns removal.
+func stageTaskXML(taskXML string) (string, error) {
+	tempFile, err := os.CreateTemp("", "hooshix-tray-task-*.xml")
+	if err != nil {
+		return "", err
+	}
+	path := tempFile.Name()
+	if err := writeUTF16LETo(tempFile, taskXML); err != nil {
+		tempFile.Close()
+		os.Remove(path)
+		return "", err
+	}
+	if err := tempFile.Close(); err != nil {
+		os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// writeUTF16LETo encodes value as UTF-16LE with a BOM into an already opened
+// file (the caller owns creation, permissions, and removal).
+func writeUTF16LETo(file *os.File, value string) error {
 	encoded := utf16.Encode([]rune(value))
 	var data bytes.Buffer
 	if err := binary.Write(&data, binary.LittleEndian, uint16(0xfeff)); err != nil {
@@ -358,19 +501,29 @@ func writeUTF16LE(path, value string) error {
 	if err := binary.Write(&data, binary.LittleEndian, encoded); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data.Bytes(), 0o600)
+	if _, err := file.Write(data.Bytes()); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func installPairingCapability(user string) error {
-	stateDir := filepath.Join(os.Getenv("ProgramData"), "HooshiXAgent")
-	if os.Getenv("ProgramData") == "" {
-		stateDir = `C:\ProgramData\HooshiXAgent`
-	}
-	sid, _, _, err := windows.LookupSID("", user)
+	stateDir, err := serviceStateDir()
 	if err != nil {
-		return fmt.Errorf("resolve interactive user SID: %w", err)
+		return err
 	}
-	userSID := "*" + sid.String()
+	// An empty user means no interactive desktop user could be resolved
+	// (headless/unattended host). The interactive-user ACE is then simply
+	// omitted: SYSTEM and Administrators remain, which is strictly narrower
+	// than granting a principal that does not exist.
+	userSID := ""
+	if strings.TrimSpace(user) != "" {
+		sid, _, _, err := windows.LookupSID("", user)
+		if err != nil {
+			return fmt.Errorf("resolve interactive user SID: %w", err)
+		}
+		userSID = "*" + sid.String()
+	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
@@ -385,6 +538,16 @@ func installPairingCapability(user string) error {
 			return fmt.Errorf("recover Agent state directory ownership: %w", err)
 		}
 	}
+	// The directory DACL must exist BEFORE anything is written into it. Go mode
+	// bits do not set a DACL on Windows, so a file created into a directory
+	// that still inherits C:\ProgramData's ACEs stays readable by every local
+	// user until a later per-file icacls runs — and the (OI)(CI) interactive
+	// user grant would keep propagating that read access to every file added
+	// afterwards. Hardening first means the capability is only ever created
+	// inside an already-restricted directory.
+	if err := hardenStateDirACL(stateDir, userSID); err != nil {
+		return err
+	}
 	capability, err := agent.GeneratePairingCapability()
 	if err != nil {
 		return err
@@ -392,26 +555,66 @@ func installPairingCapability(user string) error {
 	if err := agent.WritePairingCapability(stateDir, capability); err != nil {
 		return err
 	}
-	output, err := exec.Command("icacls.exe", stateDir,
-		"/inheritance:r",
-		"/grant:r", userSID+":(OI)(CI)(RX)",
+	path := agent.PairingCapabilityPath(stateDir)
+	if err := hardenCapabilityACL(path, userSID); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+// serviceStateDir resolves the machine-wide Agent state directory through the
+// OS known-folder API rather than %ProgramData%: an environment variable that
+// selects a recursive-delete target is attacker-influenced input, while
+// FOLDERID_ProgramData is the operating system's own answer. The leaf is the
+// fixed install-time name the service, the Agent and both uninstallers share.
+func serviceStateDir() (string, error) {
+	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+	if err != nil {
+		return "", fmt.Errorf("resolve the ProgramData known folder: %w", err)
+	}
+	return filepath.Join(root, stateDirName), nil
+}
+
+// hardenStateDirACL replaces the state directory's inherited DACL with explicit
+// grants for SYSTEM, Administrators and (when one was resolved) the interactive
+// desktop user only.
+func hardenStateDirACL(stateDir, userSID string) error {
+	args := []string{stateDir, "/inheritance:r"}
+	args = appendUserGrant(args, userSID, "(OI)(CI)(RX)")
+	args = append(args,
 		"/grant:r", "*S-1-5-18:(OI)(CI)(F)",
 		"/grant:r", "*S-1-5-32-544:(OI)(CI)(F)",
-		"/T", "/Q").CombinedOutput()
+		"/T", "/Q")
+	output, err := exec.Command("icacls.exe", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("secure Agent state directory ACL: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	path := agent.PairingCapabilityPath(stateDir)
-	output, err = exec.Command("icacls.exe", path,
-		"/inheritance:r",
-		"/grant:r", userSID+":(R)",
+	return nil
+}
+
+// hardenCapabilityACL drops the inherited ACEs from the pairing capability
+// itself so it is readable by exactly the intended principals.
+func hardenCapabilityACL(path, userSID string) error {
+	args := []string{path, "/inheritance:r"}
+	args = appendUserGrant(args, userSID, "(R)")
+	args = append(args,
 		"/grant:r", "*S-1-5-18:(F)",
-		"/grant:r", "*S-1-5-32-544:(F)").CombinedOutput()
+		"/grant:r", "*S-1-5-32-544:(F)")
+	output, err := exec.Command("icacls.exe", args...).CombinedOutput()
 	if err != nil {
-		_ = os.Remove(path)
 		return fmt.Errorf("secure pairing capability ACL: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// appendUserGrant adds the interactive user's grant, or nothing when no
+// interactive desktop user was resolved.
+func appendUserGrant(args []string, userSID, rights string) []string {
+	if strings.TrimSpace(userSID) == "" {
+		return args
+	}
+	return append(args, "/grant:r", userSID+":"+rights)
 }
 
 func xmlEscape(value string) string {
@@ -435,6 +638,21 @@ func xmlEscape(value string) string {
 // Requires the elevated installer token; the privileges are enabled here so
 // no locale-dependent takeown prompt is involved.
 func recaptureStateOwnership(root, userSID string) error {
+	// Build and validate the recovery descriptor FIRST: a malformed user SID or
+	// SDDL must be rejected before any privilege is enabled or any object is
+	// touched.
+	sd, err := windows.SecurityDescriptorFromString(recoverySDDL(userSID))
+	if err != nil {
+		return fmt.Errorf("build recovery security descriptor: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("extract recovery owner: %w", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("extract recovery DACL: %w", err)
+	}
 	var token windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
 		return fmt.Errorf("open process token: %w", err)
@@ -448,21 +666,6 @@ func recaptureStateOwnership(root, userSID string) error {
 			return fmt.Errorf("enable %s: %w", privilege, err)
 		}
 	}
-	// O:BA owner = BUILTIN\Administrators; DACL: SYSTEM and Administrators
-	// full control (inherited), interactive user read+execute (inherited).
-	sddl := "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;" + strings.TrimPrefix(userSID, "*") + ")"
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		return fmt.Errorf("build recovery security descriptor: %w", err)
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return fmt.Errorf("extract recovery owner: %w", err)
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return fmt.Errorf("extract recovery DACL: %w", err)
-	}
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -474,6 +677,20 @@ func recaptureStateOwnership(root, userSID string) error {
 		}
 		return nil
 	})
+}
+
+// recoverySDDL is the owner+DACL applied to every entry of the state tree by
+// recaptureStateOwnership. O:BA owner = BUILTIN\Administrators; DACL: SYSTEM
+// and Administrators full control (inherited) plus, when an interactive
+// desktop user was resolved, that user's read+execute (inherited). The user ACE
+// is omitted entirely for a headless/unattended host, which leaves a strictly
+// narrower DACL than granting a principal that does not exist.
+func recoverySDDL(userSID string) string {
+	sddl := "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	if sid := strings.TrimPrefix(strings.TrimSpace(userSID), "*"); sid != "" {
+		sddl += "(A;OICI;GRGX;;;" + sid + ")"
+	}
+	return sddl
 }
 
 func enableTokenPrivilege(token windows.Token, name string) error {

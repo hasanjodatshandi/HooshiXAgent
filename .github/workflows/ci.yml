@@ -11,12 +11,19 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only pull-request runs may be cancelled by a newer push. A push to main must
+  # never cancel its own run: scripts/release/verify-release-commit.py requires a
+  # COMPLETED, SUCCESSFUL push run for the exact release SHA, and cancelling it
+  # would silently make that commit unreleasable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   go-quality:
     name: Go quality / tests / vulnerability
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -48,6 +55,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -69,6 +79,18 @@ jobs:
         shell: bash
         run: go test -run '^$' -fuzz '^FuzzValidateLocalTarget$' -fuzztime=1s ./internal/agent
 
+      # The Windows-only product surface (internal/tray is entirely
+      # //go:build windows, internal/agent/svc installs the service, and
+      # cmd/hooshix-setup is the desktop installer) is invisible to the Linux
+      # and macOS legs, and the narrow selectors above never reach it. The full
+      # module test run on Windows is what executes those tests at all.
+      - name: Full module tests (Windows-only product surface)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+
       - name: Clean Agent package install / rollback / uninstall (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -82,6 +104,9 @@ jobs:
   architecture:
     name: Architecture fitness
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -99,6 +124,9 @@ jobs:
   security:
     name: Gitleaks / Semgrep
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout full history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -136,6 +164,9 @@ jobs:
   resource-dos:
     name: R-3 resource / DoS budget gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -153,6 +184,9 @@ jobs:
   streaming-ingress:
     name: R-4 streaming ingress gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -170,6 +204,9 @@ jobs:
   http-proxy-correctness:
     name: R-5 HTTP / stream isolation gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -187,6 +224,9 @@ jobs:
   supply-chain:
     name: R-6 release / supply-chain gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -206,6 +246,9 @@ jobs:
   metadata-scalability:
     name: R-7 metadata scalability / determinism gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -223,6 +266,9 @@ jobs:
   observability-writer:
     name: R-8 observability / writer isolation gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -240,6 +286,9 @@ jobs:
   agent-state-installer:
     name: R-9 Agent state / installer hardening gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -257,6 +306,9 @@ jobs:
   agent-state-transaction:
     name: RA-5 Agent state transaction hardening gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -278,6 +330,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -298,11 +353,17 @@ jobs:
         shell: pwsh
         run: |
           go test -count=5 ./internal/agent ./internal/gateway -run '^TestRA6'
+          # Windows-only packages that no other leg compiles or runs: the tray,
+          # the service installer and the supervisor.
+          go test -count=1 ./internal/tray ./internal/agent/svc ./internal/agent/supervisor ./cmd/hooshix-setup
           ./scripts/ci/agent-install-smoke.ps1
 
   infrastructure-runtime:
     name: R-10 infrastructure runtime hardening gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -314,6 +375,9 @@ jobs:
   comprehensive-tests:
     name: R-11 comprehensive test expansion gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -341,6 +405,9 @@ jobs:
   performance-capacity:
     name: R-12 performance / capacity gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -368,6 +435,9 @@ jobs:
   e2e-acceptance:
     name: Agent↔Gateway E2E acceptance
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -385,6 +455,9 @@ jobs:
   live-metadata-lifecycle:
     name: RA-3 live metadata lifecycle gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -402,6 +475,9 @@ jobs:
   multi-host-public-edge:
     name: RA-4 multi-host public edge gate
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -419,6 +495,9 @@ jobs:
   packaging-ops:
     name: Packaging / clean deployment / rollback
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -434,8 +513,17 @@ jobs:
         run: bash scripts/ci/packaging-ops.sh
 
   windows-distribution-build:
-    name: Windows desktop distribution build (setup + tray)
+    name: Windows desktop distribution build / service install gate (setup + tray)
     runs-on: windows-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely. Raised from 35 to 60 because
+    # this job no longer only builds the distribution: it now also runs the real
+    # install/run/restart/uninstall gate below, whose internal waits are bounded
+    # at roughly 39 minutes in the pathological case (Setup.exe install 600 s and
+    # uninstall 600 s, plus per-assertion waits of 60-120 s). A job timeout that
+    # fired mid-gate would report as a timeout instead of naming the failing
+    # assertion, which is exactly the opaque failure the gate exists to remove.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -449,6 +537,19 @@ jobs:
       - name: Install rsrc resource compiler
         shell: pwsh
         run: go install github.com/akavel/rsrc@v0.10.2
+
+      # Build integrity for the whole module on Windows, before any build step
+      # has created resources or payload files. cmd/hooshix-setup keeps its
+      # //go:embed payload behind the hooshix_release_payload build tag so this
+      # works from a clean checkout, where the gitignored payload binaries do
+      # not exist. A repository that cannot build on Windows from a fresh
+      # checkout must fail here, not in a user's hands.
+      - name: Build and vet the whole module (clean checkout)
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build ./...
+          go vet ./...
 
       # Guards against the shipped installer ever diverging from source
       # again: the full setup/tray/agent distribution must build from a
@@ -469,9 +570,44 @@ jobs:
             Write-Host "$name = $($info.Length) bytes"
           }
 
+      # The real runtime procedure for cmd/hooshix-setup and cmd/hooshix-agent-tray
+      # is scripts/ci/windows-service-install-smoke.ps1 (Executable Runtime Gate
+      # gap G1, ADR-0014 rollout step R4). Everything
+      # above this step is build integrity: it proves the distribution can be
+      # built from a clean checkout and that three files exist. This step
+      # executes the capability instead — it installs the distribution that was
+      # just built, asserts the accepted ADR-0014 persistence model, exercises
+      # SCM restart-on-failure after a forced termination, and asserts that the
+      # installed uninstaller removes the service, install tree, ARP entry, tray
+      # task and machine-wide state again.
+      #
+      # -SetupExe reuses the artifact built above rather than rebuilding it.
+      #
+      # This gate fails closed and never skips: it asserts the elevated
+      # precondition up front, and every remaining assertion is an observation
+      # of the machine. If a hosted runner could not install, start, restart or
+      # remove the service, this job fails by name. The one condition that is a
+      # designed outcome rather than a failure is the tray task: when no
+      # interactive desktop user can be resolved (the installer's documented
+      # headless downgrade) the gate asserts that downgrade was reported instead
+      # of asserting the task exists. It is a desktop UI affordance, not Agent
+      # persistence (ADR-0014 clause 6), so that branch is not a silent skip of
+      # the install/run/restart/uninstall claim.
+      #
+      # Hosted Windows runners supply the elevated token the gate requires; the
+      # gate deliberately performs no literal physical OS reboot, so reboot
+      # persistence is evidenced as SCM automatic-start configuration plus the
+      # observed restart-on-failure, never as a reboot.
+      - name: Install / run / restart / uninstall the Windows service distribution
+        shell: pwsh
+        run: ./scripts/ci/windows-service-install-smoke.ps1 -SetupExe "${{ github.workspace }}\dist\HooshiXAgent-Setup.exe"
+
   runtime-gate:
     name: Executable runtime gate guard
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -483,6 +619,9 @@ jobs:
   prototype-smoke:
     name: AG-9 first prototype smoke
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -523,6 +662,9 @@ jobs:
       - runtime-gate
       - windows-distribution-build
     runs-on: ubuntu-latest
+    # Bounded so a hung step cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 60
     steps:
       - name: Checkout release candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

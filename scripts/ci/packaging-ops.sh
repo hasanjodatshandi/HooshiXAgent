@@ -33,7 +33,46 @@ for caddy_config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
     echo "Caddy→Gateway certificate verification configuration is incomplete: $caddy_config" >&2
     exit 1
   fi
+  # Response hardening: HSTS with at least a six-month max-age, MIME-sniffing
+  # protection, and no Server banner on anything the public edge emits.
+  if ! grep -Eq 'Strict-Transport-Security "max-age=(15[0-9]{6}|[2-9][0-9]{7,})"' "$caddy_config"; then
+    echo "Caddy must emit HSTS with a max-age of at least six months: $caddy_config" >&2
+    exit 1
+  fi
+  if ! grep -q 'X-Content-Type-Options "nosniff"' "$caddy_config"; then
+    echo "Caddy must emit X-Content-Type-Options: nosniff: $caddy_config" >&2
+    exit 1
+  fi
+  if ! grep -q -- '-Server' "$caddy_config"; then
+    echo "Caddy must suppress the Server response header: $caddy_config" >&2
+    exit 1
+  fi
+  # The edge must refuse the genuinely internal /readyz and /metrics paths, and
+  # must NOT refuse /healthz: it is a common tenant health path and the separate
+  # ops listener already removed the Gateway-local shadowing, so an edge refusal
+  # would make a tenant's own /healthz unreachable.
+  if ! grep -q '@internal_ops path /readyz /metrics' "$caddy_config"; then
+    echo "Caddy must refuse the internal /readyz and /metrics paths: $caddy_config" >&2
+    exit 1
+  fi
+  if grep -qE '@internal_ops path.*/healthz' "$caddy_config"; then
+    echo "Caddy must NOT refuse /healthz on the public edge: $caddy_config" >&2
+    exit 1
+  fi
 done
+
+# The production Caddyfile is only ever adapted inside a running container
+# otherwise, so an unsupported on_demand_tls sub-directive (Caddy v2.11.x
+# accepts only ask and permission: interval/burst were removed and there is no
+# rate_limit) would first surface as a dead edge in production. Adapt it here
+# with a syntactically valid ask URL.
+caddy_image='caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648'
+if ! docker run --rm -e HOOSHIX_TLS_ASK_URL=https://permission.invalid/ask \
+  -v "$repo_root/deploy/gateway/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" \
+  caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  echo "production Caddyfile failed to adapt with a valid HOOSHIX_TLS_ASK_URL" >&2
+  exit 1
+fi
 
 work="$(mktemp -d)"
 compose_started=false
@@ -115,22 +154,37 @@ HOOSHIX_TLS_DIR="$PWD/runtime/tls" \
   docker compose up -d --build
 compose_started=true
 
+# The Gateway's liveness/readiness/metrics live on the loopback administrative
+# listener, so readiness is observed through the container healthcheck.
 for _ in $(seq 1 60); do
-  if curl --fail --insecure --silent --show-error https://localhost:18443/healthz >/dev/null 2>&1; then
+  gateway_health="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q gateway)" 2>/dev/null || true)"
+  if [[ "$gateway_health" == healthy ]]; then
     break
   fi
   sleep 1
 done
-curl --fail --insecure --silent --show-error https://localhost:18443/healthz | grep -q '"status":"ok"'
+[[ "$gateway_health" == healthy ]]
 
-ready_public="$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' https://localhost:18443/readyz)"
-metrics_public="$(curl --insecure --silent --output /dev/null --write-out '%{http_code}' https://localhost:18443/metrics)"
+# Verify the public edge certificate instead of skipping verification: the
+# localhost certificate is issued by Caddy's own internal CA, whose root is
+# available inside the container (the same source the RA-4 gate uses).
+docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt >"$work/caddy-root.crt"
+openssl x509 -in "$work/caddy-root.crt" -noout >/dev/null
+
+# The edge must refuse the internal /readyz and /metrics paths itself (404).
+# /healthz is deliberately not refused and is therefore not probed here: this
+# static fixture has no route for it, so it would answer 404 from the Gateway's
+# no-route path, not from an edge refusal — asserting a status for it would be
+# meaningless. The Caddyfile assertion earlier in this script is authoritative
+# for the refused-path list.
+ready_public="$(curl --cacert "$work/caddy-root.crt" --silent --output /dev/null --write-out '%{http_code}' https://localhost:18443/readyz)"
+metrics_public="$(curl --cacert "$work/caddy-root.crt" --silent --output /dev/null --write-out '%{http_code}' https://localhost:18443/metrics)"
 [[ "$ready_public" == 404 ]]
 [[ "$metrics_public" == 404 ]]
 
-internal_ready="$(docker compose exec -T gateway curl --fail --silent --show-error --cacert /run/hooshix-tls/ca.crt https://gateway:8443/readyz)"
+internal_ready="$(docker compose exec -T gateway curl --fail --silent --show-error http://127.0.0.1:9090/readyz)"
 [[ "$internal_ready" == *'"status":"ready"'* ]]
-internal_metrics="$(docker compose exec -T gateway curl --fail --silent --show-error --cacert /run/hooshix-tls/ca.crt https://gateway:8443/metrics)"
+internal_metrics="$(docker compose exec -T gateway curl --fail --silent --show-error http://127.0.0.1:9090/metrics)"
 for metric in hooshix_gateway_agent_sessions hooshix_gateway_active_streams hooshix_gateway_pending_handshakes; do
   grep -q "$metric" <<<"$internal_metrics"
 done

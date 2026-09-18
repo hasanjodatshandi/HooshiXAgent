@@ -35,6 +35,14 @@ Production/default Caddy uses the ADR-0011 restricted On-Demand TLS model. Set `
 
 The default dynamic Caddyfile is intentionally fail-closed if `HOOSHIX_TLS_ASK_URL` is empty or invalid; there is no unrestricted On-Demand TLS fallback.
 
+### On-Demand TLS issuance rate limiting
+
+The permission authority at `HOOSHIX_TLS_ASK_URL` is the **only** issuance rate limiter in this deployment, so it must enforce one: bound how many issuance decisions a single client address and a single hostname can obtain per unit of time, and answer non-2xx once that bound is exceeded (Caddy treats any non-2xx as a denial and aborts the handshake).
+
+This is a deployment requirement rather than a Caddyfile setting because the pinned `caddy:2.11.4-alpine` image provides no supported mechanism for it. Caddy v2.11.4 accepts only `ask` and `permission` under the `on_demand_tls` global option: `interval` and `burst` are rejected as no longer supported, and there is no `rate_limit` option (nor a global `rate_limit` option). Adding any of them makes `caddy adapt` fail, so the edge would never start — the production Caddyfile therefore contains a comment where a reader would otherwise expect a limit, and `scripts/ci/packaging-ops.sh` adapts the production Caddyfile with a valid ask URL so an unsupported sub-directive is caught in CI instead of in production.
+
+The edge does emit the response-hardening headers (`Strict-Transport-Security` with a 180-day `max-age`, `X-Content-Type-Options: nosniff`, and no `Server` header) in both the production and static compatibility configurations; `scripts/ci/packaging-ops.sh` and `scripts/ci/multi-host-public-edge.sh` assert them.
+
 `HOOSHIX_METADATA_DIR` is a read-only projection supplied by the external Control Panel integration flow. The Compose default is `HOOSHIX_METADATA_MODE=live`, with a 1-second refresh interval and 30-second maximum generation age. Production live layout is:
 
 ```text
@@ -63,6 +71,8 @@ This creates a deployment-local CA and a Gateway server certificate whose SAN is
 The CA private key remains on the host under the private TLS directory and is **not** mounted into either runtime container. Caddy receives only `ca.crt`; Gateway receives only its certificate/key and CA certificate.
 R-9 makes CA bootstrap fail closed if only one of `ca.key` or `ca.crt` exists, if either file is malformed, or if their public keys do not match. Fresh CA material is generated as a temporary key/certificate pair before either final path is installed. Operators must recover or deliberately remove incomplete/mismatched CA state; bootstrap will not silently replace one half of an existing CA pair.
 
+A newly generated CA carries the standard trust-anchor profile (`basicConstraints=critical,CA:TRUE`, `keyUsage=critical,keyCertSign,cRLSign`, `subjectKeyIdentifier`), so strict OpenSSL 3.x clients accept it as a trust anchor; an extension-less CA from an earlier bootstrap is left untouched and must be re-issued if strict verification is required.
+
 Caddy verifies the Gateway certificate with:
 
 ```text
@@ -86,10 +96,11 @@ Inspect status:
 
 ## Operations
 
-- `/healthz` is the Gateway liveness endpoint.
+- `/healthz`, `/readyz` and `/metrics` are served on the Gateway's separate administrative listener (`-ops-listen 127.0.0.1:9090`, plaintext, loopback inside the container, not published). They are never served on the public listener, so they can never shadow a tenant route.
 - `/readyz` is an internal readiness endpoint and fails closed when live metadata has no fresh validated generation.
 - `/metrics` emits low-cardinality aggregate Prometheus text metrics, including live metadata freshness/refresh health.
-- Caddy blocks `/readyz` and `/metrics` on the public edge for every hostname.
+- Caddy refuses `/readyz` and `/metrics` on the public edge for every hostname as defence in depth. It deliberately does **not** refuse `/healthz`: `/healthz` is one of the most common tenant health paths, and the separate ops listener already removed the Gateway-local shadowing, so an edge refusal would only make a tenant's own `/healthz` unreachable. This is the structural fix for the pre-launch finding that a Gateway-local endpoint had made a tenant's `/healthz` unreachable.
+- `-trusted-proxy` (default `172.16.0.0/12`, override with `HOOSHIX_TRUSTED_PROXY`) names the edge that may supply the client address in `X-Forwarded-For`. The Gateway discards every client-supplied forwarding header; only a request whose immediate peer is inside this set contributes the edge-observed client hop to tenant applications. Set it to the actual compose/edge network if your Docker address pool differs, otherwise tenant applications see the edge's address instead of the client's.
 - TLS permission is independent from Gateway route authorization: a hostname may be certificate-approved yet still receive Gateway 404 when no current route assignment exists.
 - Gateway structured logs go to stderr.
 - Gateway integration/status JSONL goes to stdout.
@@ -102,7 +113,7 @@ The metrics intentionally contain only aggregate session/stream/handshake/resour
 
 The Compose profile keeps the Gateway at `mem_limit: 256m` while the application-owned payload budgets are explicitly capped at 32 MiB of queued Agent→Gateway data plus a 32 MiB global public-ingress streaming-chunk budget. Public requests are not retained in full: the ingress budget is held only for bounded chunks while they are synchronously forwarded. These budgets are not preallocated; together they cap the explicit application payload reservations at 64 MiB and leave the remaining container memory for Go/runtime, WebSocket/TLS, metadata, stacks and ordinary request overhead. Each stream may queue at most 2 MiB and each Agent session at most 8 MiB, regardless of the existing frame-count/stream-count ceilings.
 
-The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims. R-12 measured synthetic 100/500/1000 scenarios and retained the shipped defaults; any larger production envelope requires representative capacity evidence.
+The same profile bounds public ingress to 32 concurrent requests with a global 256 requests/second rate and 512-request burst, and Agent sessions to 64 authenticated connections and Agent handshakes to 64 concurrent handshakes with a global 32/second rate and 64-handshake burst. Pre-authentication Agent connections are separately throttled per trusted peer (16/second, burst 32) before any pending-handshake slot is taken, so a peer that opens sockets and stalls in the unauthenticated preface cannot cycle the bounded slots. Saturation/rejection counters are exposed on the internal `/metrics` endpoint. These are safety defaults, not capacity claims. R-12 measured synthetic 100/500/1000 scenarios and retained the shipped defaults; any larger production envelope requires representative capacity evidence.
 
 ### R-10 container runtime envelope
 
@@ -112,7 +123,7 @@ Gateway continues as UID/GID `10001:10001` with **no** added capability. Caddy a
 
 All host bind mounts are read-only and use `create_host_path: false`, so a missing metadata/TLS/Caddyfile source fails startup instead of being silently created by Compose. The host TLS directory remains mode `0700`; `ca.key` is never mounted. Gateway receives only its server key/certificate plus the CA certificate, and Caddy receives only the public CA certificate.
 
-Gateway's Compose healthcheck uses `/readyz`. Caddy waits for that health state and its active upstream probe also uses `/readyz`, so an alive-but-not-ready Gateway is not considered routable. Caddy has its own local HTTPS healthcheck through `HOOSHIX_PUBLIC_HOST`; in dynamic mode that health hostname must therefore be included in the external certificate-permission authority. `/readyz` and `/metrics` remain blocked on the public edge.
+Gateway's Compose healthcheck uses the administrative readiness endpoint (`http://127.0.0.1:9090/readyz`), so a container is healthy only when its own liveness/readiness listener answers; Caddy waits for that health state before starting. Caddy's own container healthcheck verifies its local HTTPS edge certificate against the concatenated trust roots and accepts any HTTP response (it probes a neutral path, not `/healthz` or `/readyz`), so it asserts TLS termination and edge liveness rather than a particular status code; in dynamic mode that health hostname must be included in the external certificate-permission authority. `/readyz` and `/metrics` remain refused on the public edge, while `/healthz` stays an ordinary tenant path.
 
 ## Upgrade and rollback
 

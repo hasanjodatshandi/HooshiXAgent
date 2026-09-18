@@ -45,7 +45,7 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{})
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -53,7 +53,7 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 		"-metadata-mode", "static",
 	)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 
 	// A valid external route with no authenticated Agent must fail closed.
 	response, err := publicRequest(client, gatewayBaseURL, "/offline-before-agent", "")
@@ -85,17 +85,17 @@ func TestAgentGatewayEndToEndAcceptance(t *testing.T) {
 	// and prove the Agent reconnect loop restores the route without being restarted.
 	gateway.stopGracefully(t, 10*time.Second)
 	waitFor(t, 3*time.Second, func() bool {
-		_, err := client.Get(gatewayBaseURL + "/healthz")
+		_, err := client.Get(gatewayOpsURL + "/healthz")
 		return err != nil
 	})
-	gateway = startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL = startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
 		"-metadata-dir", metadataDir,
 		"-metadata-mode", "static",
 	)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 	second := waitTunnel(t, client, gatewayBaseURL, "/after-gateway-restart", "payload-two")
 	if second != "e2e-local:/after-gateway-restart:payload-two" {
 		t.Fatalf("unexpected post-Gateway-restart response: %q", second)
@@ -164,7 +164,7 @@ func TestAgentGatewayLargeRequestStreaming(t *testing.T) {
 
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, listener.Addr().String())
 	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{})
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -173,7 +173,7 @@ func TestAgentGatewayLargeRequestStreaming(t *testing.T) {
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	defer agent.stop(t)
 
@@ -233,7 +233,7 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 	authorizationExpiresAt := writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{authorizationTTL: 8 * time.Second})
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -242,7 +242,7 @@ func TestAgentGatewayAuthorizationExpiryFailClosed(t *testing.T) {
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 
 	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	if body := waitTunnel(t, client, gatewayBaseURL, "/before-authorization-expiry", "one"); body != "e2e-local:/before-authorization-expiry:one" {
@@ -310,7 +310,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 		}
 		writeValidatedMetadata(t, metadataDir, publicKey, wrongToken, metadataOptions{})
 
-		gateway := startProcess(t, gatewayBinary,
+		gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 			"-listen", gatewayAddress,
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
@@ -319,7 +319,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 		)
 		defer gateway.stop(t)
 		client := trustedClient(roots)
-		waitGatewayHealth(t, client, gatewayBaseURL)
+		waitGatewayHealth(t, client, gatewayOpsURL)
 		agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 		defer agent.stop(t)
 
@@ -359,7 +359,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 		route["local_target"] = "169.254.169.254:80"
 		writeJSON(t, routePath, route)
 
-		gateway := startProcess(t, gatewayBinary,
+		gateway, _ := startGatewayProcess(t, gatewayBinary,
 			"-listen", gatewayAddress,
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
@@ -397,7 +397,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 		publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 		writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{localEndpointID: "not-configured-locally"})
 
-		gateway := startProcess(t, gatewayBinary,
+		gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 			"-listen", gatewayAddress,
 			"-tls-cert", certPath,
 			"-tls-key", keyPath,
@@ -406,7 +406,7 @@ func TestAgentGatewayEndToEndSecurityNegatives(t *testing.T) {
 		)
 		defer gateway.stop(t)
 		client := trustedClient(roots)
-		waitGatewayHealth(t, client, gatewayBaseURL)
+		waitGatewayHealth(t, client, gatewayOpsURL)
 		agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 		defer agent.stop(t)
 
@@ -484,11 +484,22 @@ func writeValidatedMetadata(t *testing.T, root, publicKey, token string, options
 	return expiresAt
 }
 
+// requiredBinaries returns the real Agent and Gateway executables these
+// end-to-end assertions must exercise.
+//
+// A gate that reports success without running a single tunneled request is
+// worse than no gate, so in CI missing binaries are a FAILURE, never a skip:
+// `scripts/ci/go-quality.sh` builds both binaries and exports their paths
+// before running `go test ./...`. Outside CI the variables stay optional so a
+// developer can still run the unit tests without a full product build.
 func requiredBinaries(t *testing.T) (string, string) {
 	t.Helper()
 	agentBinary := os.Getenv("HOOSHIX_AGENT_BINARY")
 	gatewayBinary := os.Getenv("HOOSHIX_GATEWAY_BINARY")
 	if agentBinary == "" || gatewayBinary == "" {
+		if os.Getenv("CI") == "true" {
+			t.Fatal("CI must set HOOSHIX_AGENT_BINARY and HOOSHIX_GATEWAY_BINARY: build ./cmd/agent and ./cmd/gateway and export their paths (see scripts/ci/go-quality.sh); an end-to-end assertion must not be skipped into a passing gate")
+		}
 		t.Skip("set HOOSHIX_AGENT_BINARY and HOOSHIX_GATEWAY_BINARY")
 	}
 	return agentBinary, gatewayBinary

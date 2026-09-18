@@ -130,9 +130,3 @@ func copyAndFreeBlob(blob dataBlob) []byte {
 	view := unsafe.Slice(blob.pbData, int(blob.cbData))
 	return append([]byte(nil), view...)
 }
-
-func zeroBytes(data []byte) {
-	for index := range data {
-		data[index] = 0
-	}
-}

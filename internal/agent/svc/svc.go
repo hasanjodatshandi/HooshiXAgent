@@ -11,13 +11,16 @@ package svc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	mgr "golang.org/x/sys/windows/svc/mgr"
 
@@ -26,15 +29,28 @@ import (
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent/webapp"
 )
 
-// ServiceName is the registered Windows service name.
-const ServiceName = "HooshiXAgent"
+// ServiceName is the registered Windows service name. It aliases the shared
+// constant so the persistence definition the Agent binary reports through
+// `service-spec` and the service this package registers cannot drift apart.
+const ServiceName = agent.WindowsServiceName
 
-// StateDir is the LocalSystem service state directory.
+// Per-operation service access rights. mgr.Mgr.OpenService requests
+// windows.SERVICE_ALL_ACCESS for every call, which the install-time DACL
+// deliberately does not grant interactive users: a LeastPrivilege tray task
+// therefore got ERROR_ACCESS_DENIED from every SCM call and could only ever
+// display "status unavailable". Each operation now opens the service with the
+// single right it needs.
+const (
+	serviceQueryAccess = windows.SERVICE_QUERY_STATUS
+	serviceStartAccess = windows.SERVICE_START
+	serviceStopAccess  = windows.SERVICE_STOP
+)
+
+// StateDir is the LocalSystem service state directory. It delegates to the
+// shared resolver in package agent so the service and the CLI can never
+// disagree about where machine-wide state lives.
 func StateDir() string {
-	if programData := os.Getenv("ProgramData"); programData != "" {
-		return filepath.Join(programData, "HooshiXAgent")
-	}
-	return `C:\ProgramData\HooshiXAgent`
+	return agent.ServiceStateDir()
 }
 
 // PairingListenAddr is the loopback-only pairing UI address.
@@ -57,13 +73,25 @@ func (runner *Runner) Execute(args []string, requests <-chan svc.ChangeRequest, 
 		return false, 1
 	}
 	status <- svc.Status{State: svc.Running, Accepts: accepts}
+	return false, controlLoop(requests, status, cancel, done)
+}
 
-	agentDone := done
+// controlLoop services SCM requests until the service is asked to stop or the
+// agent goroutine exits on its own. The returned value is the exit code
+// reported to SCM, and the two cases differ deliberately:
+//
+//   - operator-initiated Stop/Shutdown, and a closed request channel, are
+//     SUCCESS (0). A non-zero code here is handed to the restart-on-failure
+//     policy installed by Install, which restarts the service ~5s later — so
+//     "Stop service" from the tray could never actually stop it.
+//   - the supervisor terminating on its own is a genuine failure (1) so SCM
+//     failure recovery acts instead of showing a hollow Running state.
+func controlLoop(requests <-chan svc.ChangeRequest, status chan<- svc.Status, cancel context.CancelFunc, agentDone <-chan struct{}) uint32 {
 	for {
 		select {
 		case request, ok := <-requests:
 			if !ok {
-				return false, 0
+				return 0
 			}
 			switch request.Cmd {
 			case svc.Interrogate:
@@ -72,13 +100,10 @@ func (runner *Runner) Execute(args []string, requests <-chan svc.ChangeRequest, 
 				status <- svc.Status{State: svc.StopPending}
 				cancel()
 				<-agentDone
-				return false, 1
+				return 0
 			}
 		case <-agentDone:
-			// The supervisor terminated on its own (e.g. unrecoverable
-			// state). Report failure with a nonzero exit so SCM recovery
-			// restarts the service instead of showing a hollow Running state.
-			return false, 1
+			return 1
 		}
 	}
 }
@@ -89,6 +114,14 @@ func startAgent() (context.CancelFunc, <-chan struct{}, error) {
 	done := make(chan struct{})
 
 	stateDir := StateDir()
+	// Installers establish the directory DACL first. Create owned state and
+	// capability before opening agent.log, which is deliberately not an
+	// adoption marker. DPAPI identity creation stays in the service account.
+	if err := initializeServiceIdentity(stateDir); err != nil {
+		cancel()
+		close(done)
+		return cancel, done, err
+	}
 	logger := newServiceLogger(stateDir)
 
 	// Remove any legacy plaintext token record from older installations: the
@@ -111,11 +144,27 @@ func startAgent() (context.CancelFunc, <-chan struct{}, error) {
 		go func() {
 			app, appErr := webapp.NewApp(stateDir, logger)
 			if appErr != nil {
-				logger.Warn("pairing ui unavailable", "error", appErr)
+				logger.Error("pairing ui unavailable", "error", appErr)
 				return
 			}
-			if serveErr := app.Serve(ctx, PairingListenAddr, logger); serveErr != nil {
-				logger.Info("pairing ui stopped", "error", serveErr)
+			listener, listenErr := app.Listen(PairingListenAddr)
+			if listenErr != nil {
+				// The fixed port is taken. Either a stale instance or a local
+				// process is squatting on it to intercept the pairing
+				// capability, so never hand the capability to that address:
+				// log loudly and move the real listener to an ephemeral port
+				// that is published in pairing.endpoint.json.
+				logger.Error("pairing ui fixed port unavailable — the port may be squatted",
+					"addr", PairingListenAddr, "error", listenErr)
+				listener, listenErr = app.Listen("127.0.0.1:0")
+				if listenErr != nil {
+					logger.Error("pairing ui unavailable: no loopback port could be bound", "error", listenErr)
+					return
+				}
+				logger.Warn("pairing ui moved to an ephemeral loopback port", "addr", listener.Addr().String())
+			}
+			if serveErr := app.ServeListener(ctx, listener, logger); serveErr != nil {
+				logger.Error("pairing ui stopped", "error", serveErr)
 			}
 		}()
 		if runErr := sup.Run(ctx); runErr != nil {
@@ -123,6 +172,16 @@ func startAgent() (context.CancelFunc, <-chan struct{}, error) {
 		}
 	}()
 	return cancel, done, nil
+}
+
+func initializeServiceIdentity(stateDir string) error {
+	if _, err := agent.EnsurePairingCapability(stateDir); err != nil {
+		return fmt.Errorf("initialize service pairing capability: %w", err)
+	}
+	if _, _, err := agent.LoadOrCreateIdentity(agent.NewPlatformSecretStore(stateDir)); err != nil {
+		return fmt.Errorf("initialize service identity: %w", err)
+	}
+	return nil
 }
 
 // agentLogMaxBytes bounds agent.log before rotation. One retained previous
@@ -280,7 +339,10 @@ func Install(execPath string) error {
 	return nil
 }
 
-// Uninstall stops and removes the service.
+// Uninstall stops and removes the service. It is idempotent: a service that is
+// not registered (already removed, or never installed on this device) is a
+// valid uninstall state, so the packaged uninstaller can report success
+// instead of "uninstall incomplete" on a second run.
 func Uninstall() error {
 	manager, err := mgr.Connect()
 	if err != nil {
@@ -289,6 +351,9 @@ func Uninstall() error {
 	defer manager.Disconnect()
 	service, err := manager.OpenService(ServiceName)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil
+		}
 		return fmt.Errorf("open service: %w", err)
 	}
 	defer service.Close()
@@ -301,43 +366,39 @@ func Uninstall() error {
 	return service.Delete()
 }
 
-// Start starts the registered service.
+// Start starts the registered service. An already-running service is success:
+// setup starts the service after `service install`, and SCM reports
+// ERROR_SERVICE_ALREADY_RUNNING for a service that is already up.
 func Start() error {
-	manager, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connect service manager: %w", err)
+	err := withServiceHandle(serviceStartAccess, func(handle windows.Handle) error {
+		return windows.StartService(handle, 0, nil)
+	})
+	if errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+		return nil
 	}
-	defer manager.Disconnect()
-	service, err := manager.OpenService(ServiceName)
-	if err != nil {
-		return fmt.Errorf("open service: %w", err)
-	}
-	defer service.Close()
-	return service.Start()
+	return err
 }
 
 // Stop stops the registered service.
 func Stop() error {
-	return controlService(svc.Stop)
+	return withServiceHandle(serviceStopAccess, func(handle windows.Handle) error {
+		var status windows.SERVICE_STATUS
+		return windows.ControlService(handle, uint32(svc.Stop), &status)
+	})
 }
 
 // QueryStatus returns the SCM state name for the service.
 func QueryStatus() (string, error) {
-	manager, err := mgr.Connect()
-	if err != nil {
-		return "", fmt.Errorf("connect service manager: %w", err)
-	}
-	defer manager.Disconnect()
-	service, err := manager.OpenService(ServiceName)
-	if err != nil {
-		return "", fmt.Errorf("open service: %w", err)
-	}
-	defer service.Close()
-	status, err := service.Query()
+	var status windows.SERVICE_STATUS_PROCESS
+	err := withServiceHandle(serviceQueryAccess, func(handle windows.Handle) error {
+		var needed uint32
+		return windows.QueryServiceStatusEx(handle, windows.SC_STATUS_PROCESS_INFO,
+			(*byte)(unsafe.Pointer(&status)), uint32(unsafe.Sizeof(status)), &needed)
+	})
 	if err != nil {
 		return "", fmt.Errorf("query service: %w", err)
 	}
-	switch status.State {
+	switch svc.State(status.CurrentState) {
 	case svc.Stopped:
 		return "stopped", nil
 	case svc.StartPending:
@@ -357,21 +418,24 @@ func QueryStatus() (string, error) {
 	}
 }
 
-func controlService(control svc.Cmd) error {
-	manager, err := mgr.Connect()
+// withServiceHandle opens the service with exactly the requested access rights
+// and runs fn with the handle, so no caller needs SERVICE_ALL_ACCESS.
+func withServiceHandle(access uint32, fn func(windows.Handle) error) error {
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return fmt.Errorf("connect service manager: %w", err)
 	}
-	defer manager.Disconnect()
-	service, err := manager.OpenService(ServiceName)
+	defer windows.CloseServiceHandle(manager)
+	name, err := windows.UTF16PtrFromString(ServiceName)
+	if err != nil {
+		return err
+	}
+	service, err := windows.OpenService(manager, name, access)
 	if err != nil {
 		return fmt.Errorf("open service: %w", err)
 	}
-	defer service.Close()
-	if _, err := service.Control(control); err != nil {
-		return fmt.Errorf("control service: %w", err)
-	}
-	return nil
+	defer windows.CloseServiceHandle(service)
+	return fn(service)
 }
 
 func waitStopped(service *mgr.Service) {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -42,6 +43,10 @@ type Gateway struct {
 	primaries      map[string]*session
 	handshakeSlots chan struct{}
 	resources      gatewayResources
+	// trustedProxyIPs is the parsed trusted public-edge set: only a request
+	// arriving from one of these addresses may contribute a client address
+	// through a forwarding header.
+	trustedProxyIPs []net.IPNet
 }
 
 func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog.Logger) (*Gateway, error) {
@@ -57,27 +62,49 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 	if logger == nil {
 		logger = slog.Default()
 	}
+	trustedProxyIPs, err := parseTrustedProxyPeers(limits.TrustedProxyPeers)
+	if err != nil {
+		return nil, err
+	}
 	gateway := &Gateway{
-		metadata:       metadata,
-		limits:         limits,
-		logger:         logger,
-		entropy:        rand.Reader,
-		tunnels:        make(map[string]map[string]*session),
-		primaries:      make(map[string]*session),
-		handshakeSlots: make(chan struct{}, limits.MaxPendingHandshakes),
-		resources:      newGatewayResources(limits),
+		metadata:        metadata,
+		limits:          limits,
+		logger:          logger,
+		entropy:         rand.Reader,
+		tunnels:         make(map[string]map[string]*session),
+		primaries:       make(map[string]*session),
+		handshakeSlots:  make(chan struct{}, limits.MaxPendingHandshakes),
+		resources:       newGatewayResources(limits),
+		trustedProxyIPs: trustedProxyIPs,
 	}
 	gateway.status = newStatusExporter(status, logger, limits.MaxStatusQueueSignals, limits.StatusEmitTimeout)
 	return gateway, nil
 }
 
+// Handler returns the public listener handler: public HTTP ingress plus the
+// Agent WebSocket endpoint.
+//
+// Gateway-local operational endpoints are deliberately not registered here. A
+// more specific mux pattern such as "GET /healthz" wins over the public
+// ingress pattern "/" for *every* Host, so a tenant-hosted /healthz could
+// never reach the tenant application. Operational endpoints are served by
+// OpsHandler on a separate administrative listener instead.
 func (gateway *Gateway) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(agentPath, gateway.handleAgent)
+	mux.HandleFunc("/", gateway.handleIngress)
+	return mux
+}
+
+// OpsHandler returns the Gateway-local operational endpoints (liveness,
+// readiness and low-cardinality aggregate metrics) for the separate
+// administrative listener (`cmd/gateway -ops-listen`). They are never
+// authorization or routing authority.
+func (gateway *Gateway) OpsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", gateway.handleHealth)
 	mux.HandleFunc("GET /readyz", gateway.handleReady)
 	mux.HandleFunc("GET /metrics", gateway.handleMetrics)
-	mux.HandleFunc(agentPath, gateway.handleAgent)
-	mux.HandleFunc("/", gateway.handleIngress)
 	return mux
 }
 
@@ -164,7 +191,7 @@ func (gateway *Gateway) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_inflight_bytes_limit gauge\n")
 	_, _ = fmt.Fprintf(w, "hooshix_gateway_ingress_inflight_bytes_limit %d\n", ingressLimit)
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_queue_rejections_total counter\nhooshix_gateway_queue_rejections_total %d\n", gateway.resources.queueRejects.Load())
-	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.Rejected()+gateway.resources.handshakeDeviceAdmission.Rejected())
+	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_handshake_rejections_total counter\nhooshix_gateway_handshake_rejections_total %d\n", gateway.resources.handshakeRejects.Load()+gateway.resources.handshakeRate.Rejected()+gateway.resources.handshakeDeviceAdmission.Rejected()+gateway.resources.preAuthRate.Rejected())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_ingress_rejections_total counter\nhooshix_gateway_ingress_rejections_total %d\n", gateway.resources.ingressRejects.Load()+gateway.resources.ingressRate.Rejected()+gateway.resources.ingressRouteAdmission.Rejected()+gateway.resources.ingressDeviceAdmission.Rejected())
 	_, _ = fmt.Fprintf(w, "# TYPE hooshix_gateway_session_capacity_rejections_total counter\nhooshix_gateway_session_capacity_rejections_total %d\n", gateway.resources.sessionRejects.Load())
 	_, _ = fmt.Fprintf(w, "# HELP hooshix_gateway_health_reports_total Total bounded Agent health_report control messages accepted.\n")
@@ -213,6 +240,16 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 		http.Error(w, "gateway is draining", http.StatusServiceUnavailable)
 		return
 	}
+	// Pre-authentication admission is keyed on the trusted peer and applied
+	// before slot acquisition: an unauthenticated socket that sends a
+	// valid-shaped preface and then stalls must not be able to cycle the
+	// bounded global handshake slots at will.
+	peer := gateway.peerAddress(request)
+	if !gateway.resources.preAuthRate.Allow(peer, time.Now()) {
+		http.Error(w, "too many pending handshakes", http.StatusTooManyRequests)
+		return
+	}
+
 	select {
 	case gateway.handshakeSlots <- struct{}{}:
 	default:
@@ -230,6 +267,7 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	defer releaseHandshakeSlot()
 
 	conn, err := websocket.Accept(w, request, &websocket.AcceptOptions{
+		Subprotocols:    []string{contractv1.ResumeProofSubprotocol},
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -244,6 +282,18 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	candidate, resume, err := gateway.readPreface(prefaceCtx, conn)
 	prefaceCancel()
 	if err != nil {
+		if metadataTemporarilyUnavailable(err) {
+			_ = conn.Close(websocket.StatusTryAgainLater, "authorization metadata unavailable")
+			return
+		}
+		if errors.Is(err, errResumeUnavailable) {
+			// An old or stale Agent whose resume proof no longer verifies
+			// must fall back to a full client_hello handshake; the resume
+			// fast path is best-effort and never a permanent rejection.
+			gateway.logger.Info("agent resume preface unavailable", "error", err)
+			_ = conn.Close(websocket.StatusTryAgainLater, "resume unavailable; reconnect with full handshake")
+			return
+		}
 		gateway.logger.Warn("agent pre-authentication failed", "error", err)
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
 		return
@@ -278,12 +328,22 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	}
 	if err != nil {
 		gateway.logger.Warn("agent authentication failed", "error", err)
+		if metadataTemporarilyUnavailable(err) {
+			_ = conn.Close(websocket.StatusTryAgainLater, "authorization metadata unavailable")
+			return
+		}
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
 		return
 	}
 
 	if err := gateway.registerSession(sess); err != nil {
+		gateway.logger.Warn("agent session registration rejected", "device_id", sess.deviceID, "error", err)
 		_ = conn.Close(websocket.StatusTryAgainLater, "session capacity reached")
+		// The session object already owns a writer goroutine and its
+		// channels: without an explicit teardown the rejected handshake would
+		// leak that goroutine, the session and its channels on every
+		// capacity-rejected authentication.
+		sess.forceClose()
 		return
 	}
 	defer gateway.unregisterSession(sess)
@@ -325,17 +385,6 @@ func handshakePrefaceTimeout(total time.Duration) time.Duration {
 	return timeout
 }
 
-func (gateway *Gateway) readAuthorizedHello(ctx context.Context, conn *websocket.Conn) (authorizedHandshake, error) {
-	candidate, resume, err := gateway.readPreface(ctx, conn)
-	if err != nil {
-		return candidate, err
-	}
-	if resume != nil {
-		return candidate, errors.New("unexpected resume preface in full-handshake path")
-	}
-	return candidate, nil
-}
-
 // readPreface consumes the first session control frame and routes it as
 // either a fresh client_hello preface or a resume_session fast-path request.
 // The returned resume value is non-nil only for the resume path.
@@ -353,17 +402,19 @@ func (gateway *Gateway) readPreface(ctx context.Context, conn *websocket.Conn) (
 		return candidate, nil, errors.New("first frame must be session control")
 	}
 	if err := contractv1.ValidateControlPayload(first.Payload, 0, time.Now().UTC()); err != nil {
+		// A resume preface that does not satisfy the *current* resume
+		// contract (for example an Agent that does not yet bind the
+		// Gateway-issued resume challenge) must fail closed as an
+		// unavailable resume, so the Agent falls back to a full client_hello
+		// handshake instead of being rejected as an authentication failure.
+		if resumeEnvelopeMessageType(first.Payload) == "resume_session" {
+			return candidate, nil, fmt.Errorf("%w: %w", errResumeUnavailable, err)
+		}
 		return candidate, nil, err
 	}
-	var envelope struct {
-		MessageType string `json:"message_type"`
-	}
-	if err := json.Unmarshal(first.Payload, &envelope); err != nil {
-		return candidate, nil, err
-	}
-	if envelope.MessageType == "resume_session" {
+	if resumeEnvelopeMessageType(first.Payload) == "resume_session" {
 		if err := json.Unmarshal(first.Payload, &resume); err != nil {
-			return candidate, nil, err
+			return candidate, nil, fmt.Errorf("%w: %w", errResumeUnavailable, err)
 		}
 		return candidate, &resume, nil
 	}
@@ -381,10 +432,27 @@ func (gateway *Gateway) readPreface(ctx context.Context, conn *websocket.Conn) (
 	return candidate, nil, nil
 }
 
+// resumeEnvelopeMessageType peeks at only the message_type member of a
+// preface payload. It is deliberately lenient: it decides which *fallback*
+// applies to an already-rejected frame, never whether a frame is accepted.
+func resumeEnvelopeMessageType(payload []byte) string {
+	var envelope struct {
+		MessageType string `json:"message_type"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return ""
+	}
+	return envelope.MessageType
+}
+
 // errResumeUnavailable signals that the resume target session is gone; the
 // caller must close with TryAgainLater so the Agent falls back to a full
 // handshake on its next bounded reconnect attempt.
 var errResumeUnavailable = errors.New("resume target session unavailable")
+
+func metadataTemporarilyUnavailable(err error) bool {
+	return errors.Is(err, ErrMetadataUnavailable) || errors.Is(err, ErrMetadataStale)
+}
 
 func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume *contractv1.ResumeSession) (*session, error) {
 	if resume == nil {
@@ -395,11 +463,15 @@ func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn
 
 // resumeSession implements the Phase-2 session-resume fast path. It accepts
 // only when the referenced session is still live and authorized, the current
-// authorization record still matches and is active, the resume signature
-// verifies against the registered device key, and no revocation applies. Any
-// mismatch fails closed to errResumeUnavailable (never to a half-resumed
-// session).
+// authorization record still matches and is active, the presented resume
+// proof is within its acceptance window, the resume challenge the Gateway
+// issued for this session identity is bound into the signature, and no
+// revocation applies. Any mismatch fails closed to errResumeUnavailable (never
+// to a half-resumed session).
 func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume contractv1.ResumeSession) (*session, error) {
+	if conn.Subprotocol() != contractv1.ResumeProofSubprotocol {
+		return nil, errResumeUnavailable
+	}
 	gateway.mu.RLock()
 	existing := gateway.tunnels[resume.DeviceID][resume.SessionID]
 	gateway.mu.RUnlock()
@@ -415,6 +487,30 @@ func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn,
 	}
 	if existing.deviceID != resume.DeviceID || existing.authorizationID != resume.AuthorizationID || existing.tokenID != resume.TokenID {
 		return nil, errors.New("resume subject mismatch")
+	}
+
+	// The proof must bind the challenge the Gateway issued over the previous
+	// transport. Without it a captured resume frame would be a bearer token
+	// usable for the whole session lifetime.
+	if !contractv1.MatchResumeChallenge(existing.currentResumeChallenge(), resume.ResumeChallenge) {
+		// A stale/burned challenge is not proof of an attack (an Agent that
+		// resumed twice, or a rotated challenge), so the one-shot slot is
+		// restored and the Agent falls back to a full handshake.
+		existing.resumeArmed.Store(true)
+		return nil, fmt.Errorf("%w: resume challenge mismatch", errResumeUnavailable)
+	}
+	// Short acceptance window: a proof issued outside the window is dead even
+	// if a replayed frame is otherwise intact. The timestamp is Agent-supplied,
+	// so a badly skewed Agent clock degrades to the full handshake fallback
+	// (fail closed) rather than granting anything.
+	issuedAt, err := contractv1.ResumeIssuedAt(resume)
+	if err != nil {
+		existing.resumeArmed.Store(true)
+		return nil, fmt.Errorf("%w: %v", errResumeUnavailable, err)
+	}
+	if skew := time.Since(issuedAt); skew > gateway.limits.ResumeAcceptanceWindow || skew < -gateway.limits.ResumeAcceptanceWindow {
+		existing.resumeArmed.Store(true)
+		return nil, fmt.Errorf("%w: resume proof outside acceptance window", errResumeUnavailable)
 	}
 
 	// The full authorization must still be current: same record identity,
@@ -445,31 +541,39 @@ func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn,
 		return nil, err
 	}
 
+	// The accepted proof is consumed and rotated: a captured frame can never
+	// be replayed against the same identity again.
+	nextChallenge, err := gateway.randomBase64URL(32)
+	if err != nil {
+		existing.resumeArmed.Store(true)
+		return nil, fmt.Errorf("generate resume challenge: %w", err)
+	}
+
 	// From here the new connection takes over the session identity. The
 	// existing WebSocket is closed outside the registry lock by the same
 	// registerSession replacement semantics as a normal reconnect.
-	resumed := existing.resumeInto(conn, candidate.inbound)
+	resumed := existing.resumeInto(conn, candidate.inbound, nextChallenge)
 	if resumed == nil {
+		existing.resumeArmed.Store(true)
 		return nil, errResumeUnavailable
 	}
 
 	// Sequence numbering restarts on the new connection (independent
-	// per-direction rule): the resume reply is sequence 1, so the Agent
-	// continues its inbound tracker at 2 for this transport.
+	// per-direction rule): the resume reply is sequence 1, issued by the
+	// session's single writer goroutine like every other post-handshake frame,
+	// so the resumed session never has two concurrent writers.
 	resumedControl := contractv1.SessionResumed{
 		ContractVersion: contractv1.ProtocolVersion,
 		MessageType:     "session_resumed",
 		SessionID:       resumed.sessionID,
 		NextSequence:    2,
 		ResumedAt:       time.Now().UTC().Format(time.RFC3339),
+		ResumeChallenge: nextChallenge,
 	}
-	if err := writeControlFrame(ctx, conn, 1, 0, resumedControl); err != nil {
+	if err := resumed.sendControl(ctx, 0, resumedControl); err != nil {
 		resumed.forceClose()
 		return nil, err
 	}
-	// The direct handshake write consumed sequence 1; arm the control
-	// writer to continue at 2 on this transport.
-	resumed.outbound.Store(1)
 	gateway.logger.Info("agent session resumed", "device_id", resumed.deviceID, "session_id", resumed.sessionID)
 	return resumed, nil
 }
@@ -530,18 +634,31 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 		return nil, fmt.Errorf("parse authorization expiry: %w", err)
 	}
 
+	// The Gateway issues the resume proof for this transport at session
+	// establishment. The Agent must bind it into its next resume_session
+	// transcript, and the Gateway rotates it on every accepted resume, so a
+	// captured resume frame is not replayable for the session lifetime.
+	resumeChallenge := ""
+	if conn.Subprotocol() == contractv1.ResumeProofSubprotocol {
+		resumeChallenge, err = gateway.randomBase64URL(32)
+		if err != nil {
+			return nil, fmt.Errorf("generate resume challenge: %w", err)
+		}
+	}
+
 	ready := contractv1.SessionReady{
 		ContractVersion:          contractv1.ProtocolVersion,
 		MessageType:              "session_ready",
 		SessionID:                challenge.SessionID,
 		HeartbeatIntervalSeconds: int(gateway.limits.HeartbeatInterval / time.Second),
 		IdleTimeoutSeconds:       int(gateway.limits.IdleTimeout / time.Second),
+		ResumeChallenge:          resumeChallenge,
 	}
 	if err := writeControlFrame(ctx, conn, 2, 0, ready); err != nil {
 		return nil, err
 	}
 
-	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2), nil
+	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2, resumeChallenge), nil
 }
 
 // registerSession admits a tunnel session under the Phase-3 HA model. A
@@ -587,6 +704,11 @@ func (gateway *Gateway) registerSession(sess *session) error {
 		}
 		replaced = victim
 		isReconnect = false
+		// Drop the victim inside the same critical section that admits the
+		// replacement: the device tunnel count must never transiently exceed
+		// MaxTunnelsPerDevice (a concurrent registration would otherwise fail
+		// closed against a budget that is only momentarily oversubscribed).
+		delete(deviceTunnels, victim.sessionID)
 	}
 	if deviceTunnels == nil {
 		deviceTunnels = make(map[string]*session)
@@ -606,7 +728,6 @@ func (gateway *Gateway) registerSession(sess *session) error {
 			// A reconnect (fresh handshake or resume) replaced a live
 			// tunnel: count it as an agent-driven reconnect.
 			gateway.resources.reconnects.Add(1)
-			sess.reconnected.Store(true)
 		}
 		replaced.failAll(errors.New("agent session replaced by reconnect"))
 		replaced.close(websocket.StatusNormalClosure, "replaced by reconnect")
@@ -657,23 +778,53 @@ func (gateway *Gateway) unregisterSession(sess *session) {
 	gateway.mu.Unlock()
 }
 
-// sessionForDevice returns the routing-primary tunnel for the device: an
-// authorized, unexpired session whose stream space owns ingress routing.
+// sessionForDevice returns a routable tunnel for the device: an authorized,
+// unexpired session whose stream space owns ingress routing. The routing
+// primary is preferred; when it is gone or no longer routable (for example a
+// just-terminated session that is still completing its close handshake), the
+// newest routable standby tunnel is used so ingress fails over without
+// waiting for the primary's registry entry to disappear.
 func (gateway *Gateway) sessionForDevice(deviceID string) *session {
 	gateway.mu.RLock()
-	sess := gateway.primaries[deviceID]
+	primary := gateway.primaries[deviceID]
+	tunnels := gateway.tunnels[deviceID]
+	var standby *session
+	for _, candidate := range tunnels {
+		if candidate == primary {
+			continue
+		}
+		if standby == nil || candidate.lastSeen.Load() > standby.lastSeen.Load() {
+			standby = candidate
+		}
+	}
 	gateway.mu.RUnlock()
+
+	if routableSession(primary) {
+		return primary
+	}
+	if routableSession(standby) {
+		return standby
+	}
+	return nil
+}
+
+func routableSession(sess *session) bool {
 	if sess == nil || !sess.authorized.Load() {
-		return nil
+		return false
 	}
 	if !sess.authorizationExpiresAt.IsZero() && !time.Now().UTC().Before(sess.authorizationExpiresAt) {
-		return nil
+		return false
 	}
-	return sess
+	return true
 }
 
 func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == "/healthz" || request.URL.Path == "/readyz" || request.URL.Path == "/metrics" || request.URL.Path == agentPath {
+	if request.URL.Path == agentPath || strings.HasPrefix(request.URL.Path, agentPath+"/") {
+		// Defence in depth for the one reserved Gateway-local namespace: the
+		// Agent endpoint is served by its own mux pattern and must never be
+		// resolved as a tenant route. The operational endpoints are NOT
+		// reserved here: they live on the separate administrative listener, so
+		// a tenant host keeps its own /healthz, /readyz and /metrics routes.
 		http.NotFound(w, request)
 		return
 	}
@@ -736,11 +887,23 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	stream, err := sess.openStream(request.Context(), route)
+	// The stream (and therefore the bytes it may still retain) is bound to the
+	// public request context *and* to a cancel this handler owns, so returning
+	// always detaches the stream regardless of what the Agent does. Without
+	// this a stalled or hostile Agent that keeps answering heartbeats would
+	// hold one of the bounded global ingress slots forever.
+	responseCtx, cancelResponse := context.WithCancel(request.Context())
+	defer cancelResponse()
+
+	stream, err := sess.openStream(responseCtx, route)
 	if err != nil {
 		http.Error(w, "stream unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// Registered before the terminal defer below, so it runs after the stream
+	// has been detached: whatever the reader left behind is released once the
+	// handler has stopped reading.
+	defer stream.discardRetained()
 	terminalReason := "cancelled"
 	terminalCode := ""
 	terminalMessage := ""
@@ -753,14 +916,34 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		sess.closeStream(stream.id, terminalReason)
 	}()
 
-	tunnelRequest := cloneRequestForTunnel(request)
-	tunnelRequest.Body = http.MaxBytesReader(w, request.Body, gateway.limits.MaxRequestBytes)
+	controller := http.NewResponseController(w)
+	tunnelRequest := gateway.cloneRequestForTunnel(request, route)
+	// The request body is read under a per-read idle deadline instead of a
+	// whole-request deadline, so a large upload is not forced to complete
+	// inside one fixed budget while a stalled client is still bounded.
+	//
+	// A request without a body is deliberately not wrapped: http.Request.Write
+	// only reads the body when it is not http.NoBody, and every read of the
+	// wrapper arms a read deadline on the public connection. Go's server starts
+	// its background read as soon as a bodyless request's handler begins, so
+	// such a deadline stays armed through the whole response phase and, once it
+	// expires, the background read cancels the request context of a healthy
+	// tunneled response.
+	if request.Body != nil && request.Body != http.NoBody {
+		tunnelRequest.Body = http.MaxBytesReader(w, newIdleDeadlineReader(request.Body, controller, gateway.limits.ReadTimeout), gateway.limits.MaxRequestBytes)
+	}
 	streamWriter := newRequestStreamWriter(request.Context(), gateway.resources.ingressBytes, &gateway.resources.ingressRejects, func(ctx context.Context, payload []byte) error {
 		return sess.sendBytes(ctx, stream.id, payload)
 	})
 	limited := &limitWriter{w: streamWriter, remaining: gateway.limits.MaxRequestBytes + int64(gateway.limits.MaxHeaderBytes)}
-	if err := tunnelRequest.Write(limited); err != nil {
-		if errors.Is(err, errResourceBudget) {
+	writeErr := tunnelRequest.Write(limited)
+	// The request-write phase is the only phase that may hold the idle read
+	// deadline, so it is cleared once serialization is done: the response phase
+	// is bounded by its own inactivity deadline, and a read deadline left armed
+	// here would fire ReadTimeout into it.
+	_ = controller.SetReadDeadline(time.Time{})
+	if writeErr != nil {
+		if errors.Is(writeErr, errResourceBudget) {
 			terminalCode, terminalMessage, terminalRetryable = "resource_limit", "public ingress byte budget exhausted", true
 			http.Error(w, terminalMessage, http.StatusServiceUnavailable)
 			return
@@ -774,20 +957,39 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 	}
 	fromPublic := streamWriter.Written()
 
-	headerLimited := newResponseHeaderLimitReader(stream, int64(gateway.limits.MaxHeaderBytes))
+	// Response phase: bounded by inactivity in both directions, so neither a
+	// stalled Agent nor a public client that stops reading can pin the slot.
+	phase := newResponsePhase(gateway.limits.ResponsePhaseTimeout, cancelResponse)
+	defer phase.stop()
+	headerLimited := newResponseHeaderLimitReader(&progressReader{reader: stream, phase: phase}, int64(gateway.limits.MaxHeaderBytes))
 	response, err := http.ReadResponse(bufio.NewReader(headerLimited), tunnelRequest)
 	if err != nil {
-		terminalCode, terminalMessage = "protocol_error", "invalid tunneled response"
 		if errors.Is(err, errResponseHeaderTooLarge) {
 			terminalCode, terminalMessage = "resource_limit", "tunneled response headers too large"
+			gateway.logger.Warn(terminalMessage, "error", err, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+			http.Error(w, terminalMessage, http.StatusBadGateway)
+			return
 		}
+		if responseCtx.Err() != nil && request.Context().Err() == nil {
+			terminalCode, terminalMessage = "resource_limit", "tunneled response phase deadline exceeded"
+			gateway.logger.Warn(terminalMessage, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+			http.Error(w, terminalMessage, http.StatusGatewayTimeout)
+			return
+		}
+		terminalCode, terminalMessage = "protocol_error", "invalid tunneled response"
 		gateway.logger.Warn(terminalMessage, "error", err, "endpoint_id", route.EndpointID, "stream_id", stream.id)
 		http.Error(w, terminalMessage, http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 
-	if response.ContentLength > gateway.limits.MaxResponseBytes {
+	if statusErr := validateTunneledStatus(response.StatusCode); statusErr != nil {
+		terminalCode, terminalMessage = "protocol_error", "tunneled response status outside 200..599"
+		gateway.logger.Warn(terminalMessage, "error", statusErr, "status", response.StatusCode, "endpoint_id", route.EndpointID, "stream_id", stream.id)
+		http.Error(w, terminalMessage, http.StatusBadGateway)
+		return
+	}
+	if responseHasBody(response) && response.ContentLength > gateway.limits.MaxResponseBytes {
 		terminalCode, terminalMessage = "resource_limit", "tunneled response too large"
 		http.Error(w, terminalMessage, http.StatusBadGateway)
 		return
@@ -798,8 +1000,16 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 			w.Header().Add(key, value)
 		}
 	}
+	_ = controller.SetWriteDeadline(time.Now().Add(gateway.limits.WriteTimeout))
 	w.WriteHeader(response.StatusCode)
-	written, overflow, copyErr := copyTunneledResponseBody(w, response, gateway.limits.MaxResponseBytes)
+	// SSE events must reach the caller while the upstream stream stays open.
+	flushEvents := strings.EqualFold(strings.TrimSpace(strings.SplitN(response.Header.Get("Content-Type"), ";", 2)[0]), "text/event-stream")
+	if flushEvents {
+		if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			panic(http.ErrAbortHandler)
+		}
+	}
+	written, overflow, copyErr := copyTunneledResponseBody(&progressWriter{writer: w, controller: controller, timeout: gateway.limits.WriteTimeout, phase: phase, flush: flushEvents}, response, gateway.limits.MaxResponseBytes)
 	toPublic := written
 	gateway.emitStatus(request.Context(), contractv1.GatewayStatusSignal{
 		ContractVersion: contractv1.ProtocolVersion, ObservedAt: time.Now().UTC().Format(time.RFC3339), Kind: "traffic_delta",
@@ -811,13 +1021,29 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 		panic(http.ErrAbortHandler)
 	}
 	if copyErr != nil {
-		terminalCode, terminalMessage = "internal_error", "tunneled response body ended unexpectedly"
+		if responseCtx.Err() != nil && request.Context().Err() == nil {
+			terminalCode, terminalMessage = "resource_limit", "tunneled response phase deadline exceeded"
+		} else {
+			terminalCode, terminalMessage = "internal_error", "tunneled response body ended unexpectedly"
+		}
 		gateway.logger.Warn(terminalMessage, "error", copyErr, "endpoint_id", route.EndpointID, "stream_id", stream.id,
 			"content_length", response.ContentLength, "written_bytes", written, "from_public_bytes", fromPublic)
 		panic(http.ErrAbortHandler)
 	}
 	terminalReason = "completed"
 
+}
+
+// validateTunneledStatus enforces the public status-line allowlist. Nothing
+// below 200 is forwardable: a 1xx (including 101 Switching Protocols) would
+// leave the public connection in a state the Gateway does not model, and
+// response.StatusCode is Agent-controlled. Go's own net/http only bounds the
+// value to 100..999.
+func validateTunneledStatus(status int) error {
+	if status < 200 || status > 599 {
+		return fmt.Errorf("tunneled response status %d is not a final status", status)
+	}
+	return nil
 }
 
 func (gateway *Gateway) emitStatus(_ context.Context, signal contractv1.GatewayStatusSignal) {
@@ -888,12 +1114,26 @@ func (gateway *Gateway) Close(ctx context.Context) error {
 func readProtocolFrame(ctx context.Context, conn *websocket.Conn) (contractv1.Frame, error) {
 	messageType, payload, err := conn.Read(ctx)
 	if err != nil {
+		if websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
+			return contractv1.Frame{}, closeViolation(websocket.StatusMessageTooBig, "frame exceeds limit", err)
+		}
 		return contractv1.Frame{}, err
 	}
 	if messageType != websocket.MessageBinary {
-		return contractv1.Frame{}, errors.New("protocol requires binary websocket messages")
+		return contractv1.Frame{}, closeViolation(websocket.StatusInvalidFramePayloadData, "invalid frame payload data", errors.New("protocol requires binary websocket messages"))
 	}
-	return contractv1.DecodeFrame(payload)
+	frame, err := contractv1.DecodeFrame(payload)
+	if err != nil {
+		// Framing-layer violations are protocol errors (1002); payload-layer
+		// problems are invalid frame payload data (1007)
+		// (contracts/v1/tunnel-protocol.md section 11c).
+		var frameErr *contractv1.FrameError
+		if errors.As(err, &frameErr) {
+			return contractv1.Frame{}, closeViolation(websocket.StatusProtocolError, "protocol error", err)
+		}
+		return contractv1.Frame{}, closeViolation(websocket.StatusInvalidFramePayloadData, "invalid frame payload data", err)
+	}
+	return frame, nil
 }
 
 func writeControlFrame(ctx context.Context, conn *websocket.Conn, sequence uint64, streamID uint32, value any) error {
@@ -944,14 +1184,217 @@ func removeHopByHopHeaders(header http.Header) {
 	}
 }
 
-func cloneRequestForTunnel(request *http.Request) *http.Request {
+// forwardingHeaders are client-supplied proxy headers. They are never
+// forwarded verbatim: an internet client could otherwise spoof the client
+// address a tenant application trusts.
+var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port", "X-Real-Ip"}
+
+// cloneRequestForTunnel builds the tunneled request: hop-by-hop headers and
+// every client-supplied forwarding header are removed, the Host is rewritten
+// to the canonical metadata hostname routing actually matched, and the
+// forwarding headers are re-set from the trusted peer only.
+func (gateway *Gateway) cloneRequestForTunnel(request *http.Request, route contractv1.EndpointRouteAssignment) *http.Request {
 	cloned := request.Clone(request.Context())
 	removeHopByHopHeaders(cloned.Header)
+	for _, name := range forwardingHeaders {
+		cloned.Header.Del(name)
+	}
+	cloned.Host = canonicalHostname(route.PublicHostname)
+	if cloned.Host == "" {
+		cloned.Host = canonicalHostname(request.Host)
+	}
+	clientAddress := gateway.peerAddress(request)
+	cloned.Header.Set("X-Forwarded-For", clientAddress)
+	cloned.Header.Set("X-Real-IP", clientAddress)
+	cloned.Header.Set("X-Forwarded-Proto", "https")
+	cloned.Header.Set("X-Forwarded-Host", cloned.Host)
+	cloned.Header.Set("X-Forwarded-Port", "443")
+	cloned.Header.Set("Forwarded", fmt.Sprintf("for=%s;proto=https;host=%s", clientAddress, cloned.Host))
 	cloned.Close = false
 	cloned.TransferEncoding = nil
 	cloned.Trailer = nil
 	return cloned
 }
+
+// peerAddress returns the trusted client address of a request: the immediate
+// peer, or the edge-supplied client hop when (and only when) that peer is a
+// configured trusted proxy.
+func (gateway *Gateway) peerAddress(request *http.Request) string {
+	return peerAddressOf(request, gateway.trustedProxyIPs)
+}
+
+func peerAddressOf(request *http.Request, trustedProxyIPs []net.IPNet) string {
+	peer := remoteIP(request.RemoteAddr)
+	if peer != nil && ipInAny(peer, trustedProxyIPs) {
+		if client, ok := lastForwardedFor(request.Header); ok {
+			return client.String()
+		}
+	}
+	if peer == nil {
+		return "unknown"
+	}
+	return peer.String()
+}
+
+func remoteIP(remoteAddr string) net.IP {
+	if remoteAddr == "" {
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return net.ParseIP(host)
+	}
+	return net.ParseIP(remoteAddr)
+}
+
+func ipInAny(ip net.IP, nets []net.IPNet) bool {
+	for i := range nets {
+		if nets[i].Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastForwardedFor returns the last hop of X-Forwarded-For when it is a valid
+// IP address. A trusted edge appends the address it observed, so the last
+// element is the only one the edge itself vouches for.
+func lastForwardedFor(header http.Header) (net.IP, bool) {
+	values := header.Values("X-Forwarded-For")
+	if len(values) == 0 {
+		return nil, false
+	}
+	combined := strings.Join(values, ",")
+	parts := strings.Split(combined, ",")
+	ip := net.ParseIP(strings.TrimSpace(parts[len(parts)-1]))
+	if ip == nil {
+		return nil, false
+	}
+	return ip, true
+}
+
+// parseTrustedProxyPeers parses the configured trusted-proxy list into CIDRs.
+// A malformed entry is a startup error rather than a silently ignored one: an
+// operator that believed a proxy was trusted must not keep running with a
+// weaker (or different) trust set than declared.
+func parseTrustedProxyPeers(entries []string) ([]net.IPNet, error) {
+	parsed := make([]net.IPNet, 0, len(entries))
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		if ip := net.ParseIP(trimmed); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				ip = ip.To4()
+				bits = 32
+			}
+			parsed = append(parsed, net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, network, err := net.ParseCIDR(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy %q: %w", entry, err)
+		}
+		parsed = append(parsed, *network)
+	}
+	return parsed, nil
+}
+
+// responsePhase bounds the tunneled-response phase by inactivity: every byte
+// forwarded in either direction re-arms it, so a stalled Agent is bounded even
+// while the public client stays connected, and a progressing transfer of any
+// size is never cut off by a total-duration deadline.
+type responsePhase struct {
+	timer   *time.Timer
+	timeout time.Duration
+}
+
+func newResponsePhase(timeout time.Duration, cancel context.CancelFunc) *responsePhase {
+	return &responsePhase{timer: time.AfterFunc(timeout, cancel), timeout: timeout}
+}
+
+func (phase *responsePhase) progress() {
+	if phase != nil && phase.timer != nil {
+		phase.timer.Reset(phase.timeout)
+	}
+}
+
+func (phase *responsePhase) stop() {
+	if phase != nil && phase.timer != nil {
+		phase.timer.Stop()
+	}
+}
+
+// progressReader re-arms the response-phase deadline when the tunnel delivers
+// bytes; a read is otherwise bounded by the stream's own context.
+type progressReader struct {
+	reader io.Reader
+	phase  *responsePhase
+}
+
+func (reader *progressReader) Read(data []byte) (int, error) {
+	n, err := reader.reader.Read(data)
+	if n > 0 {
+		reader.phase.progress()
+	}
+	return n, err
+}
+
+// progressWriter applies a per-chunk write deadline to the public connection
+// and re-arms the response-phase deadline when bytes reach the client. The
+// server-level whole-response write timeout is disabled in favour of this, so
+// a large response is not forced to finish inside a single fixed budget while
+// a public client that stops reading is still bounded.
+type progressWriter struct {
+	writer     io.Writer
+	controller *http.ResponseController
+	timeout    time.Duration
+	phase      *responsePhase
+	flush      bool
+}
+
+func (writer *progressWriter) Write(data []byte) (int, error) {
+	if writer.controller != nil {
+		// ErrNotSupported is expected for non-networked writers (test
+		// recorders); the phase deadline still bounds the response.
+		_ = writer.controller.SetWriteDeadline(time.Now().Add(writer.timeout))
+	}
+	n, err := writer.writer.Write(data)
+	if err == nil && n > 0 && writer.flush && writer.controller != nil {
+		if flushErr := writer.controller.Flush(); flushErr != nil && !errors.Is(flushErr, http.ErrNotSupported) {
+			err = flushErr
+		}
+	}
+	if n > 0 {
+		writer.phase.progress()
+	}
+	return n, err
+}
+
+// idleDeadlineReader bounds each read of the public request body with a fresh
+// idle deadline instead of one deadline for the whole request.
+type idleDeadlineReader struct {
+	reader     io.ReadCloser
+	controller *http.ResponseController
+	timeout    time.Duration
+}
+
+func newIdleDeadlineReader(reader io.ReadCloser, controller *http.ResponseController, timeout time.Duration) io.ReadCloser {
+	if reader == nil {
+		return nil
+	}
+	return &idleDeadlineReader{reader: reader, controller: controller, timeout: timeout}
+}
+
+func (reader *idleDeadlineReader) Read(data []byte) (int, error) {
+	if reader.controller != nil {
+		_ = reader.controller.SetReadDeadline(time.Now().Add(reader.timeout))
+	}
+	return reader.reader.Read(data)
+}
+
+func (reader *idleDeadlineReader) Close() error { return reader.reader.Close() }
 
 type responseHeaderLimitReader struct {
 	reader    io.Reader
@@ -998,7 +1441,15 @@ func (reader *responseHeaderLimitReader) Read(data []byte) (int, error) {
 	return n, err
 }
 
+func responseHasBody(response *http.Response) bool {
+	return (response.Request == nil || response.Request.Method != http.MethodHead) &&
+		response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotModified && response.StatusCode >= 200
+}
+
 func copyTunneledResponseBody(writer io.Writer, response *http.Response, limit int64) (int64, bool, error) {
+	if !responseHasBody(response) {
+		return 0, false, nil
+	}
 	if response.ContentLength >= 0 {
 		if response.ContentLength == 0 {
 			return 0, false, nil
@@ -1081,16 +1532,35 @@ func (writer *limitWriter) Write(data []byte) (int, error) {
 }
 
 func NewHTTPServer(address string, handler http.Handler, limits Limits) *http.Server {
+	// The public listener applies a header-phase deadline only. Request-body
+	// reads and response writes are bounded per body chunk by the ingress
+	// handler (idle read deadline, per-chunk write deadline, response-phase
+	// inactivity deadline). A whole-request ReadTimeout/WriteTimeout would
+	// instead impose a hidden throughput floor: 15 s for an 8 MiB body and
+	// ~42 s for a 32 MiB response.
 	return &http.Server{
 		Addr:              address,
 		Handler:           handler,
 		ReadHeaderTimeout: limits.ReadTimeout,
-		ReadTimeout:       limits.ReadTimeout,
-		WriteTimeout:      limits.WriteTimeout + time.Duration(limits.MaxResponseBytes/(1<<20))*time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
 		IdleTimeout:       limits.IdleTimeout,
 		MaxHeaderBytes:    limits.MaxHeaderBytes,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
+	}
+}
+
+// NewOpsHTTPServer returns the plaintext administrative listener for the
+// Gateway-local operational endpoints. It must be bound to a non-public
+// address: it serves liveness/readiness and aggregate metrics without TLS.
+func NewOpsHTTPServer(address string, handler http.Handler, limits Limits) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: limits.ReadTimeout,
+		IdleTimeout:       limits.IdleTimeout,
+		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
 }

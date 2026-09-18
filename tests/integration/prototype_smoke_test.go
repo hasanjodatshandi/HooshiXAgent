@@ -62,7 +62,7 @@ func TestFirstPrototypeSmoke(t *testing.T) {
 		t.Fatalf("unexpected doctor output: %s", doctorOutput)
 	}
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -71,7 +71,7 @@ func TestFirstPrototypeSmoke(t *testing.T) {
 	)
 	defer killPrototypeProcess(t, gateway)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 
 	agentOne := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	defer killPrototypeProcess(t, agentOne)

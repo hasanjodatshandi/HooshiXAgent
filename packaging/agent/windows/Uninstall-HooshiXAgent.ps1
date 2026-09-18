@@ -1,13 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$Prefix = "$env:LOCALAPPDATA\HooshiXAgent\bin",
-    [string]$StateDir = "$env:LOCALAPPDATA\HooshiXAgent",
+    # Machine-wide paths matching the supported desktop installer
+    # (cmd/hooshix-setup) and Install-HooshiXAgent.ps1.
+    [string]$Prefix = 'C:\Program Files\HooshiXAgent',
+    [string]$StateDir = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HooshiXAgent'),
     [switch]$NoPersistence,
     [switch]$PurgeState
 )
 
 $ErrorActionPreference = 'Stop'
-$TaskName = 'HooshiXAgent'
+# The SCM service name (internal/agent/svc.ServiceName). The superseded
+# per-user logon Scheduled Task used the same name, which is why the migration
+# cleanup below removes it too.
+$ServiceName = 'HooshiXAgent'
 $Target = Join-Path $Prefix 'hooshix-agent.exe'
 $Previous = "$Target.previous"
 
@@ -52,21 +57,26 @@ function Assert-SafePurgeDirectory([string]$Path) {
 if ($PurgeState) { Assert-SafePurgeDirectory $StateDir }
 
 if (-not $NoPersistence) {
-    try {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        # Wait for the process to actually exit: a slow/stuck stop would
-        # leave the binary locked, and silently swallowing removal failures
-        # would report success while files remain.
-        $waited = 0
-        while ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).State -eq 'Running' -and $waited -lt 15) {
-            Start-Sleep -Milliseconds 500
-            $waited++
-        }
-        if ($waited -ge 15) {
-            Write-Warning 'Agent scheduled task did not stop within the bounded wait; continuing best-effort.'
-        }
-    } catch {}
-    try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    # One persistence model on Windows (ADR-0014): the LocalSystem service,
+    # removed through the Agent binary itself. The service is removed FIRST, and
+    # verified, because a registration that outlives its image is exactly the
+    # state this uninstaller must not leave behind.
+    if (Test-Path -LiteralPath $Target) {
+        try { & $Target service stop 2>$null | Out-Null } catch { }
+        try { & $Target service uninstall 2>$null | Out-Null } catch { }
+    }
+    $waited = 0
+    while ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and $waited -lt 30) {
+        Start-Sleep -Milliseconds 500
+        $waited++
+    }
+    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        throw "uninstall incomplete: the $ServiceName service is still registered"
+    }
+    # Migration cleanup for the superseded per-user logon Scheduled Task: if an
+    # older archive install left one behind, it would relaunch the Agent at the
+    # next logon against this removed installation.
+    try { Unregister-ScheduledTask -TaskName $ServiceName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 }
 
 # Remove with verification: report failures instead of claiming success

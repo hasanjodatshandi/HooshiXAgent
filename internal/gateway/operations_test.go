@@ -15,7 +15,9 @@ func TestOperationalReadinessAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := gateway.Handler()
+	// Operational endpoints live on the separate administrative handler; the
+	// public handler must not shadow tenant paths for them.
+	handler := gateway.OpsHandler()
 
 	ready := httptest.NewRecorder()
 	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -58,7 +60,7 @@ func TestOperationalPathsDoNotFallThroughIngress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := gateway.Handler()
+	handler := gateway.OpsHandler()
 	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))

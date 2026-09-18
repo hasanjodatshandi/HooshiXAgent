@@ -4,6 +4,7 @@
 package contractv1
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -50,30 +51,47 @@ func EncodeFrame(frame Frame) ([]byte, error) {
 	return encoded, nil
 }
 
+// FrameError marks a framing-layer violation (frame header, kind, version,
+// reserved flags or payload length). The tunnel protocol obliges the receiver
+// to close such a connection with protocol-error semantics, while a
+// payload-layer problem (malformed or non-UTF-8 control payload) is
+// invalid-frame-payload-data. Keeping the distinction typed here means the
+// Gateway does not have to re-derive it from error text.
+type FrameError struct {
+	err error
+}
+
+func (e *FrameError) Error() string { return e.err.Error() }
+func (e *FrameError) Unwrap() error { return e.err }
+
+func frameErrorf(format string, args ...any) error {
+	return &FrameError{err: fmt.Errorf(format, args...)}
+}
+
 func DecodeFrame(encoded []byte) (Frame, error) {
 	if len(encoded) < HeaderSize {
-		return Frame{}, fmt.Errorf("frame shorter than %d-byte header", HeaderSize)
+		return Frame{}, frameErrorf("frame shorter than %d-byte header", HeaderSize)
 	}
-	if string(encoded[0:4]) != string(magic[:]) {
-		return Frame{}, errors.New("invalid frame magic")
+	if !bytes.Equal(encoded[0:4], magic[:]) {
+		return Frame{}, frameErrorf("invalid frame magic")
 	}
 	if encoded[4] != ProtocolVersion {
-		return Frame{}, fmt.Errorf("unsupported protocol version: %d", encoded[4])
+		return Frame{}, frameErrorf("unsupported protocol version: %d", encoded[4])
 	}
 	kind := Kind(encoded[5])
 	if kind != KindControl && kind != KindData {
-		return Frame{}, fmt.Errorf("unknown frame kind: %d", encoded[5])
+		return Frame{}, frameErrorf("unknown frame kind: %d", encoded[5])
 	}
 	if flags := binary.BigEndian.Uint16(encoded[6:8]); flags != 0 {
-		return Frame{}, fmt.Errorf("reserved flags must be zero: 0x%04x", flags)
+		return Frame{}, frameErrorf("reserved flags must be zero: 0x%04x", flags)
 	}
 
 	payloadLength := binary.BigEndian.Uint32(encoded[12:16])
 	if uint64(payloadLength) != uint64(len(encoded)-HeaderSize) {
-		return Frame{}, fmt.Errorf("payload length mismatch: header=%d actual=%d", payloadLength, len(encoded)-HeaderSize)
+		return Frame{}, frameErrorf("payload length mismatch: header=%d actual=%d", payloadLength, len(encoded)-HeaderSize)
 	}
 	if payloadLength > maxPayloadForKind(kind) {
-		return Frame{}, fmt.Errorf("payload exceeds %s limit: %d", kind, payloadLength)
+		return Frame{}, frameErrorf("payload exceeds %s limit: %d", kind, payloadLength)
 	}
 
 	frame := Frame{
@@ -122,6 +140,14 @@ func (kind Kind) String() string {
 	}
 }
 
+// SequenceTracker enforces the Section 3 sequence rule for one direction of
+// one connection.
+//
+// It is deliberately not safe for concurrent use: the wire rule assumes a
+// single writer per direction, so the tracker must be driven by exactly one
+// goroutine (or guarded by the caller's own lock). Two concurrent Accept calls
+// could both observe the same expected value and admit two frames with the
+// same sequence.
 type SequenceTracker struct {
 	last uint64
 }

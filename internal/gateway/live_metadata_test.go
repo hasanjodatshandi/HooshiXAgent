@@ -57,7 +57,7 @@ func TestLiveMetadataPollingActivatesCompleteGenerationAtomically(t *testing.T) 
 		t.Fatal(err)
 	}
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	for _, name := range []string{"hooshix_gateway_metadata_fresh", "hooshix_gateway_metadata_snapshot_age_seconds", "hooshix_gateway_metadata_refresh_successes_total", "hooshix_gateway_metadata_refresh_failures_total"} {
 		if !strings.Contains(metrics.Body.String(), name) {
 			t.Fatalf("live metadata metric %q missing", name)
@@ -149,7 +149,7 @@ func TestLiveMetadataStaleFailsClosedAndNewGenerationRecoversReadiness(t *testin
 		t.Fatalf("stale route did not fail closed: %v", err)
 	}
 	ready := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "https://gateway.test/readyz", nil))
+	gateway.OpsHandler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "https://gateway.test/readyz", nil))
 	if ready.Code != http.StatusServiceUnavailable {
 		t.Fatalf("stale readiness status=%d want=%d", ready.Code, http.StatusServiceUnavailable)
 	}
@@ -159,7 +159,7 @@ func TestLiveMetadataStaleFailsClosedAndNewGenerationRecoversReadiness(t *testin
 		return source.Ready() == nil && source.MetadataStats(time.Now().UTC()).ActiveRevision == 2
 	})
 	ready = httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "https://gateway.test/readyz", nil))
+	gateway.OpsHandler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "https://gateway.test/readyz", nil))
 	if ready.Code != http.StatusOK {
 		t.Fatalf("recovered readiness status=%d want=%d", ready.Code, http.StatusOK)
 	}

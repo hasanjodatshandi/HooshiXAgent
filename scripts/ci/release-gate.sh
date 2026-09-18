@@ -61,7 +61,7 @@ bash scripts/ci/filesystem-installer-hardening.sh
 # R-10 infrastructure gate proves capability-minimal, resource-bounded Compose runtime policy.
 bash scripts/ci/infrastructure-runtime.sh
 
-# RA-4 public-edge gate proves restricted dynamic TLS authority and simultaneous multi-host routing through real Caddy.
+# RA-4 public-edge gate proves restricted dynamic TLS authority and simultaneous multi-host routing through real Caddy, with the Gateway in static compatibility metadata mode. It does not prove multi-host behavior on the production live-metadata path (RA-3 owns live generations, staleness and live revocation).
 bash scripts/ci/multi-host-public-edge.sh
 
 # R-11 comprehensive test gate proves fuzz/scenario/race coverage without capacity claims.
@@ -121,9 +121,58 @@ grep -q 'gh attestation verify' .github/workflows/release.yml
 grep -q 'verify-release-commit.py' .github/workflows/release.yml
 grep -q 'supply-chain-artifacts.sh' .github/workflows/release.yml
 
-# This final job is intentionally chained behind all prerequisite CI jobs in ci.yml.
+# This final job is intentionally chained behind all prerequisite CI jobs in
+# ci.yml. Assert the actual job set and dependency graph, not the presence of a
+# "needs:" keyword: a prerequisite silently dropped from `needs:` would let this
+# gate report success while the evidence gate it claims to depend on never ran.
 grep -q 'name: AG-8 final security / resilience / release gate' .github/workflows/ci.yml
-grep -q 'needs:' .github/workflows/ci.yml
+# prototype-smoke (AG-9) is a documented intentional exception: it is blocking CI
+# but an operator-visible product smoke rather than a release-gate prerequisite
+# (docs/engineering/quality-enforcement-map.md). Any other job that is missing
+# from the prerequisites is an omission.
+awk -v allowed='prototype-smoke' '
+  BEGIN { count = split(allowed, allowed_jobs, " ") }
+  /^jobs:/ { in_jobs = 1; next }
+  in_jobs && /^  [A-Za-z0-9_-]+:$/ {
+    job = $0
+    sub(/^  /, "", job)
+    sub(/:$/, "", job)
+    jobs[job] = 1
+    in_needs = 0
+    next
+  }
+  in_jobs && /^    needs:$/ { in_needs = 1; current = job; next }
+  in_needs && /^      - / {
+    dependency = $2
+    sub(/\r$/, "", dependency)
+    needed[current, dependency] = 1
+    next
+  }
+  in_needs { in_needs = 0 }
+  END {
+    target = "release-gate"
+    if (!(target in jobs)) { print "release gate job missing from ci.yml" > "/dev/stderr"; exit 1 }
+    for (job in jobs) {
+      if (job == target) continue
+      is_allowed = 0
+      for (slot = 1; slot <= count; slot++) { if (job == allowed_jobs[slot]) is_allowed = 1 }
+      if (is_allowed) continue
+      if (!((target, job) in needed)) {
+        print "ci.yml job is neither a release-gate prerequisite nor a documented exception: " job > "/dev/stderr"
+        exit 1
+      }
+    }
+    for (key in needed) {
+      split(key, parts, SUBSEP)
+      if (parts[1] != target) continue
+      if (!(parts[2] in jobs)) {
+        print "release gate needs an unknown job: " parts[2] > "/dev/stderr"
+        exit 1
+      }
+    }
+    printf "release-gate dependency graph: %d prerequisites of %d ci.yml jobs (%d documented exception)\n", length(jobs) - 1 - count, length(jobs), count
+  }
+' .github/workflows/ci.yml
 
 if [[ -n "${HOOSHIX_RELEASE_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$HOOSHIX_RELEASE_EVIDENCE_DIR"

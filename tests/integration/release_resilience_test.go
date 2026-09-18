@@ -34,7 +34,7 @@ func TestNetworkInterruptionAndColdRestartRecovery(t *testing.T) {
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 	writeValidatedMetadata(t, metadataDir, publicKey, token, metadataOptions{})
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -43,7 +43,7 @@ func TestNetworkInterruptionAndColdRestartRecovery(t *testing.T) {
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
+	waitGatewayHealth(t, client, gatewayOpsURL)
 
 	agentOne := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	if body := waitTunnel(t, client, gatewayBaseURL, "/before-network-cut", "one"); body != "e2e-local:/before-network-cut:one" {

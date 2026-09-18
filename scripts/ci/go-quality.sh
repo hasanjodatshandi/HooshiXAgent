@@ -21,7 +21,11 @@ case "$version" in
     ;;
 esac
 
-mapfile -t go_files < <(find . -type f -name '*.go' -not -path './.git/*' -print | sort)
+mapfile -d '' -t source_files < <(git ls-files --cached --others --exclude-standard -z -- '*.go')
+go_files=()
+for file in "${source_files[@]}"; do
+  [[ ! -f "$file" ]] || go_files+=("$file")
+done
 if ((${#go_files[@]} == 0)); then
   echo "no Go files found" >&2
   exit 1
@@ -42,7 +46,8 @@ if [[ -n "$import_drift" ]]; then
 fi
 
 module_snapshot="$(mktemp -d)"
-trap 'rm -rf "$module_snapshot"' EXIT
+runtime_dir="$(mktemp -d)"
+trap 'rm -rf "$module_snapshot" "$runtime_dir"' EXIT
 cp go.mod "$module_snapshot/go.mod"
 if [[ -f go.sum ]]; then
   cp go.sum "$module_snapshot/go.sum"
@@ -66,6 +71,19 @@ fi
 
 go mod verify
 go vet ./...
+
+# tests/integration asserts real Agent↔Gateway behavior over real processes and
+# fails closed in CI when the product binaries are missing. Build and export
+# them here so the default `go test ./...` below actually executes those
+# end-to-end assertions instead of skipping every one of them and printing ok.
+# This gate must never report success without running a single tunneled request.
+source "$repo_root/scripts/ci/test-guard.sh"
+go build -o "$runtime_dir/hooshix-agent${bin_suffix}" ./cmd/agent
+go build -o "$runtime_dir/hooshix-gateway${bin_suffix}" ./cmd/gateway
+HOOSHIX_AGENT_BINARY="$runtime_dir/hooshix-agent${bin_suffix}"
+HOOSHIX_GATEWAY_BINARY="$runtime_dir/hooshix-gateway${bin_suffix}"
+export HOOSHIX_AGENT_BINARY HOOSHIX_GATEWAY_BINARY
+
 go test -count=1 ./...
 go test -race -count=1 ./...
 govulncheck ./...

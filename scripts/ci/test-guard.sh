@@ -13,16 +13,29 @@
 # os/exec to find them; Unix must not add one. Callers append "${bin_suffix}"
 # to built binary names so every gate script runs on both developer Windows
 # machines and Linux CI runners.
+#
+# The host platform decides the suffix, not `go env GOOS`: the gate builds the
+# binary and immediately executes it locally, so the machine running the gate
+# is the correct signal. `go env GOOS` describes the *build target* instead,
+# and on a Windows developer machine using Git Bash it can report a different
+# value; trusting it would drop the .exe suffix and make os/exec fail to launch
+# a perfectly valid Windows binary, producing a misleading gate failure.
 bin_suffix=""
-if [[ "$(go env GOOS 2>/dev/null || true)" == "windows" ]]; then
-  bin_suffix=".exe"
-fi
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW* | MSYS* | CYGWIN*) bin_suffix=".exe" ;;
+esac
 
 fail_if_no_tests() {
-  local output
-  output="$(go test -count=1 -v "$@" 2>&1 | tee /dev/stderr)"
-  if ! grep -q -- '=== RUN ' <<<"$output"; then
-    echo "focused gate matched zero tests: $*" >&2
-    exit 1
+  local output status=0
+  # Reuse stderr's open descriptor instead of reopening /dev/stderr, which
+  # is not portable through Windows/WSL pipes. Preserve the test exit code.
+  output="$(go test -count=1 -v "$@" 2>&1)" || status=$?
+  printf '%s\n' "$output" >&2
+  if ((status != 0)); then
+    return "$status"
+  fi
+  if ! grep -q -- '--- PASS:' <<<"$output"; then
+    echo "focused gate executed no passing tests (empty selection or all skipped): $*" >&2
+    return 1
   fi
 }

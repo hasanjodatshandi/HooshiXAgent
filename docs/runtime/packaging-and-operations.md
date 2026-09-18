@@ -19,13 +19,15 @@ windows/arm64
 
 Linux/macOS packages are `.tar.gz`; Windows packages are `.zip`. Each package contains the real Agent executable, platform installer/uninstaller tooling and package documentation.
 
-Default persistence is user-scoped:
+Default persistence:
 
-- Linux: `systemd --user`;
-- macOS: LaunchAgent;
-- Windows: current-user logon Scheduled Task.
+- Linux: user-scoped `systemd --user`;
+- macOS: user-scoped LaunchAgent;
+- **Windows: the `HooshiXAgent` service, running under the LocalSystem default account**, with machine-wide Agent state at `%ProgramData%\HooshiXAgent`.
 
-This is intentional: Windows Agent secrets use DPAPI CurrentUser and Unix Agent state is per-user. AG-7 does not change that trust boundary.
+Windows is the service model, not a user-scoped logon task. This is the accepted architecture decision recorded in `docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md`, which supersedes the Windows clauses of ADR-0010. The reason is operational: an edge tunnel agent must serve its loopback services on a device that may have no interactive logon session, which a logon-triggered per-user task cannot do. Windows secrets are still protected by DPAPI in the **service account's** user scope (`CRYPTPROTECT_UI_FORBIDDEN`, not machine scope), and no password-bearing service account is used. Linux and macOS state remain per-user with the ADR-0010 model unchanged.
+
+The supported Windows distribution channel is the desktop service installer `HooshiXAgent-Setup.exe` (see "Supported Windows distribution" below), and it is a published release artifact. The archive installer `packaging/agent/windows/Install-HooshiXAgent.ps1` now installs the same service model at the same machine-wide paths: it defaults to `C:\Program Files\HooshiXAgent` and `%ProgramData%\HooshiXAgent` and persists through the Agent binary's own `service install`/`service start` (ADR-0014 rollout step R1, executed 2026-09-17), with a legacy per-user logon task removed as migration cleanup. A device must still not be left with both persistence mechanisms, which is why both the installer and the uninstaller delete any pre-existing `HooshiXAgent` scheduled task.
 
 Installers preserve an existing binary as `.previous`. A packaged rollback operation restores that previous binary without deleting the Agent identity/config/state. Uninstall preserves state unless an explicit purge option is supplied.
 
@@ -81,11 +83,13 @@ These container limits are safety ceilings, not production capacity claims. R-12
 
 ## Operational signals
 
-The Gateway internal listener exposes:
+The Gateway administrative listener (`-ops-listen`, loopback inside the container, never published) exposes:
 
 - `/healthz` — process liveness;
 - `/readyz` — process/config readiness;
 - `/metrics` — aggregate Prometheus text metrics.
+
+These endpoints are intentionally absent from the public listener: a Gateway-local path registered there would shadow the tenant route for every hostname, so a tenant-hosted `/healthz` could never reach the tenant application.
 
 Current metrics are intentionally low-cardinality and unlabeled:
 
@@ -95,7 +99,7 @@ hooshix_gateway_active_streams
 hooshix_gateway_pending_handshakes
 ```
 
-Caddy returns `404` for public `/readyz` and `/metrics` on every approved hostname; operators use the internal deployment network for diagnostics. Gateway's Compose healthcheck and Caddy's active upstream health probe both use `/readyz`, while Caddy's own container healthcheck exercises its local HTTPS edge path.
+Caddy returns `404` for public `/readyz` and `/metrics` on every approved hostname, so those internal signals can never be published through the public edge; `/healthz` is deliberately left as an ordinary tenant path so a tenant-hosted `/healthz` keeps working. Operators use the administrative listener for diagnostics. Gateway's Compose healthcheck uses the administrative readiness endpoint, while Caddy's own container healthcheck verifies its HTTPS edge certificate against the concatenated trust roots and accepts any HTTP response (a neutral path, not a refused one) as proof that TLS terminated and an HTTP response came back.
 
 Gateway logs remain structured JSON on stderr and GatewayStatusSignal records remain JSONL on stdout. Caddy access logs are JSON. Docker log rotation is bounded by file size/count.
 
@@ -110,6 +114,18 @@ Gateway logs remain structured JSON on stderr and GatewayStatusSignal records re
 - `SHA256SUMS`.
 
 The script uses a tag-derived version and deterministic tar/gzip metadata where applicable. The Agent version is embedded with Go linker flags.
+
+Every Agent package carries its own `SHA256SUMS` next to the binary, recording that binary's digest. This is a separate file from the release-level manifest of the same name: the in-package copy is what the installers verify, the release-level copy covers every published artifact.
+
+### Supported Windows distribution
+
+The supported Windows distribution channel for this Agent is the desktop service installer `HooshiXAgent-Setup.exe` produced by `scripts/build-setup.ps1` from `cmd/hooshix-setup`. It is the only Windows installer that installs the accepted model recorded in ADR-0014: the `HooshiXAgent` Windows service under the LocalSystem default account, state at `%ProgramData%\HooshiXAgent`, the installer-applied state-tree ACL, and the interactive-user tray auto-start task.
+
+`HooshiXAgent-Setup.exe` is a **published release artifact**. `.github/workflows/release.yml` builds it in a dedicated `windows-setup` job on the exact verified release commit, from the released Windows archive's own `SHA256SUMS` (`HOOSHIX_RELEASE_SHA256SUMS`) and the release's linker version, so the installer's embedded Agent binary is byte-identical to the published archive. `finalize` re-verifies that the installer embeds the released `hooshix-agent.exe` verbatim, folds it into the release `SHA256SUMS` and the SBOM/vulnerability scan of the complete candidate, and `attest`/`publish` cover it as a first-class subject alongside the six platform archives. This is ADR-0014 rollout step R5, executed 2026-09-17: the decided Windows channel and the published Windows channel are now the same one.
+
+The clean-checkout `Windows desktop distribution build / service install gate (setup + tray)` CI job still builds the distribution from a fresh checkout with no manual resource steps — it proves that, not that a release artifact was produced. It no longer stops at build integrity: it now invokes the real service install gate below, so the job also proves the built distribution can be installed, started, restarted and uninstalled on Windows.
+
+The archive `hooshix-agent_<version>_windows_<arch>.zip` with `Install-HooshiXAgent.ps1` remains published and is built, SBOM-scanned, checksummed and attested by the same release workflow. It is no longer a divergent channel: since rollout step R1 it installs the same `HooshiXAgent` service model at the same machine-wide paths, and uninstalls it the same way. What the zip still does not provide is the desktop distribution's tray binary, `uninstall.exe` and ARP entry, which is why `HooshiXAgent-Setup.exe` is the supported channel for a Windows desktop device.
 
 ## Signed release/provenance workflow
 
@@ -137,6 +153,22 @@ gh attestation verify SHA256SUMS -R hasanjodatshandi/HooshiXAgent
 
 An attestation proves provenance/identity; it does not replace vulnerability, security, runtime or release acceptance gates.
 
+### Install-time checksum verification
+
+Every installer verifies the Agent binary it is about to promote against the `SHA256SUMS` shipped inside its package, and fails closed (non-zero exit, nothing replaced) when the manifest is missing, has no entry for the binary, or the digest does not match:
+
+- `packaging/agent/unix/install.sh` (`--checksums <path>` or `HOOSHIX_AGENT_CHECKSUMS` override the default lookup next to the script);
+- `packaging/agent/windows/Install-HooshiXAgent.ps1` (`-Checksums <path>` or `HOOSHIX_AGENT_CHECKSUMS`);
+- `cmd/hooshix-setup` verifies each embedded payload binary against the `SHA256SUMS` embedded alongside it in the same distribution build.
+
+`scripts/build-setup.ps1` also verifies its payload against a release `SHA256SUMS` when `HOOSHIX_RELEASE_SHA256SUMS` points at one, which ties a locally built Setup.exe to the exact released agent binaries.
+
+### Authenticode signing status (accepted risk)
+
+Windows binaries are **not** Authenticode-signed. `scripts/build-setup.ps1` previously contained a signing step that silently returned unless `HOOSHIX_SIGN_CERT_PATH` was set while no workflow ever set it, so the build looked signing-capable while every produced binary was unsigned. That dormant path has been removed rather than left to imply coverage that does not exist.
+
+The accepted risk for the unsigned MVP is: SmartScreen/AV reputation warnings and no publisher identity on the binaries; integrity is instead established by the GitHub Artifact Attestations over `SHA256SUMS` (see above), which a consumer must verify explicitly. Since ADR-0014 rollout step R5 this risk attaches to a **published** artifact, `HooshiXAgent-Setup.exe`, not only to a local build. This risk is accepted only for the pre-launch MVP and must be revisited before general availability. Adding Authenticode signing later means obtaining a code-signing certificate, adding the signing step to both `scripts/build-setup.ps1` and `.github/workflows/release.yml`, and gating the release path so a missing certificate fails the release instead of being skipped.
+
 The Agent does not autonomously fetch or apply an update. Promotion remains explicit through verified packages. AG-8 release acceptance now covers forced network interruption/recovery, bounded exhaustion cases, update-candidate validation, previous-binary rollback, checksum tamper rejection and release-security evidence.
 
 ## Automated gates
@@ -145,7 +177,8 @@ The current packaging/operations gate provides:
 
 - platform clean Agent install/rollback/uninstall smoke tests on Ubuntu, macOS and Windows;
 - a blocking packaging/operations CI job;
-- deterministic release archive/checksum construction;
+- deterministic release archive/checksum construction, including the published Windows `HooshiXAgent-Setup.exe` release subject;
+- the Windows Agent service distribution runtime gate `scripts/ci/windows-service-install-smoke.ps1`, which installs, asserts, restarts and uninstalls the real distribution on an elevated Windows host. It is invoked by the `windows-distribution-build` CI job, which passes the distribution it already built via `-SetupExe`; the gate fails closed rather than skipping, and its CI evidence is pending the next Windows CI run (`docs/engineering/executable-runtime-gate.md` section 7, G1);
 - a clean Docker Compose Gateway+Caddy deployment test;
 - RA-4 real Compose/Caddy multi-host acceptance with two simultaneous hostnames, approved-without-route separation and unknown-host TLS denial;
 - real Caddy→Gateway verified TLS;

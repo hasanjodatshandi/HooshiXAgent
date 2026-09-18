@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -19,6 +20,17 @@ type menuHost struct {
 	menu           windows.Handle
 	iconToken      uint32
 	taskbarCreated uint32
+
+	// notifyIcon issues the Shell_NotifyIconW calls that register the icon and
+	// set its notification version. It is a field rather than a direct
+	// shellProc.Call so a test can prove the NIM_SETVERSION request is really
+	// made — and force its failure — without a live taskbar. A nil field falls
+	// back to the real shell call.
+	notifyIcon func(op uint32, data *notifyIconData) error
+
+	// legacyNotifications records a refused version upgrade. The callback
+	// still receives legacy events, which the window procedure also handles.
+	legacyNotifications atomic.Bool
 
 	// uiWork serializes menu/window work onto the message-loop thread.
 	// TrackPopupMenu must run on the thread that pumps the owner window's
@@ -37,8 +49,22 @@ type menuHost struct {
 	balloonFlags   uint32
 	balloonRounds  int
 
-	// icon flash state (reconnect blink).
+	// icon flash state (reconnect blink). flashMu guards flashStop so the poll
+	// goroutine and the UI thread can both start/stop the blink; closing the
+	// same channel twice panicked before.
+	flashMu   sync.Mutex
 	flashStop chan struct{}
+
+	// statusRows is how many status rows the tray currently has inserted at
+	// the top of the context menu. Deleting a FIXED count instead (the old
+	// bug) ate the static command items whenever statusTextLines() returned
+	// fewer than three lines, until the menu held only disabled status rows.
+	statusRows int
+
+	// hotkeyRegistered tracks whether Ctrl+Alt+H is currently owned by this
+	// process so it can be released exactly once.
+	hotkeyMu         sync.Mutex
+	hotkeyRegistered bool
 }
 
 // runOnUi queues a closure to execute on the message-loop thread and posts
@@ -102,16 +128,28 @@ type notifyIconData struct {
 }
 
 const (
-	nifMessage         = 0x01
-	nifIcon            = 0x02
-	nifTip             = 0x04
-	nifInfo            = 0x10
-	nifRealtime        = 0x40
-	nimAdd             = 0x00
-	nimModify          = 0x01
-	nimDelete          = 0x02
+	nifMessage  = 0x01
+	nifIcon     = 0x02
+	nifTip      = 0x04
+	nifInfo     = 0x10
+	nifRealtime = 0x40
+	nimAdd      = 0x00
+	nimModify   = 0x01
+	nimDelete   = 0x02
+
+	// Select the v4 event layout; legacy mouse notifications remain handled.
 	nimSetVersion      = 0x04
 	notifyIconVersion4 = 4
+
+	// Hotkey fallback: Ctrl+Alt+H opens the tray menu even when the shell
+	// fails to forward icon clicks (seen on Windows 11 insider builds).
+	// MOD_CONTROL|MOD_ALT|MOD_NOREPEAT + 'H', delivered as wmHotkey.
+	hotkeyID    = 1
+	modAlt      = 0x0001
+	modControl  = 0x0002
+	modNoRepeat = 0x4000
+	vkH         = 0x48
+	wmHotkey    = 0x0312 // WM_HOTKEY
 
 	// NIIF_* balloon modifiers (partial set actually used).
 	niifWarning = 0x00000002
@@ -135,7 +173,7 @@ const (
 	// of the callback message (uVersion=4 changes the payload layout:
 	// wParam packs icon id + x/y, lParam packs notification code + bounds).
 	ninSelect           = 0x0400 // left click (v4 replaces WM_LBUTTONDOWN/UP)
-	ninKeySelect        = 0x0402 // keyboard activation (aliases NIN_BALLOONSHOW)
+	ninKeySelect        = 0x0401 // NIN_SELECT | NINF_KEY; 0x0402 is NIN_BALLOONSHOW
 	wmContextMenu       = 0x007B // right click (v4 replaces WM_RBUTTONUP)
 	ninBalloonTimeout   = 0x0404
 	ninBalloonUserClick = 0x0405
@@ -233,11 +271,27 @@ func newMenuHost(app *App) (*menuHost, error) {
 	host.rebuildMenu()
 
 	host.iconToken = 1
-	if err := host.notify(nimAdd); err != nil {
-		return nil, fmt.Errorf("Shell_NotifyIcon add: %w", err)
+	host.notifyIcon = shellNotifyIconCall
+	// Register the callback, then select its v4 layout. Later modifications
+	// must not carry NIF_MESSAGE unless they also supply the same callback.
+	if err := host.registerIcon(); err != nil {
+		return nil, err
 	}
-	if err := host.setNotifyVersion(); err != nil {
-		app.logger.Warn("set tray notification version failed", "error", err)
+	// Hotkey fallback: Ctrl+Alt+H opens the same menu. Registered on the
+	// message-loop thread so WM_HOTKEY arrives on the pump thread, and released
+	// in dispose/wmDestroy so the combo is not left stolen system-wide.
+	// Failures are logged at Error: this hotkey is the only remaining way to
+	// reach the menu when icon-click delivery is broken, so losing it silently
+	// would leave the user with a decorative icon.
+	registerHotkey := user32.NewProc("RegisterHotKey")
+	if ok, _, hkErr := registerHotkey.Call(
+		uintptr(host.window), hotkeyID, uintptr(modControl|modAlt|modNoRepeat), uintptr(vkH)); ok == 0 {
+		app.logger.Error("register menu hotkey failed: Ctrl+Alt+H cannot open the tray menu", "error", hkErr)
+	} else {
+		host.hotkeyMu.Lock()
+		host.hotkeyRegistered = true
+		host.hotkeyMu.Unlock()
+		app.logger.Info("menu hotkey registered", "combo", "Ctrl+Alt+H")
 	}
 	return host, nil
 }
@@ -249,14 +303,13 @@ const (
 	mfGrayed          = 0x0002
 	mfChecked         = 0x0008
 	mfByposition      = 0x400
+	mfBycommand       = 0x000 // MF_BYCOMMAND (CheckMenuItem's default lookup mode)
 	menuStatus        = 1000
 	menuPairing       = 1001
 	menuStart         = 1002
 	menuStop          = 1003
 	menuExit          = 1004
 	menuNotifications = 1005
-	// Menu layout (positions): 0..2 status rows, then the static items.
-	statusRowCount = 3
 )
 
 var currentHost *menuHost
@@ -270,8 +323,6 @@ var currentHost *menuHost
 // with zero items and nothing appeared. TrackPopupMenu only ever runs on
 // the UI thread and refreshMenu marshals here, so mutation is serialized.
 func (host *menuHost) rebuildMenu() {
-	deleteMenu := user32.NewProc("DeleteMenu")
-	insertMenu := user32.NewProc("InsertMenuW")
 	appendMenu := user32.NewProc("AppendMenuW")
 	getMenuItemCount := user32.NewProc("GetMenuItemCount")
 
@@ -279,15 +330,46 @@ func (host *menuHost) rebuildMenu() {
 	if count == 0 {
 		host.appendStaticMenuItems(appendMenu)
 	}
-	// Replace the status rows (positions 0..2) with current text.
-	for index := 0; index < statusRowCount; index++ {
-		deleteMenu.Call(uintptr(host.menu), uintptr(index), mfByposition)
+	applyStatusRows(host.menu, &host.statusRows, host.app.statusTextLines())
+	// Keep the notification check mark in step with the persisted preference:
+	// the static rows are appended once and never rebuilt, so without this the
+	// tick would freeze at its startup value.
+	host.applyNotificationCheck()
+}
+
+// applyStatusRows replaces the leading status block of menu with lines. It
+// removes exactly the rows it inserted last time (rows, updated in place) and
+// leaves every static command item untouched, whatever the line count.
+func applyStatusRows(menu windows.Handle, rows *int, lines []string) {
+	deleteMenu := user32.NewProc("DeleteMenu")
+	insertMenu := user32.NewProc("InsertMenuW")
+	for index := 0; index < *rows; index++ {
+		// Always delete position 0: the status block sits at the top of the
+		// menu, so each removal shifts the next row into position 0.
+		deleteMenu.Call(uintptr(menu), 0, mfByposition)
 	}
-	lines := host.app.statusTextLines()
+	*rows = 0
 	for index, line := range lines {
 		utf16Line := syscall.StringToUTF16Ptr(line)
-		insertMenu.Call(uintptr(host.menu), uintptr(index), uintptr(mfString|mfGrayed), menuStatus, uintptr(unsafe.Pointer(utf16Line)))
+		// MF_BYPOSITION is required: without it InsertMenuW interprets
+		// uPosition as a COMMAND ID, so the status rows landed next to whatever
+		// item happened to carry that id (separators carry id 0) instead of at
+		// the top of the menu, and the subsequent positional deletes then ate
+		// static command rows.
+		insertMenu.Call(uintptr(menu), uintptr(index), uintptr(mfByposition|mfString|mfGrayed), menuStatus, uintptr(unsafe.Pointer(utf16Line)))
 	}
+	*rows = len(lines)
+}
+
+// applyNotificationCheck syncs the notification row's check mark with the
+// persisted preference.
+func (host *menuHost) applyNotificationCheck() {
+	checkMenuItem := user32.NewProc("CheckMenuItem")
+	flags := uintptr(mfBycommand)
+	if host.app.settings.enabled() {
+		flags |= mfChecked
+	}
+	checkMenuItem.Call(uintptr(host.menu), uintptr(menuNotifications), flags)
 }
 
 // appendStaticMenuItems adds the fixed items exactly once: pairing,
@@ -315,20 +397,42 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	if host == nil {
 		return 0
 	}
-	// Diagnostics for the flaky menu: log every callback message arrival and
-	// each dispatch stage. These lines are cheap (Info level, tray.log) and
-	// pinpoint exactly where a click dies when the menu fails to show.
 	if message == wmTrayCallback {
-		host.app.logger.Info("tray callback", "code", fmt.Sprintf("0x%04x", uint32(lParam)&0xFFFF))
+		host.app.logger.Debug("tray callback", "code", fmt.Sprintf("0x%04x", uint32(lParam)&0xFFFF))
 	}
 	if message == host.taskbarCreated {
-		_ = host.notify(nimAdd)
-		_ = host.setNotifyVersion()
+		// Explorer was restarted (or the taskbar crashed): its tray icon table
+		// is empty, so the icon must be re-added. A silent failure here leaves
+		// only Explorer's cached NotifyIconSettings snapshot on screen — an
+		// icon that shows but swallows every click. Log the outcome so this
+		// never happens invisibly again, and retry once before giving up.
+		host.app.logger.Info("taskbar recreated; re-adding tray icon")
+		var err error
+		for attempt := 1; attempt <= 2; attempt++ {
+			// registerIcon re-adds the icon AND re-installs the v4 click
+			// layout: a freshly registered icon starts on the default
+			// (version 0) layout, so without the second half the re-added icon
+			// would be click-dead while looking perfectly healthy.
+			if err = host.registerIcon(); err == nil {
+				break
+			}
+			host.app.logger.Warn("re-add tray icon failed", "attempt", attempt, "error", err)
+			time.Sleep(500 * time.Millisecond)
+		}
+		if err != nil {
+			host.app.logger.Error("tray icon re-add failed after taskbar recreation", "error", err)
+		}
 		return 0
 	}
 	switch message {
 	case wmUiWork:
 		host.drainUiWork()
+		return 0
+	case wmHotkey:
+		if uint32(wParam) == hotkeyID {
+			host.app.logger.Info("hotkey menu trigger")
+			host.runOnUi(host.showMenu)
+		}
 		return 0
 	case wmTrayCallback:
 		// NOTIFYICON_VERSION_4 delivers NOTIFICATION CODES in LOWORD(lParam),
@@ -338,12 +442,10 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 		// NIN_BALLOONUSERCLICK. Matching only the legacy raw messages (e.g.
 		// WM_LBUTTONUP) meant real icon clicks were silently dropped and the
 		// menu appeared only when a balloon event happened to masquerade as a
-		// click — the exact flaky behavior reported. Balloon codes are routed
-		// to balloon handling; NIN_KEYSELECT is deliberately NOT a menu
-		// trigger because it aliases NIN_BALLOONSHOW and would open the menu
-		// on every balloon.
+		// click. Keyboard selection (0x0401) is distinct from balloon show
+		// (0x0402); balloon lifecycle events must never open the menu.
 		switch code := uint32(lParam) & 0xFFFF; code {
-		case ninSelect, wmContextMenu, // version 4 clicks
+		case ninSelect, ninKeySelect, wmContextMenu, // version 4 clicks
 			wmLButtonUp, wmLButtonDblClk, // legacy clicks (versions 0-3)
 			wmRButtonUp, wmRButtonDblClk:
 			host.runOnUi(host.showMenu)
@@ -356,6 +458,7 @@ func trayWndProc(window windows.Handle, message uint32, wParam, lParam uintptr) 
 	case wmDestroy:
 		host.stopBalloonRepeat()
 		host.stopFlash()
+		host.unregisterHotkey()
 		_ = host.notify(nimDelete)
 		postQuitMessage()
 		return 0
@@ -389,12 +492,14 @@ func (host *menuHost) showMenu() {
 	// Standard tray-menu pattern (Microsoft KB135238): make the owner
 	// window foreground BEFORE showing the menu so the menu dismisses when
 	// the user clicks elsewhere or presses ESC, then post WM_NULL after.
-	user32Once.Call(uintptr(host.window))
+	if _, _, fgErr := user32Once.Call(uintptr(host.window)); fgErr != nil {
+		host.app.logger.Debug("set foreground for tray menu failed", "error", fgErr)
+	}
 
 	var point struct{ x, y int32 }
 	getCursor.Call(uintptr(unsafe.Pointer(&point)))
 
-	chosen, _, _ := trackPopupMenu.Call(
+	chosen, _, trackErr := trackPopupMenu.Call(
 		uintptr(host.menu),
 		uintptr(tpmRightAlign|tpmBottomAlign|tpmReturnCmd|tpmNonotify|tpmLeftBtn),
 		uintptr(int64(point.x)), // x (screen)
@@ -403,6 +508,7 @@ func (host *menuHost) showMenu() {
 		uintptr(host.window),
 		0,
 	)
+	host.app.logger.Debug("tray menu closed", "chosen", chosen, "trackErr", trackErr)
 	postMessage.Call(uintptr(host.window), uintptr(wmNull), 0, 0)
 	// Dispatch on the UI thread itself (we are already there — showMenu runs
 	// through the wmUiWork queue): the previous "go dispatchMenu" raced the
@@ -465,14 +571,58 @@ func (host *menuHost) run() error {
 	}
 }
 
-func (host *menuHost) setNotifyVersion() error {
-	data := notifyIconData{Window: host.window, ID: host.iconToken, VersionOrTimeout: notifyIconVersion4}
-	data.Size = uint32(unsafe.Sizeof(data))
-	result, _, err := shellProc.Call(nimSetVersion, uintptr(unsafe.Pointer(&data)))
+// shellNotifyIconCall performs one Shell_NotifyIconW call, reporting a FALSE
+// return as an error. It is the default implementation behind
+// menuHost.notifyIcon.
+func shellNotifyIconCall(op uint32, data *notifyIconData) error {
+	result, _, err := shellProc.Call(uintptr(op), uintptr(unsafe.Pointer(data)))
 	if result == 0 {
-		return fmt.Errorf("Shell_NotifyIcon(NIM_SETVERSION): %w", err)
+		return fmt.Errorf("Shell_NotifyIcon(%d): %w", op, err)
 	}
 	return nil
+}
+
+// shellNotifyIcon routes a Shell_NotifyIconW call through the host's seam,
+// falling back to the real shell call when no seam was installed.
+func (host *menuHost) shellNotifyIcon(op uint32, data *notifyIconData) error {
+	if host.notifyIcon == nil {
+		return shellNotifyIconCall(op, data)
+	}
+	return host.notifyIcon(op, data)
+}
+
+// registerIcon adds the icon to the shell and installs the v4 click layout.
+// Both halves are mandatory and are always done together: an icon without the
+// version call is registered and painted but never receives a click, which is
+// indistinguishable from a working icon until the user tries to use it.
+func (host *menuHost) registerIcon() error {
+	if err := host.notify(nimAdd); err != nil {
+		return fmt.Errorf("Shell_NotifyIcon add: %w", err)
+	}
+	host.applyNotifyVersion()
+	return nil
+}
+
+// setNotifyVersion requests the NOTIFYICON_VERSION_4 callback layout.
+func (host *menuHost) setNotifyVersion() error {
+	data := notifyIconData{
+		Window:           host.window,
+		ID:               host.iconToken,
+		VersionOrTimeout: notifyIconVersion4,
+	}
+	data.Size = uint32(unsafe.Sizeof(data))
+	return host.shellNotifyIcon(nimSetVersion, &data)
+}
+
+// applyNotifyVersion requests v4 and reports fallback to legacy events.
+func (host *menuHost) applyNotifyVersion() {
+	if err := host.setNotifyVersion(); err != nil {
+		host.legacyNotifications.Store(true)
+		host.app.logger.Warn("Shell_NotifyIcon(NIM_SETVERSION) failed; using legacy tray events; Ctrl+Alt+H remains available", "error", err)
+		return
+	}
+	host.legacyNotifications.Store(false)
+	host.app.logger.Info("tray notification version configured", "notification_version", notifyIconVersion4)
 }
 
 func (host *menuHost) notify(op uint32) error {
@@ -485,15 +635,29 @@ func (host *menuHost) notify(op uint32) error {
 	}
 	copy(data.Tip[:], syscall.StringToUTF16("HooshiX Agent"))
 	data.Size = uint32(unsafe.Sizeof(data))
-	result, _, err := shellProc.Call(uintptr(op), uintptr(unsafe.Pointer(&data)))
-	if result == 0 {
-		return fmt.Errorf("Shell_NotifyIcon(%d): %w", op, err)
-	}
-	return nil
+	return host.shellNotifyIcon(op, &data)
 }
 
 func (host *menuHost) dispose() {
+	host.unregisterHotkey()
 	_ = host.notify(nimDelete)
+}
+
+// unregisterHotkey releases the Ctrl+Alt+H fallback hotkey. The system-wide
+// hotkey stayed registered after the tray exited before, so the combo remained
+// stolen from every other application until logoff.
+func (host *menuHost) unregisterHotkey() {
+	host.hotkeyMu.Lock()
+	defer host.hotkeyMu.Unlock()
+	if !host.hotkeyRegistered {
+		return
+	}
+	unregisterHotKey := user32.NewProc("UnregisterHotKey")
+	if result, _, err := unregisterHotKey.Call(uintptr(host.window), hotkeyID); result == 0 {
+		host.app.logger.Warn("unregister menu hotkey failed", "error", err)
+		return
+	}
+	host.hotkeyRegistered = false
 }
 
 func (host *menuHost) quit() {
@@ -522,31 +686,68 @@ func (app *App) statusTextLines() []string {
 		}
 		lines = append(lines, "Last error: "+errText)
 	}
+	if app.menu != nil && app.menu.legacyNotifications.Load() {
+		lines = append(lines, "Legacy tray events — shortcut: Ctrl+Alt+H")
+	}
 	return lines
 }
 
 // statusDisplayText converts the raw phase/state pair into a compact,
 // user-friendly tunnel status string.
+//
+// Phase is the agent's own phase ("pending_config", "running", "terminal", ...)
+// while the service is running, and the service-scoped "service:<scm>" form
+// when the service is not running (see mergeAgentStatus). The two must read
+// differently: "the service is not running" is an operator problem, while
+// "running but not paired yet" is a setup step the owner can complete.
 func statusDisplayText(state TrayState) string {
-	switch {
-	case state.Phase == "service:unknown":
+	// Service-scoped phases first: they describe the service itself and must
+	// never be shadowed by a tunnel-phase suffix match.
+	switch state.Phase {
+	case "service:unknown":
 		return "service status unavailable"
-	case state.Phase == "exiting":
+	case "service:stopped":
+		return "service stopped"
+	case "exiting":
 		return "exiting"
-	case strings.HasSuffix(state.Phase, "running") && state.State == "connected":
+	}
+	switch {
+	case isUpState(state):
 		return "connected"
-	case strings.HasSuffix(state.Phase, "running"):
-		return state.State
 	case strings.HasSuffix(state.Phase, "pending_config"):
-		return "waiting for pairing"
-	case strings.HasSuffix(state.Phase, "reconnecting"):
-		return "reconnecting"
+		// The service is running and healthy; the device simply has no
+		// pairing yet. It used to render as the bare internal state name
+		// ("init"), which read as a failure to the owner.
+		return "not paired yet (service running)"
 	case strings.HasSuffix(state.Phase, "terminal"):
 		return "stopped (error)"
-	case strings.HasSuffix(state.Phase, "stopped"):
-		return "stopped"
+	case strings.HasSuffix(state.Phase, "reconnecting"):
+		return "reconnecting"
+	case strings.HasSuffix(state.Phase, "recovering"):
+		return "recovering"
+	case strings.HasSuffix(state.Phase, "running"):
+		return agentStateText(state.State)
 	default:
 		return state.Phase
+	}
+}
+
+// agentStateText names the agent's tunnel state in operator language. The raw
+// tokens ("init", "shutdown", "revoked") are internal; showing them made the
+// menu unreadable, and an unrecognised token is passed through unchanged
+// rather than hidden.
+func agentStateText(state string) string {
+	switch state {
+	case "":
+		return "unknown"
+	case "init":
+		return "starting"
+	case "shutdown":
+		return "stopped"
+	case "revoked":
+		return "revoked by gateway"
+	default:
+		return state
 	}
 }
 
@@ -558,13 +759,14 @@ func (host *menuHost) showBalloon(title, message string, infoFlags uint32) {
 	var data notifyIconData
 	data.Window = host.window
 	data.ID = host.iconToken
-	data.Flags = nifMessage | nifInfo
+	// NIF_MESSAGE would replace the registered callback with this struct's
+	// zero value. Only update the balloon; preserve click delivery.
+	data.Flags = nifInfo
 	data.InfoFlags = infoFlags
 	copy(data.InfoTitle[:], syscall.StringToUTF16(title))
 	copy(data.Info[:], syscall.StringToUTF16(message))
 	data.Size = uint32(unsafe.Sizeof(data))
-	result, _, err := shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
-	if result == 0 {
+	if err := host.shellNotifyIcon(nimModify, &data); err != nil {
 		host.app.logger.Debug("show tray balloon failed", "error", err)
 	}
 }
@@ -675,18 +877,26 @@ func isUpState(state TrayState) bool {
 	return strings.HasSuffix(state.Phase, "running") && state.State == "connected"
 }
 
-// isDownState reports whether the tunnel is service-running but not
-// connected (reconnecting, waiting for pairing, terminal, ...).
-// isDownState reports whether the tunnel is degraded: the supervisor is
-// alive but not connected (or the supervisor itself failed). A running+
-// connected snapshot is up, not down.
+// isDownState reports whether the tunnel is degraded: the supervisor is alive
+// but not connected, or the supervisor itself failed. A running+connected
+// snapshot is up, not down; so is a snapshot that only says the tray is
+// shutting down, and the empty snapshot before the first poll.
+//
+// Every other phase counts as down, including phases this function used to
+// miss. Enumerating suffixes ("running", "reconnecting", "terminal") silently
+// classified the agent's "pending_config" — the unpaired state — as NOT down,
+// so once the tray started using the agent's real phase the operator would
+// have got a yellow icon with no explanation at all.
 func isDownState(state TrayState) bool {
 	if isUpState(state) {
 		return false
 	}
-	return strings.HasSuffix(state.Phase, "running") ||
-		strings.HasSuffix(state.Phase, "reconnecting") ||
-		strings.HasSuffix(state.Phase, "terminal")
+	switch state.Phase {
+	case "", "exiting":
+		return false
+	default:
+		return true
+	}
 }
 
 // disconnectText summarizes the reason shown in disconnect balloons.
@@ -712,7 +922,9 @@ func (app *App) currentState() TrayState {
 // for reconnectFlashDuration so the transition is visible. The blink cycle
 // ends on the target color (the icon settles on the new state color).
 func (host *menuHost) startFlash() {
-	host.stopFlash()
+	host.flashMu.Lock()
+	defer host.flashMu.Unlock()
+	host.stopFlashLocked()
 	stop := make(chan struct{})
 	host.flashStop = stop
 	state := host.app.currentState()
@@ -749,7 +961,16 @@ func (host *menuHost) startFlash() {
 }
 
 // stopFlash cancels any running blink and settles the icon on the state color.
+// Reachable from both the poll goroutine and the UI thread, so the channel
+// swap is guarded: an unguarded double close panicked.
 func (host *menuHost) stopFlash() {
+	host.flashMu.Lock()
+	defer host.flashMu.Unlock()
+	host.stopFlashLocked()
+}
+
+// stopFlashLocked is stopFlash with flashMu held.
+func (host *menuHost) stopFlashLocked() {
 	if host.flashStop != nil {
 		close(host.flashStop)
 		host.flashStop = nil
@@ -759,39 +980,47 @@ func (host *menuHost) stopFlash() {
 
 // setTrayIcon swaps only the icon portion of the tray entry.
 func setTrayIcon(icon windows.Handle) {
-	if icon == 0 {
+	if icon == 0 || currentHost == nil {
 		return
 	}
 	var data notifyIconData
 	data.Window = currentHost.window
 	data.ID = currentHost.iconToken
-	data.Flags = nifMessage | nifIcon
+	data.Flags = nifIcon
 	data.Icon = icon
 	data.Size = uint32(unsafe.Sizeof(data))
-	shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
+	_ = currentHost.shellNotifyIcon(nimModify, &data)
 }
 
 // refreshMenu applies state to the tray icon, tooltip, and menu so tunnel
 // health is visible at a glance and up to date on every poll.
+//
+// It runs on the 2s poll goroutine AND on the UI thread (after a menu action),
+// so every MENU mutation is marshalled onto the message-loop thread: DeleteMenu
+// and InsertMenu otherwise race a TrackPopupMenu that is opening on the UI
+// thread and can truncate the menu mid-display. app.state and the icon/tooltip
+// update stay on the caller because Shell_NotifyIcon is thread-safe.
 func (host *menuHost) refreshMenu(state TrayState) {
 	host.app.mu.Lock()
 	previous := host.app.state
 	host.app.state = state
 	host.app.mu.Unlock()
 	host.notifyTunnelEvent(previous, state)
-	host.rebuildMenu()
+	host.runOnUi(host.rebuildMenu)
 	var tip [128]uint16
 	copy(tip[:], syscall.StringToUTF16("HooshiX Agent — "+statusDisplayText(state)))
 	data := notifyIconData{
 		Window: host.window,
 		ID:     host.iconToken,
-		Flags:  nifMessage | nifIcon | nifTip,
+		Flags:  nifIcon | nifTip,
 		Icon:   statusIcon(readinessFromState(state)),
 		Tip:    tip,
 	}
 	data.Size = uint32(unsafe.Sizeof(data))
-	result, _, err := shellProc.Call(nimModify, uintptr(unsafe.Pointer(&data)))
-	if result == 0 {
+	if err := host.shellNotifyIcon(nimModify, &data); err != nil {
+		// A failing NIM_MODIFY means the icon on screen may be a dead Explorer
+		// cache entry: the state color and tooltip silently freeze. Logged at
+		// Debug because this runs on every poll tick.
 		host.app.logger.Debug("update tray icon failed", "error", err)
 	}
 }

@@ -2,15 +2,26 @@
 
 AG-7 distributes the Edge Agent as versioned platform archives.
 
-The installer is user-scoped by default so the running Agent remains under the same OS user that owns the accepted local secret store.
+The archive installer is user-scoped on Linux and macOS so the running Agent remains under the same OS user that owns the accepted local secret store.
 
 | Platform | Persistence integration | Default binary location |
 | --- | --- | --- |
 | Linux | `systemd --user` service | `~/.local/bin/hooshix-agent` |
 | macOS | LaunchAgent | `~/Library/Application Support/HooshiXAgent/bin/hooshix-agent` |
-| Windows | current-user logon Scheduled Task | `%LOCALAPPDATA%\HooshiXAgent\bin\hooshix-agent.exe` |
+| Windows | `HooshiXAgent` service (LocalSystem) — see below | `C:\Program Files\HooshiXAgent\hooshix-agent.exe` |
 
-Windows deliberately does not install a LocalSystem service because Agent secret state is protected with DPAPI CurrentUser. Changing that trust boundary requires a later approved decision.
+## Windows: accepted model and what this archive installs
+
+The Windows Agent persistence and secret trust model is the **service model**, recorded as Accepted in `docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md`: the Agent runs as the `HooshiXAgent` service under the LocalSystem default account, with state at `%ProgramData%\HooshiXAgent` and secrets protected by DPAPI in the service account's user scope (not machine scope), plus an installer-applied state-tree ACL and no password-bearing service account. ADR-0014 supersedes the Windows clauses of ADR-0010, which had chosen the user-scoped model.
+
+The supported Windows distribution channel is `HooshiXAgent-Setup.exe` produced by `scripts/build-setup.ps1` from `cmd/hooshix-setup`, which installs that service model together with the tray binary, `uninstall.exe` and the Windows uninstall (ARP) entry.
+
+**This archive installs the same model.** `Install-HooshiXAgent.ps1` now defaults to `C:\Program Files\HooshiXAgent` and `%ProgramData%\HooshiXAgent` and registers persistence through the Agent binary itself (`hooshix-agent.exe service install` / `service start`), which requires an elevated session; `-NoPersistence` installs the files only. This is ADR-0014 rollout step R1, executed 2026-09-17. The script also unregisters a legacy per-user logon Scheduled Task named `HooshiXAgent` as migration cleanup, because an earlier release of this archive registered one and a device must not run two persistence mechanisms against one device identity.
+
+Two consequences for operators:
+
+- uninstall stops and uninstalls the service through the binary and fails if the registration survives; it also removes any leftover legacy task;
+- this archive still does not provide the tray binary, `uninstall.exe` or the ARP entry, so `HooshiXAgent-Setup.exe` remains the supported channel for a Windows desktop device. `docs/runtime/packaging-and-operations.md` is the current packaging/operations contract.
 
 ## Install
 
@@ -27,6 +38,15 @@ Windows archive:
 ```
 
 Installers preserve an existing binary as `.previous` before replacing it.
+
+### Checksum verification
+
+Every package ships a `SHA256SUMS` manifest next to the binary and both installers verify the binary against it before replacing anything. A missing manifest, a manifest without an entry for the binary, and a digest mismatch are all fatal: the installer exits non-zero and installs nothing.
+
+- `./install.sh --checksums <path>` (or `HOOSHIX_AGENT_CHECKSUMS`) overrides the default lookup next to the script and in its parent directory.
+- `.\Install-HooshiXAgent.ps1 -Checksums <path>` (or `HOOSHIX_AGENT_CHECKSUMS`) does the same on Windows.
+
+Verify the downloaded package against the release manifest before installing, following `docs/runtime/packaging-and-operations.md`.
 
 ## Rollback
 

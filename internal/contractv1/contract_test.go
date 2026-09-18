@@ -25,6 +25,13 @@ func TestFrameLanguageNeutralVector(t *testing.T) {
 			Sequence    uint64 `json:"sequence"`
 			PayloadUTF8 string `json:"payload_utf8"`
 			FrameHex    string `json:"frame_hex"`
+			// Large payloads are stated compactly as a repeated byte plus the
+			// normative 24-byte frame header.
+			PayloadRepeat *struct {
+				Byte  byte `json:"byte"`
+				Count int  `json:"count"`
+			} `json:"payload_repeat"`
+			HeaderHex string `json:"header_hex"`
 		} `json:"vectors"`
 	}
 	decodeFixture(t, filepath.Join("tunnel", "frame-vectors.json"), &vectors)
@@ -40,13 +47,27 @@ func TestFrameLanguageNeutralVector(t *testing.T) {
 			if vector.Kind == "control" {
 				kind = KindControl
 			}
-			frame := Frame{Kind: kind, StreamID: vector.StreamID, Sequence: vector.Sequence, Payload: []byte(vector.PayloadUTF8)}
+			payload := []byte(vector.PayloadUTF8)
+			if vector.PayloadRepeat != nil {
+				if vector.HeaderHex == "" {
+					t.Fatal("compact vector must pin the frame header")
+				}
+				payload = bytes.Repeat([]byte{vector.PayloadRepeat.Byte}, vector.PayloadRepeat.Count)
+			}
+			frame := Frame{Kind: kind, StreamID: vector.StreamID, Sequence: vector.Sequence, Payload: payload}
 			encoded, err := EncodeFrame(frame)
 			if err != nil {
 				t.Fatalf("encode vector: %v", err)
 			}
-			if got := hex.EncodeToString(encoded); got != vector.FrameHex {
-				t.Fatalf("frame vector mismatch\n got: %s\nwant: %s", got, vector.FrameHex)
+			if vector.HeaderHex != "" {
+				if got := hex.EncodeToString(encoded[:HeaderSize]); got != vector.HeaderHex {
+					t.Fatalf("frame header mismatch\n got: %s\nwant: %s", got, vector.HeaderHex)
+				}
+			}
+			if vector.FrameHex != "" {
+				if got := hex.EncodeToString(encoded); got != vector.FrameHex {
+					t.Fatalf("frame vector mismatch\n got: %s\nwant: %s", got, vector.FrameHex)
+				}
 			}
 			decoded, err := DecodeFrame(encoded)
 			if err != nil {
@@ -56,6 +77,38 @@ func TestFrameLanguageNeutralVector(t *testing.T) {
 				t.Fatalf("decoded frame mismatch: %#v", decoded)
 			}
 		})
+	}
+}
+
+// TestFrameVectorsCoverBothPayloadLimits proves the vector corpus actually
+// pins the Section 2 payload ceilings: each limit is encoded at exactly its
+// maximum.
+func TestFrameVectorsCoverBothPayloadLimits(t *testing.T) {
+	t.Parallel()
+
+	var vectors struct {
+		Vectors []struct {
+			Kind          string `json:"kind"`
+			PayloadRepeat *struct {
+				Byte  byte `json:"byte"`
+				Count int  `json:"count"`
+			} `json:"payload_repeat"`
+		} `json:"vectors"`
+	}
+	decodeFixture(t, filepath.Join("tunnel", "frame-vectors.json"), &vectors)
+
+	limits := map[string]int{}
+	for _, vector := range vectors.Vectors {
+		if vector.PayloadRepeat == nil {
+			continue
+		}
+		limits[vector.Kind] = vector.PayloadRepeat.Count
+	}
+	if limits["control"] != MaxControlPayload {
+		t.Fatalf("control payload limit vector missing: got %d want %d", limits["control"], MaxControlPayload)
+	}
+	if limits["data"] != MaxDataPayload {
+		t.Fatalf("data payload limit vector missing: got %d want %d", limits["data"], MaxDataPayload)
 	}
 }
 
@@ -272,6 +325,7 @@ func TestHealthReportValidation(t *testing.T) {
 		{"streams over bound", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":4097,"queued_frames":0,"reconnect_count":0}`)},
 		{"queued over bound", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":65537,"reconnect_count":0}`)},
 		{"negative reconnects", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":-1}`)},
+		{"reconnects over bound", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":2147483648}`)},
 		{"bad generated_at", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"not-a-time","active_streams":0,"queued_frames":0,"reconnect_count":0}`)},
 		{"bad last_reconnect_at", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":1,"last_reconnect_at":"not-a-time"}`)},
 		{"long agent_version", []byte(`{"contract_version":1,"message_type":"health_report","report_id":"report-001","generated_at":"2026-08-29T12:00:00Z","active_streams":0,"queued_frames":0,"reconnect_count":0,"agent_version":"` + strings.Repeat("v", 65) + `"}`)},

@@ -32,7 +32,7 @@ func TestAgentGatewayLiveMetadataRouteStaleRecovery(t *testing.T) {
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 	publishRuntimeLiveGeneration(t, metadataDir, 1, "generation-1", e2ePublicHost, publicKey, token, nil)
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -42,8 +42,8 @@ func TestAgentGatewayLiveMetadataRouteStaleRecovery(t *testing.T) {
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
-	waitRuntimeReady(t, client, gatewayBaseURL, http.StatusOK)
+	waitGatewayHealth(t, client, gatewayOpsURL)
+	waitRuntimeReady(t, client, gatewayOpsURL, http.StatusOK)
 	publishRuntimeLiveGeneration(t, metadataDir, 2, "generation-2", e2ePublicHost, publicKey, token, nil)
 
 	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
@@ -72,7 +72,7 @@ func TestAgentGatewayLiveMetadataRouteStaleRecovery(t *testing.T) {
 
 	// No new generation is published. The accepted generation's fixed local deadline must expire;
 	// successful polls of the same revision must never extend its authority.
-	waitRuntimeReady(t, client, gatewayBaseURL, http.StatusServiceUnavailable)
+	waitRuntimeReady(t, client, gatewayOpsURL, http.StatusServiceUnavailable)
 	staleRoute, err := publicRequestWithHost(client, gatewayBaseURL, "/stale", "", liveUpdatedHost)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestAgentGatewayLiveMetadataRouteStaleRecovery(t *testing.T) {
 	if staleRoute.StatusCode == http.StatusOK {
 		t.Fatal("stale live metadata continued routing new ingress")
 	}
-	health, err := client.Get(gatewayBaseURL + "/healthz")
+	health, err := client.Get(gatewayOpsURL + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestAgentGatewayLiveMetadataRouteStaleRecovery(t *testing.T) {
 	}
 
 	publishRuntimeLiveGeneration(t, metadataDir, 4, "generation-4", liveUpdatedHost, publicKey, token, nil)
-	waitRuntimeReady(t, client, gatewayBaseURL, http.StatusOK)
+	waitRuntimeReady(t, client, gatewayOpsURL, http.StatusOK)
 	waitFor(t, 3*time.Second, func() bool {
 		response, err := publicRequestWithHost(client, gatewayBaseURL, "/recovered", "recovered", liveUpdatedHost)
 		if err != nil {
@@ -118,7 +118,7 @@ func TestAgentGatewayLiveMetadataRevocationTerminatesSession(t *testing.T) {
 
 	publicKey, token := configureRealAgent(t, agentBinary, stateDir, gatewayWSS, certPath, localAddress)
 	publishRuntimeLiveGeneration(t, metadataDir, 1, "generation-1", e2ePublicHost, publicKey, token, nil)
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -129,8 +129,8 @@ func TestAgentGatewayLiveMetadataRevocationTerminatesSession(t *testing.T) {
 	)
 	defer gateway.stop(t)
 	client := trustedClient(roots)
-	waitGatewayHealth(t, client, gatewayBaseURL)
-	waitRuntimeReady(t, client, gatewayBaseURL, http.StatusOK)
+	waitGatewayHealth(t, client, gatewayOpsURL)
+	waitRuntimeReady(t, client, gatewayOpsURL, http.StatusOK)
 
 	agent := startProcess(t, agentBinary, "run", "--state-dir", stateDir)
 	defer agent.stop(t)
@@ -158,7 +158,7 @@ func TestAgentGatewayLiveMetadataRevocationTerminatesSession(t *testing.T) {
 		defer response.Body.Close()
 		return response.StatusCode == http.StatusServiceUnavailable
 	})
-	waitRuntimeReady(t, client, gatewayBaseURL, http.StatusOK)
+	waitRuntimeReady(t, client, gatewayOpsURL, http.StatusOK)
 }
 
 func publishRuntimeLiveGeneration(t *testing.T, root string, revision uint64, generation, hostname, publicKey, token string, revocation *contractv1.RevocationSignal) {

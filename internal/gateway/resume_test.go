@@ -49,7 +49,7 @@ func (agent *rawResumeAgent) close() {
 // connectResumingAgent opens a fresh WebSocket and sends resume_session for
 // the given session ID. ok=false means the connection was closed (resume
 // unavailable); otherwise the parsed session_resumed reply is returned.
-func connectResumingAgent(t *testing.T, server *httptest.Server, identity testIdentity, sessionID string) (*rawResumeAgent, contractv1.SessionResumed, bool) {
+func connectResumingAgent(t *testing.T, server *httptest.Server, identity testIdentity, sessionID, resumeChallenge string) (*rawResumeAgent, contractv1.SessionResumed, bool) {
 	t.Helper()
 	conn := dialRawAgent(t, server.Client(), server.URL)
 	agent := &rawResumeAgent{conn: conn}
@@ -66,6 +66,8 @@ func connectResumingAgent(t *testing.T, server *httptest.Server, identity testId
 		TokenID:         identity.tokenID,
 		SessionID:       sessionID,
 		ResumeNonce:     base64.RawURLEncoding.EncodeToString(nonce),
+		ResumeChallenge: resumeChallenge,
+		IssuedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	signature := ed25519.Sign(identity.privateKey, contractv1.ResumeTranscript(resume))
 	resume.Signature = base64.RawURLEncoding.EncodeToString(signature)
@@ -110,13 +112,13 @@ func sendResumeControl(ctx context.Context, conn *websocket.Conn, resume contrac
 // resume_session fast path against sessionID, and returns a fully
 // stream-capable mock agent continuing on the resumed session. ok=false
 // means the Gateway rejected the resume (connection closed).
-func connectResumingMockAgent(t *testing.T, server *httptest.Server, identity testIdentity, sessionID, localServiceURL string) (*mockAgent, bool) {
+func connectResumingMockAgent(t *testing.T, server *httptest.Server, identity testIdentity, sessionID, resumeChallenge, localServiceURL string) (*mockAgent, bool) {
 	t.Helper()
 	parsed := newURLParse(t, localServiceURL)
 	agent := &mockAgent{
 		identity:   identity,
 		localURL:   parsed,
-		httpClient: localHTTPClient(localServiceURL),
+		httpClient: localHTTPClient(t, localServiceURL),
 		streams:    make(map[uint32]*mockStream),
 		done:       make(chan struct{}),
 	}
@@ -137,6 +139,8 @@ func connectResumingMockAgent(t *testing.T, server *httptest.Server, identity te
 		TokenID:         identity.tokenID,
 		SessionID:       sessionID,
 		ResumeNonce:     base64.RawURLEncoding.EncodeToString(nonce),
+		ResumeChallenge: resumeChallenge,
+		IssuedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	signature := ed25519.Sign(identity.privateKey, contractv1.ResumeTranscript(resume))
 	resume.Signature = base64.RawURLEncoding.EncodeToString(signature)
@@ -166,6 +170,9 @@ func connectResumingMockAgent(t *testing.T, server *httptest.Server, identity te
 	if resumed.SessionID != sessionID {
 		t.Fatalf("resumed session ID=%q want %q", resumed.SessionID, sessionID)
 	}
+	// The Gateway rotates the proof on every accepted resume: adopt it exactly
+	// like the real Agent does, so a later resume is still able to verify.
+	agent.resumeChallenge = resumed.ResumeChallenge
 
 	go agent.readLoop()
 	return agent, true
@@ -199,7 +206,7 @@ func TestGatewayResumeFastPathReplacesLiveSession(t *testing.T) {
 	original := gateway.sessionForDevice(identity.deviceID)
 	originalID := original.sessionID
 
-	resumer, ok := connectResumingMockAgent(t, tlsServer, identity, originalID, local.URL)
+	resumer, ok := connectResumingMockAgent(t, tlsServer, identity, originalID, agentOne.resumeChallenge, local.URL)
 	defer resumer.close()
 	if !ok {
 		t.Fatal("resume of a live session was rejected")
@@ -233,7 +240,7 @@ func TestGatewayResumeFailsClosedForUnknownSession(t *testing.T) {
 	tlsServer := httptest.NewTLSServer(gateway.Handler())
 	defer tlsServer.Close()
 
-	agent, _, ok := connectResumingAgent(t, tlsServer, identity, "session-never-existed")
+	agent, _, ok := connectResumingAgent(t, tlsServer, identity, "session-never-existed", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	defer agent.close()
 	if ok {
 		t.Fatal("resume of an unknown session was accepted")
@@ -263,7 +270,7 @@ func TestGatewayResumeRejectsMismatchedIdentity(t *testing.T) {
 
 	// A different device identity cannot resume this session: the subject
 	// mismatch fails closed and the live session remains untouched.
-	agent, _, ok := connectResumingAgent(t, tlsServer, otherIdentity, live.sessionID)
+	agent, _, ok := connectResumingAgent(t, tlsServer, otherIdentity, live.sessionID, agentOne.resumeChallenge)
 	defer agent.close()
 	if ok {
 		t.Fatal("resume with mismatched device identity was accepted")
@@ -304,6 +311,8 @@ func TestGatewayResumeInvalidSignatureFailsClosed(t *testing.T) {
 		TokenID:         identity.tokenID,
 		SessionID:       live.sessionID,
 		ResumeNonce:     base64.RawURLEncoding.EncodeToString(nonce),
+		ResumeChallenge: agentOne.resumeChallenge,
+		IssuedAt:        time.Now().UTC().Format(time.RFC3339),
 		Signature:       base64.RawURLEncoding.EncodeToString(make([]byte, 64)),
 	}
 	peer := &rawResumeAgent{conn: conn}
@@ -320,7 +329,7 @@ func TestGatewayResumeInvalidSignatureFailsClosed(t *testing.T) {
 	}
 
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	if strings.Contains(metrics.Body.String(), "{") {
 		t.Fatalf("resume path introduced labeled metrics: %s", metrics.Body.String())
 	}

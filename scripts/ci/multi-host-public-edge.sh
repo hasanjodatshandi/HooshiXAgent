@@ -174,6 +174,16 @@ PY
 python3 "$work/backend.py" backend-one "$backend_one_port" & backend_one_pid=$!
 python3 "$work/backend.py" backend-two "$backend_two_port" & backend_two_pid=$!
 
+# The Gateway runs in static compatibility metadata mode here. This gate proves
+# the *edge*: restricted On-Demand TLS authority, simultaneous approved-hostname
+# routing to distinct Agent local endpoints, route/TLS authority separation and
+# verified Caddy→Gateway TLS. It does NOT prove RA-4 multi-host behavior on the
+# production live-metadata path: live generation publication, staleness and
+# live-revocation semantics are proven by scripts/ci/live-metadata-lifecycle.sh
+# (RA-3). deploy/gateway/README.md forbids claiming multi-host from static
+# compatibility, so the gate's own summary states the metadata mode explicitly
+# and must not be upgraded to a production-data-path claim until this gate
+# publishes a live generation instead.
 compose_env=(
   HOOSHIX_PUBLIC_HOST="$one_host"
   HOOSHIX_HTTP_PORT="$http_port"
@@ -201,11 +211,20 @@ docker run -d --name "$permission_container" --network "$network_name" \
 
 env "${compose_env[@]}" docker compose -p "$project" -f deploy/gateway/docker-compose.yml up -d caddy
 
+# The Gateway serves no Gateway-local path on the public listener, and the edge
+# refuses the internal /readyz path itself. Probing that edge-refused path is
+# enough to prove approved-host public TLS without depending on Gateway routing
+# or an Agent session.
+#
+# These two probes deliberately use --insecure: they run BEFORE the edge's
+# internal CA root is read out of the container below, so no trusted root exists
+# yet. Everything after that point (multi-host requests, status codes, response
+# headers) verifies the certificate with --cacert.
 for _ in $(seq 1 90); do
-  if curl --noproxy '*' --insecure --silent --show-error --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port/healthz" >/dev/null 2>&1; then break; fi
+  if curl --noproxy '*' --insecure --silent --output /dev/null --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port/readyz"; then break; fi
   sleep 0.5
 done
-if ! curl --noproxy '*' --insecure --fail --silent --show-error --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port/healthz" >/dev/null; then
+if ! curl --noproxy '*' --insecure --silent --output /dev/null --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port/readyz"; then
   echo "Caddy did not establish approved-host public TLS" >&2
   docker logs --tail 80 "$permission_container" >&2 || true
   env "${compose_env[@]}" docker compose -p "$project" -f deploy/gateway/docker-compose.yml logs --tail=80 caddy gateway >&2 || true
@@ -244,6 +263,22 @@ if [[ "$body_one" != 'backend-one:/alpha' || "$body_two" != 'backend-two:/beta' 
   exit 1
 fi
 
+# The public edge must harden every response it emits, independent of what the
+# Gateway or a tenant backend sends.
+edge_headers="$(curl --noproxy '*' --cacert "$caddy_root" --silent --show-error \
+  --dump-header - --output /dev/null \
+  --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port/alpha" | tr -d '\r')"
+if ! grep -Eiq '^Strict-Transport-Security: *max-age=(15[0-9]{6}|[2-9][0-9]{7,})' <<<"$edge_headers"; then
+  echo "public edge did not emit HSTS with a multi-month max-age:" >&2
+  printf '%s\n' "$edge_headers" >&2
+  exit 1
+fi
+if ! grep -qi '^X-Content-Type-Options: *nosniff' <<<"$edge_headers"; then
+  echo "public edge did not emit X-Content-Type-Options: nosniff:" >&2
+  printf '%s\n' "$edge_headers" >&2
+  exit 1
+fi
+
 # TLS permission and Gateway route authorization are independent. This hostname is allowed to
 # obtain a test certificate but has no route metadata, therefore HTTP must still fail at Gateway.
 no_route_status="$(curl --noproxy '*' --cacert "$caddy_root" --silent --output /dev/null --write-out '%{http_code}' \
@@ -262,11 +297,22 @@ if env "${compose_env[@]}" docker compose -p "$project" -f deploy/gateway/docker
   exit 1
 fi
 
+# The edge must refuse the internal /readyz and /metrics paths on an approved
+# tenant hostname.
 for path in /readyz /metrics; do
   status="$(curl --noproxy '*' --cacert "$caddy_root" --silent --output /dev/null --write-out '%{http_code}' \
     --resolve "$one_host:$https_port:127.0.0.1" "https://$one_host:$https_port$path")"
   [[ "$status" == 404 ]]
 done
+
+# /healthz is deliberately NOT refused by the edge: it is one of the most common
+# tenant health paths, so a tenant-hosted /healthz must reach the routed tenant
+# application like any other path. The test backend echoes "<label>:<path>".
+health_tenant="$(request_host "$one_host" /healthz)"
+if [[ "$health_tenant" != 'backend-one:/healthz' ]]; then
+  echo "tenant /healthz did not reach the tenant application: $health_tenant" >&2
+  exit 1
+fi
 
 # The public edge must preserve verified TLS to Gateway in both production and static compatibility configs.
 for config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
@@ -278,4 +324,4 @@ for config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
   fi
 done
 
-echo "RA-4 multi-host public edge gate: PASSED - two approved hostnames simultaneously reached distinct real Agent local endpoints through Caddy; approved-without-route remained 404; unknown TLS authority was denied; operational endpoints stayed private; verified Caddy-to-Gateway TLS remained enabled."
+echo "RA-4 public edge / TLS authority gate: PASSED - with the Gateway in static compatibility metadata mode, two approved hostnames simultaneously reached distinct real Agent local endpoints through Caddy; approved-without-route remained 404; unknown TLS authority was denied; the edge-refused /readyz and /metrics stayed private while a tenant /healthz reached the tenant application; the edge emitted HSTS and nosniff; verified Caddy-to-Gateway TLS remained enabled. Live-metadata (production data path) multi-host behavior is NOT covered by this gate."

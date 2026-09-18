@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -108,11 +110,97 @@ func validateRepository(t *testing.T, root string) []string {
 		}
 	}
 
+	entries, err := repositoryEntries(root)
+	if err != nil {
+		violations = append(violations, fmt.Sprintf("repository listing failed: %v", err))
+		return violations
+	}
+
+	forbiddenDirs := map[string]struct{}{}
+	for _, entry := range entries {
+		rel := filepath.ToSlash(entry.rel)
+		parts := strings.Split(rel, "/")
+		if entry.isDir {
+			if _, forbidden := forbiddenImplementationDirs[strings.ToLower(parts[len(parts)-1])]; forbidden {
+				forbiddenDirs[rel] = struct{}{}
+			}
+			continue
+		}
+		if filepath.Ext(rel) != ".go" {
+			continue
+		}
+		if err := inspectGoImports(filepath.Join(root, filepath.FromSlash(entry.rel)), rel, &violations); err != nil {
+			violations = append(violations, fmt.Sprintf("repository inspection failed: %v", err))
+			return violations
+		}
+	}
+	for dir := range forbiddenDirs {
+		violations = append(violations, fmt.Sprintf("forbidden implementation directory: %s", dir))
+	}
+
+	sort.Strings(violations)
+	return violations
+}
+
+// repositoryEntry is one file or directory the architecture walk must inspect.
+type repositoryEntry struct {
+	rel   string
+	isDir bool
+}
+
+// repositoryEntries lists what the architecture boundary must be validated
+// against.
+//
+// In a git work tree the list comes from `git ls-files --cached --others
+// --exclude-standard`, so ignored local scratch (build output, the Setup.exe
+// payload, runtime state) can never fail the architecture test or mask a real
+// violation behind a walk error. The directories of tracked files are derived
+// from their paths because git does not record empty directories.
+//
+// Directories that are not a git work tree — the fixture repositories the
+// negative tests build in a temp dir — fall back to a filesystem walk, which is
+// the behaviour those tests assert.
+func repositoryEntries(root string) ([]repositoryEntry, error) {
+	if info, err := os.Stat(filepath.Join(root, ".git")); err == nil && info.IsDir() {
+		return gitTrackedEntries(root)
+	}
+	return walkedEntries(root)
+}
+
+func gitTrackedEntries(root string) ([]repositoryEntry, error) {
+	command := exec.Command("git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	var entries []repositoryEntry
+	seen := map[string]struct{}{}
+	for _, name := range strings.Split(string(output), "\x00") {
+		if name == "" {
+			continue
+		}
+		if _, duplicate := seen[name]; !duplicate {
+			seen[name] = struct{}{}
+			entries = append(entries, repositoryEntry{rel: name})
+		}
+		for dir := path.Dir(name); dir != "." && dir != "/"; dir = path.Dir(dir) {
+			if _, duplicate := seen[dir]; duplicate {
+				continue
+			}
+			seen[dir] = struct{}{}
+			entries = append(entries, repositoryEntry{rel: dir, isDir: true})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+	return entries, nil
+}
+
+func walkedEntries(root string) ([]repositoryEntry, error) {
+	var entries []repositoryEntry
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
@@ -123,28 +211,17 @@ func validateRepository(t *testing.T, root string) []string {
 			}
 			return nil
 		}
-
-		if entry.IsDir() {
-			if _, forbidden := forbiddenImplementationDirs[strings.ToLower(entry.Name())]; forbidden {
-				violations = append(violations, fmt.Sprintf("forbidden implementation directory: %s", filepath.ToSlash(rel)))
-			}
+		if rel == "." {
 			return nil
 		}
-
-		if filepath.Ext(entry.Name()) != ".go" {
-			return nil
-		}
-		if err := inspectGoImports(path, rel, &violations); err != nil {
-			return err
-		}
+		entries = append(entries, repositoryEntry{rel: filepath.ToSlash(rel), isDir: entry.IsDir()})
 		return nil
 	})
 	if err != nil {
-		violations = append(violations, fmt.Sprintf("repository walk failed: %v", err))
+		return nil, err
 	}
-
-	sort.Strings(violations)
-	return violations
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+	return entries, nil
 }
 
 func inspectGoImports(path, rel string, violations *[]string) error {

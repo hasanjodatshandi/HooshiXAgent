@@ -33,6 +33,8 @@ The authorization record contains runtime authorization inputs only:
 
 The raw session token is presented by the Agent during the tunnel handshake and matched against the digest. The external authorization record never contains the device private key.
 
+The timestamps are ordered: `issued_at <= not_before < expires_at`. The end of the interval is exclusive, so a record is inactive at exactly `expires_at`. JSON Schema 2020-12 cannot compare two instance values, so this rule is normative here and is enforced by every consumer; a record whose timestamps violate the ordering is malformed.
+
 This record is not a device CRUD model and does not carry user, tenant, plan, billing, or quota state.
 
 ## 3. Endpoint route assignment
@@ -47,6 +49,8 @@ The route assignment contains:
 - enabled/validity state.
 
 `local_endpoint_id` identifies an Agent-local mapping. It is **not** an IP address, URL, scheme, file path, named pipe, Unix socket, or arbitrary target selected remotely.
+
+The validity interval is ordered: `not_before < expires_at`, with the end exclusive. As with the authorization record, JSON Schema 2020-12 cannot compare two instance values, so this rule is normative here and is enforced by every consumer; a record whose timestamps violate the ordering is malformed.
 
 The Gateway uses the assignment only for active runtime routing. It does not become the durable endpoint-management authority.
 
@@ -64,13 +68,17 @@ Revocation is not implemented as local Control Panel CRUD or persistence.
 
 Status signals are bounded runtime observations. They may report session/route lifecycle and per-event traffic deltas up to the contract limit.
 
+`kind: "traffic_delta"` is the only kind that reports traffic, and it is the only kind with a conditional requirement: it **must** carry `endpoint_id`, and it **must** carry at least one of `bytes_from_public` / `bytes_to_public`. A `traffic_delta` without an endpoint or without a counter is malformed. Other kinds may carry either counter or neither, and may omit `endpoint_id`.
+
+Each byte counter is an integer count of **bytes** in the inclusive range `0..1073741824` (1 GiB = 1073741824 bytes). A counter outside that range, or a `traffic_delta` whose only counters are absent, is rejected. Counters are per-event deltas, not cumulative totals: a consumer must not derive a durable total from a single signal, and it must not treat any counter as quota, billing, or authorization state. `bytes_from_public` counts public-ingress to Agent bytes; `bytes_to_public` counts Agent to public-ingress bytes.
+
 Status signals are telemetry/integration outputs only. They are not authentication, authorization, routing, quota, billing, or business authority.
 
 ## 6. Failure and freshness rules
 
 Consumers must fail closed when a record is:
 
-- malformed or has unknown fields;
+- malformed, or has unknown fields. Malformed covers both an absent member that the schema marks `required` and an explicit JSON `null` anywhere, because no v1 member is nullable: a record missing a schema-required member is malformed by this contract's own definition, so a consumer that maps an absent member to a zero value is failing open;
 - an unsupported contract version;
 - disabled;
 - not yet valid or expired;

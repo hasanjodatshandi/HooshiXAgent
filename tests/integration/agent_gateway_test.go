@@ -31,11 +31,7 @@ func TestRealAgentGatewayRuntime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("runtime gate orchestration uses POSIX interrupt semantics in CI")
 	}
-	agentBinary := os.Getenv("HOOSHIX_AGENT_BINARY")
-	gatewayBinary := os.Getenv("HOOSHIX_GATEWAY_BINARY")
-	if agentBinary == "" || gatewayBinary == "" {
-		t.Skip("set HOOSHIX_AGENT_BINARY and HOOSHIX_GATEWAY_BINARY")
-	}
+	agentBinary, gatewayBinary := requiredBinaries(t)
 
 	stateDir := t.TempDir()
 	metadataDir := t.TempDir()
@@ -83,7 +79,7 @@ func TestRealAgentGatewayRuntime(t *testing.T) {
 
 	writeMetadata(t, metadataDir, publicKey, token)
 
-	gateway := startProcess(t, gatewayBinary,
+	gateway, gatewayOpsURL := startGatewayProcess(t, gatewayBinary,
 		"-listen", gatewayAddress,
 		"-tls-cert", certPath,
 		"-tls-key", keyPath,
@@ -97,7 +93,7 @@ func TestRealAgentGatewayRuntime(t *testing.T) {
 		Timeout:   3 * time.Second,
 	}
 	waitFor(t, 5*time.Second, func() bool {
-		response, err := client.Get(gatewayBaseURL + "/healthz")
+		response, err := client.Get(gatewayOpsURL + "/healthz")
 		if err != nil {
 			return false
 		}
@@ -209,6 +205,16 @@ func startProcess(t *testing.T, binary string, args ...string) *process {
 		t.Fatalf("start %s: %v", binary, err)
 	}
 	return process
+}
+
+// startGatewayProcess starts the Tunnel Gateway with its Gateway-local
+// operational endpoints on their own loopback listener and returns the
+// plaintext administrative base URL (liveness/readiness/metrics are never
+// served on the public listener, which would shadow tenant routes).
+func startGatewayProcess(t *testing.T, binary string, args ...string) (*process, string) {
+	t.Helper()
+	opsAddress := reserveAddress(t)
+	return startProcess(t, binary, append(args, "-ops-listen", opsAddress)...), "http://" + opsAddress
 }
 
 func (process *process) stopGracefully(t *testing.T, timeout time.Duration) {

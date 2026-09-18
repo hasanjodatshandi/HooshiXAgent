@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -23,6 +24,13 @@ func GeneratePairingCapability() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(entropy), nil
 }
 
+// EnsurePairingCapability returns the existing capability, or creates one when
+// (and only when) the file is genuinely absent.
+//
+// It previously regenerated the capability on ANY read error and overwrote the
+// file, which silently invalidated the URL an operator had been given (a
+// transient read failure or a too-broad ACL was indistinguishable from a
+// missing file). A present-but-unusable capability is now reported instead.
 func EnsurePairingCapability(stateDir string) (string, error) {
 	normalized, err := NormalizeStateDir(stateDir)
 	if err != nil {
@@ -32,6 +40,9 @@ func EnsurePairingCapability(stateDir string) (string, error) {
 	capability, err := LoadPairingCapability(stateDir)
 	if err == nil {
 		return capability, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
 	}
 	capability, err = GeneratePairingCapability()
 	if err != nil {

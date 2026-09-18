@@ -32,7 +32,7 @@ func TestRunnerResumeFastPathPreference(t *testing.T) {
 		switch attempts.Add(1) {
 		case 1:
 			// Simulate a fully authenticated session that later drops.
-			runner.storeResumable("session-resume-001")
+			runner.storeResumable("session-resume-001", "challenge-resume-001")
 			return errors.New("synthetic transport loss")
 		default:
 			return context.Canceled
@@ -44,6 +44,9 @@ func TestRunnerResumeFastPathPreference(t *testing.T) {
 	if runner.ResumableSessionID() != "session-resume-001" {
 		t.Fatalf("runner did not retain resumable session: %q", runner.ResumableSessionID())
 	}
+	if got := runner.ResumableResumeChallenge(); got != "challenge-resume-001" {
+		t.Fatalf("runner did not retain resume challenge: %q", got)
+	}
 }
 
 // TestRunnerResumableSessionLifecycle proves the resumable ID is stored only
@@ -53,13 +56,16 @@ func TestRunnerResumableSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.storeResumable("session-A")
+	runner.storeResumable("session-A", "challenge-A")
 	if got := runner.ResumableSessionID(); got != "session-A" {
 		t.Fatalf("resumable=%q want session-A", got)
 	}
-	runner.storeResumable("")
+	runner.storeResumable("", "")
 	if got := runner.ResumableSessionID(); got != "" {
 		t.Fatalf("resumable after clear=%q want empty", got)
+	}
+	if got := runner.ResumableResumeChallenge(); got != "" {
+		t.Fatalf("resume challenge after clear=%q want empty", got)
 	}
 }
 
@@ -79,7 +85,7 @@ func TestAgentResumeFallbackOnRejection(t *testing.T) {
 // session inherits the session ID and starts its outbound writer exactly at
 // the Gateway-advertised next sequence boundary.
 func TestNewResumedAgentSessionContinuesSequence(t *testing.T) {
-	sess := newResumedAgentSession(nil, Config{}, DefaultLimits(), quietAgentLogger(), "session-resume-002", contractv1.SequenceTracker{}, 1)
+	sess := newResumedAgentSession(nil, Config{}, DefaultLimits(), quietAgentLogger(), "session-resume-002", "challenge-resume-002", contractv1.SequenceTracker{}, 1)
 	if sess == nil {
 		t.Fatal("resumed session was not created")
 	}
@@ -89,5 +95,8 @@ func TestNewResumedAgentSessionContinuesSequence(t *testing.T) {
 	}
 	if got := sess.outbound.Load(); got != 1 {
 		t.Fatalf("resumed outbound=%d want 1 (next frame is 2)", got)
+	}
+	if sess.resumeChallenge != "challenge-resume-002" {
+		t.Fatalf("resumed session did not adopt the rotated resume challenge: %q", sess.resumeChallenge)
 	}
 }

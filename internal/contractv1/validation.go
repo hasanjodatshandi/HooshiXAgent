@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const MaxTrafficDeltaBytes = 1024 * 1024 * 1024
@@ -29,9 +30,12 @@ const (
 )
 
 var (
-	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
-	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
-	utcTimestampPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$`)
+	idPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+	tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,512}$`)
+	// utcTimestampPattern bounds every component to its calendar range and the
+	// fractional second to 9 digits (nanosecond precision). It matches the
+	// `timestamp` definition in contracts/v1 and the schema `maxLength` of 30.
+	utcTimestampPattern = regexp.MustCompile(`^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?Z$`)
 )
 
 type DeviceSessionAuthorization struct {
@@ -85,6 +89,14 @@ func ParseDeviceSessionAuthorizationRecord(data []byte) (DeviceSessionAuthorizat
 	if err := validateStrictJSONObject(data); err != nil {
 		return record, err
 	}
+	if err := rejectNullMembers(data); err != nil {
+		return record, err
+	}
+	// `disabled` is schema-required and its Go zero value (`false`) is a valid
+	// contract value, so an absent member would otherwise fail open.
+	if err := requirePresent(data, "disabled"); err != nil {
+		return record, err
+	}
 	if err := decodeStrict(data, &record); err != nil {
 		return record, err
 	}
@@ -100,9 +112,11 @@ func ParseDeviceSessionAuthorizationRecord(data []byte) (DeviceSessionAuthorizat
 			return record, err
 		}
 	}
-	publicKey, err := base64.RawURLEncoding.DecodeString(record.DevicePublicKey)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return record, errors.New("device_public_key must be 32 raw Ed25519 bytes encoded base64url without padding")
+	// The base64url field is canonical: the encoding must reproduce the
+	// transmitted string exactly, so a value with non-zero discarded trailing
+	// bits cannot alias a different public key encoding.
+	if err := validateRawBase64Length("device_public_key", record.DevicePublicKey, ed25519.PublicKeySize); err != nil {
+		return record, err
 	}
 	digest, err := hex.DecodeString(record.TokenSHA256)
 	if err != nil || len(digest) != 32 || record.TokenSHA256 != strings.ToLower(record.TokenSHA256) {
@@ -158,6 +172,14 @@ func ParseDeviceSessionAuthorization(data []byte, at time.Time) (DeviceSessionAu
 func ParseEndpointRouteAssignmentRecord(data []byte) (EndpointRouteAssignment, error) {
 	var record EndpointRouteAssignment
 	if err := validateStrictJSONObject(data); err != nil {
+		return record, err
+	}
+	if err := rejectNullMembers(data); err != nil {
+		return record, err
+	}
+	// `enabled` is schema-required and its Go zero value (`false`) is a valid
+	// contract value, so an absent member would otherwise fail open.
+	if err := requirePresent(data, "enabled"); err != nil {
 		return record, err
 	}
 	if err := decodeStrict(data, &record); err != nil {
@@ -227,6 +249,9 @@ func ParseRevocationSignal(data []byte) (RevocationSignal, error) {
 	if err := validateStrictJSONObject(data); err != nil {
 		return signal, err
 	}
+	if err := rejectNullMembers(data); err != nil {
+		return signal, err
+	}
 	if err := decodeStrict(data, &signal); err != nil {
 		return signal, err
 	}
@@ -239,10 +264,10 @@ func ParseRevocationSignal(data []byte) (RevocationSignal, error) {
 	if err := validateID("subject_id", signal.SubjectID); err != nil {
 		return signal, err
 	}
-	if !oneOf(signal.SubjectKind, "device_session_authorization", "endpoint_route_assignment", "device") {
+	if !oneOfStrings(signal.SubjectKind, "device_session_authorization", "endpoint_route_assignment", "device") {
 		return signal, errors.New("invalid revocation subject_kind")
 	}
-	if !oneOf(signal.ReasonCode, "disabled", "credential_revoked", "assignment_revoked", "security_hold", "expired") {
+	if !oneOfStrings(signal.ReasonCode, "disabled", "credential_revoked", "assignment_revoked", "security_hold", "expired") {
 		return signal, errors.New("invalid revocation reason_code")
 	}
 	if _, err := parseUTCTime("effective_at", signal.EffectiveAt); err != nil {
@@ -254,6 +279,9 @@ func ParseRevocationSignal(data []byte) (RevocationSignal, error) {
 func ParseGatewayStatusSignal(data []byte) (GatewayStatusSignal, error) {
 	var signal GatewayStatusSignal
 	if err := validateStrictJSONObject(data); err != nil {
+		return signal, err
+	}
+	if err := rejectNullMembers(data); err != nil {
 		return signal, err
 	}
 	if err := decodeStrict(data, &signal); err != nil {
@@ -278,10 +306,15 @@ func ParseGatewayStatusSignal(data []byte) (GatewayStatusSignal, error) {
 			return signal, err
 		}
 	}
+	// Both identifiers are optional but the schema pattern has a minimum
+	// length of 1, so an explicit empty string is malformed rather than absent.
+	if err := rejectEmptyMembers(data, "session_id", "endpoint_id"); err != nil {
+		return signal, err
+	}
 	if _, err := parseUTCTime("observed_at", signal.ObservedAt); err != nil {
 		return signal, err
 	}
-	if !oneOf(signal.Kind, "session_connected", "session_disconnected", "route_opened", "route_closed", "traffic_delta") {
+	if !oneOfStrings(signal.Kind, "session_connected", "session_disconnected", "route_opened", "route_closed", "traffic_delta") {
 		return signal, errors.New("invalid gateway status kind")
 	}
 	if err := validateTrafficCounter("bytes_from_public", signal.BytesFromPublic); err != nil {
@@ -329,6 +362,10 @@ type SessionReady struct {
 	SessionID                string `json:"session_id"`
 	HeartbeatIntervalSeconds int    `json:"heartbeat_interval_seconds"`
 	IdleTimeoutSeconds       int    `json:"idle_timeout_seconds"`
+	// ResumeChallenge is the Gateway-issued per-transport proof the Agent
+	// must bind into its next resume_session transcript. It is rotated on
+	// every accepted resume (see SessionResumed).
+	ResumeChallenge string `json:"resume_challenge,omitempty"`
 }
 
 type Heartbeat struct {
@@ -389,7 +426,9 @@ type SessionRevoked struct {
 // authenticated session after a transport interruption. The Agent proves
 // continued ownership of the device identity by signing the resume
 // transcript; the Gateway accepts only while the original session is still
-// live, the authorization is still valid, and no revocation applies.
+// live, the authorization is still valid, the Gateway-issued resume challenge
+// bound into the transcript matches, the proof is inside its acceptance
+// window, and no revocation applies.
 type ResumeSession struct {
 	ContractVersion int    `json:"contract_version"`
 	MessageType     string `json:"message_type"`
@@ -398,22 +437,37 @@ type ResumeSession struct {
 	TokenID         string `json:"token_id"`
 	SessionID       string `json:"session_id"`
 	ResumeNonce     string `json:"resume_nonce"`
-	Signature       string `json:"signature"`
+	// ResumeChallenge is the per-transport challenge the Gateway issued to
+	// this device over the transport being replaced (session_ready or
+	// session_resumed) and rotated on every accepted resume.
+	ResumeChallenge string `json:"resume_challenge"`
+	// IssuedAt is the Agent's RFC3339 UTC proof-generation time, which the
+	// Gateway compares against its own clock to enforce a short acceptance
+	// window.
+	IssuedAt  string `json:"issued_at"`
+	Signature string `json:"signature"`
 }
 
 // SessionResumed is the Gateway→Agent confirmation that the previously
 // authenticated session resumed without a full challenge handshake. The
-// outbound sequence continues from the pre-interruption value.
+// outbound sequence continues from the pre-interruption value, and
+// resume_challenge carries the fresh per-transport proof for the next resume.
 type SessionResumed struct {
 	ContractVersion int    `json:"contract_version"`
 	MessageType     string `json:"message_type"`
 	SessionID       string `json:"session_id"`
 	NextSequence    uint64 `json:"next_sequence"`
 	ResumedAt       string `json:"resumed_at"`
+	ResumeChallenge string `json:"resume_challenge"`
 }
 
 func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 	if err := validateStrictJSONObject(data); err != nil {
+		return err
+	}
+	// Fail closed before dispatch: no v1 control member is nullable, and
+	// encoding/json silently maps an explicit null to the Go zero value.
+	if err := rejectNullMembers(data); err != nil {
 		return err
 	}
 	var envelope struct {
@@ -473,6 +527,9 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := sessionScope(); err != nil {
 			return err
 		}
+		if err := requirePresent(data, "heartbeat_interval_seconds", "idle_timeout_seconds"); err != nil {
+			return err
+		}
 		var ready SessionReady
 		if err := decodeControlStrict(data, &ready); err != nil {
 			return err
@@ -482,6 +539,15 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		}
 		if err := validateID("session_id", ready.SessionID); err != nil {
 			return err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return err
+		}
+		if _, present := fields["resume_challenge"]; present {
+			if err := validateRawBase64Length("resume_challenge", ready.ResumeChallenge, 32); err != nil {
+				return err
+			}
 		}
 		if ready.HeartbeatIntervalSeconds < 5 || ready.HeartbeatIntervalSeconds > 60 {
 			return errors.New("heartbeat_interval_seconds outside 5..60")
@@ -520,6 +586,9 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := sessionScope(); err != nil {
 			return err
 		}
+		if err := requirePresent(data, "active_streams", "queued_frames", "reconnect_count"); err != nil {
+			return err
+		}
 		var report HealthReport
 		if err := decodeControlStrict(data, &report); err != nil {
 			return err
@@ -542,12 +611,18 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if report.ReconnectCount < 0 || report.ReconnectCount > MaxHealthReconnectCount {
 			return errors.New("health_report reconnect_count outside contract bounds")
 		}
+		// `last_reconnect_at` is optional but the schema requires a timestamp
+		// when it is present, so an explicit empty string is not a valid way to
+		// say "absent".
+		if err := rejectEmptyMembers(data, "last_reconnect_at"); err != nil {
+			return err
+		}
 		if report.LastReconnectAt != "" {
 			if _, err := parseUTCTime("last_reconnect_at", report.LastReconnectAt); err != nil {
 				return err
 			}
 		}
-		if len(report.AgentVersion) > 64 {
+		if utf8.RuneCountInString(report.AgentVersion) > 64 {
 			return errors.New("health_report agent_version outside contract length")
 		}
 		return nil
@@ -558,6 +633,9 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		var message StreamOpen
 		if err := decodeControlStrict(data, &message); err != nil {
 			return err
+		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_open" {
+			return errors.New("invalid stream_open envelope")
 		}
 		for name, value := range map[string]string{"endpoint_id": message.EndpointID, "assignment_id": message.AssignmentID, "local_endpoint_id": message.LocalEndpointID, "request_id": message.RequestID} {
 			if err := validateID(name, value); err != nil {
@@ -573,7 +651,10 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
-		if !oneOf(message.ReasonCode, "completed", "peer_closed", "cancelled") {
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_close" {
+			return errors.New("invalid stream_close envelope")
+		}
+		if !oneOfStrings(message.ReasonCode, "completed", "peer_closed", "cancelled") {
 			return errors.New("invalid stream_close reason_code")
 		}
 		return nil
@@ -581,14 +662,21 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := streamScope(); err != nil {
 			return err
 		}
+		if err := requirePresent(data, "retryable"); err != nil {
+			return err
+		}
 		var message StreamError
 		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
-		if !oneOf(message.Code, "local_target_unavailable", "route_revoked", "protocol_error", "resource_limit", "internal_error") {
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_error" {
+			return errors.New("invalid stream_error envelope")
+		}
+		if !oneOfStrings(message.Code, "local_target_unavailable", "route_revoked", "protocol_error", "resource_limit", "internal_error") {
 			return errors.New("invalid stream_error code")
 		}
-		if len(message.Message) == 0 || len(message.Message) > 256 {
+		// The schema maxLength counts code points, not UTF-8 bytes.
+		if runes := utf8.RuneCountInString(message.Message); runes == 0 || runes > 256 {
 			return errors.New("stream_error message outside contract length")
 		}
 		return nil
@@ -600,10 +688,13 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := decodeControlStrict(data, &message); err != nil {
 			return err
 		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "session_revoked" {
+			return errors.New("invalid session_revoked envelope")
+		}
 		if err := validateID("authorization_id", message.AuthorizationID); err != nil {
 			return err
 		}
-		if !oneOf(message.ReasonCode, "disabled", "credential_revoked", "security_hold", "expired") {
+		if !oneOfStrings(message.ReasonCode, "disabled", "credential_revoked", "security_hold", "expired") {
 			return errors.New("invalid session_revoked reason_code")
 		}
 		return nil
@@ -631,12 +722,21 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if err := validateRawBase64Length("resume_nonce", message.ResumeNonce, 32); err != nil {
 			return err
 		}
+		if err := validateRawBase64Length("resume_challenge", message.ResumeChallenge, 32); err != nil {
+			return err
+		}
+		if _, err := parseUTCTime("issued_at", message.IssuedAt); err != nil {
+			return err
+		}
 		if err := validateRawBase64Length("signature", message.Signature, ed25519.SignatureSize); err != nil {
 			return err
 		}
 		return nil
 	case "session_resumed":
 		if err := sessionScope(); err != nil {
+			return err
+		}
+		if err := requirePresent(data, "next_sequence", "resume_challenge"); err != nil {
 			return err
 		}
 		var message SessionResumed
@@ -655,24 +755,79 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		if _, err := parseUTCTime("resumed_at", message.ResumedAt); err != nil {
 			return err
 		}
+		if err := validateRawBase64Length("resume_challenge", message.ResumeChallenge, 32); err != nil {
+			return err
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown control message_type: %q", envelope.MessageType)
 	}
 }
 
-// ResumeTranscript is the exact signed byte sequence for resume_session.
-// Identifier patterns prohibit NUL bytes, so the delimiter is unambiguous.
-func ResumeTranscript(resume ResumeSession) []byte {
-	parts := []string{
-		"HXT1-RESUME",
-		resume.DeviceID,
-		resume.AuthorizationID,
-		resume.TokenID,
-		resume.SessionID,
-		resume.ResumeNonce,
+// transcriptFor joins the prefix and the components with the NUL delimiter.
+// Every component is re-checked against its contract pattern first: identifier
+// and nonce patterns prohibit NUL, so a validated component can never contain
+// the delimiter and the encoding is unambiguous without the caller having run
+// the decoder first. Inputs that violate their pattern yield a nil transcript,
+// which differs from every valid transcript and can never be mistaken for one.
+func transcriptFor(prefix string, components []string, validate func() error) ([]byte, error) {
+	if err := validate(); err != nil {
+		return nil, err
 	}
-	return []byte(strings.Join(parts, "\x00"))
+	return []byte(strings.Join(append([]string{prefix}, components...), "\x00")), nil
+}
+
+// ResumeTranscript is the exact signed byte sequence for resume_session. The
+// Gateway-issued per-transport resume challenge and the proof timestamp are
+// part of the transcript, so a proof is bound both to the Gateway's challenge
+// for that transport and to the moment the Agent produced it.
+func ResumeTranscript(resume ResumeSession) []byte {
+	transcript, err := transcriptFor("HXT1-RESUME",
+		[]string{resume.DeviceID, resume.AuthorizationID, resume.TokenID, resume.SessionID, resume.ResumeNonce, resume.ResumeChallenge, resume.IssuedAt},
+		func() error {
+			for _, check := range []struct {
+				name  string
+				value string
+			}{
+				{"device_id", resume.DeviceID},
+				{"authorization_id", resume.AuthorizationID},
+				{"token_id", resume.TokenID},
+				{"session_id", resume.SessionID},
+			} {
+				if err := validateID(check.name, check.value); err != nil {
+					return err
+				}
+			}
+			if err := validateRawBase64Length("resume_nonce", resume.ResumeNonce, 32); err != nil {
+				return err
+			}
+			if err := validateRawBase64Length("resume_challenge", resume.ResumeChallenge, 32); err != nil {
+				return err
+			}
+			_, err := parseUTCTime("issued_at", resume.IssuedAt)
+			return err
+		})
+	if err != nil {
+		return nil
+	}
+	return transcript
+}
+
+// ResumeIssuedAt parses the Agent's proof-generation timestamp. It is a
+// contract-validated RFC3339 UTC instant.
+func ResumeIssuedAt(resume ResumeSession) (time.Time, error) {
+	return parseUTCTime("issued_at", resume.IssuedAt)
+}
+
+// MatchResumeChallenge compares the resume challenge the Gateway issued for a
+// session identity with the one a resume proof presents, in constant time.
+// A challenge is never empty for a live session, so an empty expected value
+// can never match.
+func MatchResumeChallenge(expected, presented string) bool {
+	if expected == "" || len(expected) != len(presented) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(presented)) == 1
 }
 
 // VerifyResumeSignature verifies the resume_session signature against the
@@ -686,7 +841,11 @@ func VerifyResumeSignature(publicKeyBase64 string, resume ResumeSession) error {
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		return errors.New("invalid Ed25519 signature")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), ResumeTranscript(resume), signature) {
+	transcript := ResumeTranscript(resume)
+	if len(transcript) == 0 {
+		return errors.New("resume transcript requires contract-valid inputs")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), transcript, signature) {
 		return errors.New("resume signature verification failed")
 	}
 	return nil
@@ -763,23 +922,44 @@ func VerifyClientAuthSignature(publicKeyBase64 string, hello ClientHello, challe
 	if auth.SessionID != challenge.SessionID {
 		return errors.New("client_auth session_id does not match challenge")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(publicKey), AuthTranscript(hello, challenge), signature) {
+	transcript := AuthTranscript(hello, challenge)
+	if len(transcript) == 0 {
+		return errors.New("authentication transcript requires contract-valid inputs")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), transcript, signature) {
 		return errors.New("Ed25519 authentication signature verification failed")
 	}
 	return nil
 }
 
+// AuthTranscript is the exact signed byte sequence for client_auth. See
+// transcriptFor for the NUL-delimiter safety argument.
 func AuthTranscript(hello ClientHello, challenge ServerChallenge) []byte {
-	parts := []string{
-		"HXT1-AUTH",
-		challenge.SessionID,
-		hello.DeviceID,
-		hello.AuthorizationID,
-		hello.TokenID,
-		hello.ClientNonce,
-		challenge.ServerNonce,
+	transcript, err := transcriptFor("HXT1-AUTH",
+		[]string{challenge.SessionID, hello.DeviceID, hello.AuthorizationID, hello.TokenID, hello.ClientNonce, challenge.ServerNonce},
+		func() error {
+			for _, check := range []struct {
+				name  string
+				value string
+			}{
+				{"session_id", challenge.SessionID},
+				{"device_id", hello.DeviceID},
+				{"authorization_id", hello.AuthorizationID},
+				{"token_id", hello.TokenID},
+			} {
+				if err := validateID(check.name, check.value); err != nil {
+					return err
+				}
+			}
+			if err := validateRawBase64Length("client_nonce", hello.ClientNonce, 32); err != nil {
+				return err
+			}
+			return validateRawBase64Length("server_nonce", challenge.ServerNonce, 32)
+		})
+	if err != nil {
+		return nil
 	}
-	return []byte(strings.Join(parts, "\x00"))
+	return transcript
 }
 
 func MatchSessionToken(record DeviceSessionAuthorization, token string) bool {
@@ -861,7 +1041,13 @@ func validateHostname(value string) error {
 			}
 		}
 	}
-	for _, r := range labels[len(labels)-1] {
+	// The schema requires a top-level label of [A-Za-z]{2,63}; a single-letter
+	// TLD is not accepted by this contract.
+	top := labels[len(labels)-1]
+	if len(top) < 2 || len(top) > 63 {
+		return errors.New("public_hostname top-level label must be 2..63 ASCII letters")
+	}
+	for _, r := range top {
 		if !unicode.IsLetter(r) || r > unicode.MaxASCII {
 			return errors.New("public_hostname top-level label must contain letters only")
 		}
@@ -879,7 +1065,7 @@ func validateTrafficCounter(name string, value *int64) error {
 	return nil
 }
 
-func oneOf(value string, allowed ...string) bool {
+func oneOfStrings(value string, allowed ...string) bool {
 	for _, candidate := range allowed {
 		if value == candidate {
 			return true

@@ -3,6 +3,10 @@
 Status: Accepted
 Date: 2026-08-29
 
+> **Superseded in part by ADR-0014 (2026-09-16).** The Windows Agent persistence and secret trust clauses of this ADR are superseded by `docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md`: the user-scoped Windows default model, the claim that the Windows DPAPI trust boundary is preserved unchanged, the rejected "Machine-scope Windows DPAPI plus LocalSystem service" alternative, the `Agent persistence specs do not cross the Windows DPAPI CurrentUser boundary` fitness function, and the future system-wide Windows service compatibility sentence. Everything else in this ADR — Linux/macOS packaging, Gateway Docker Compose deployment, Caddy/TLS trust, observability, and release/update trust — remains in force. ADR-0014 lists the exact superseded clauses. Status remains `Accepted` because this ADR is superseded only in part and the remainder is still current architecture authority.
+>
+> This notice is a supersession pointer only. All text below is preserved unchanged as historical decision provenance; see `docs/governance/authority-and-adr-governance.md` section 2.
+
 ## Context
 
 AG-7 must turn the already accepted Agent/Gateway runtime into installable and operable packages without changing the external Control Panel boundary or pulling AG-8 final release-hardening work forward.

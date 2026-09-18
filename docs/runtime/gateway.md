@@ -24,6 +24,8 @@ The executable requires all of:
 -tls-cert <certificate.pem>
 -tls-key <private-key.pem>
 -metadata-dir <read-only-external-metadata-root>
+-ops-listen <loopback-host:port>   # administrative endpoints, default 127.0.0.1:9090, empty disables
+-trusted-proxy <ip-or-cidr>        # repeatable; public edge allowed to supply the client address
 ```
 
 There is no plaintext production startup mode. The HTTP server enforces TLS >= 1.2.
@@ -97,9 +99,18 @@ Static mode retains the R-7 strict typed snapshot loader and use-time validity c
 
 ## Routes
 
-- `GET /healthz` — process health only; never authorization authority.
-- `/agent/v1/connect` — protocol-v1 WebSocket upgrade for authenticated Agent sessions.
-- all other paths — public HTTP ingress resolved by the request Host against validated external route metadata.
+Public listener (`-listen`):
+
+- `/agent/v1/connect` — protocol-v1 WebSocket upgrade for authenticated Agent sessions;
+- all other paths — public HTTP ingress resolved by the request Host against validated external route metadata. There are no Gateway-local paths on the public listener, so a tenant's own `/healthz` reaches the tenant application; the edge separately refuses `/readyz` and `/metrics` (see below).
+
+Administrative listener (`-ops-listen`, default `127.0.0.1:9090`, empty disables it):
+
+- `GET /healthz` — process health only; never authorization authority;
+- `GET /readyz` — readiness (draining state and external metadata usability);
+- `GET /metrics` — low-cardinality aggregate metrics.
+
+The administrative listener is plaintext and MUST NOT be publicly reachable: it is loopback-bound by default and is not published by the shipped deployment. Operational endpoints are deliberately not registered on the public listener, because a more specific mux pattern such as `GET /healthz` would win over the ingress pattern for *every* Host, so a tenant-hosted `/healthz` could never reach the tenant application.
 
 The public request cannot provide a raw Agent-local target. The Gateway sends only the external `local_endpoint_id` to the Agent.
 
@@ -123,8 +134,12 @@ request headers                      32 KiB
 status queue                         256 signals
 status export timeout                  2 s
 handshake timeout                     10 s
-read timeout                          15 s
-write timeout                         10 s
+request header timeout                15 s
+public body idle read timeout         15 s
+public body idle write timeout        10 s
+response-phase inactivity deadline    45 s
+resume proof acceptance window         60 s
+pre-auth connections/burst per peer      16/s / 32
 heartbeat interval                    15 s
 idle timeout                          45 s
 shutdown timeout                      10 s
@@ -144,7 +159,9 @@ The Gateway:
 6. registers one current in-memory session per device;
 7. atomically installs the successfully authenticated reconnect as the current device session, releases the global session-registry lock, and only then closes the replaced WebSocket so a slow close handshake cannot stall unrelated session lookup/registration;
 8. arms a local deadline for the establishing authorization `expires_at`, immediately removes an expired/invalid session from routing, and independently revalidates authorization freshness/revocation on each bounded heartbeat;
-9. enforces protocol sequence replay/order checks, heartbeat and resource bounds.
+9. issues a per-transport resume challenge in `session_ready` that a later `resume_session` must bind into its signature, rotates it on every accepted resume, and enforces a short proof-acceptance window against the Gateway clock; a proof that fails any check is rejected as *resume unavailable* (close `1013`) so the Agent falls back to a full `client_hello` handshake;
+10. enforces protocol sequence replay/order checks, heartbeat and resource bounds, and detaches a terminal session from device routing synchronously instead of waiting for the peer's close handshake;
+11. emits the WebSocket close codes fixed by the tunnel protocol close-code table (`1000`, `1001`, `1002`, `1007`, `1008`, `1009`, `1011`, `1013`).
 
 Invalid TLS, token, signature, authorization freshness, protocol framing, replay/order, stream state or resource usage fails closed. Expired or effectively revoked session authorization is signaled with `session_revoked` before closure when the reason is authoritative; transient/unclassified metadata failures close the session without falsely asserting permanent revocation, allowing the Agent reconnect policy to retry safely.
 
@@ -178,7 +195,9 @@ The Gateway-specific runtime check remains in place. Integrated real Agent↔Gat
 
 ## RA-1 Gateway drain and process shutdown
 
-On `SIGINT`/`SIGTERM`, the Gateway enters draining state before HTTP server shutdown. Draining makes `/readyz` fail with `503` and rejects new Agent handshakes and new public ingress with `503`, while `/healthz` continues to represent process liveness. The HTTP server is then given the existing bounded `shutdown timeout` to finish ordinary in-flight HTTP requests. Because Go HTTP shutdown does not own upgraded WebSocket connections, the Gateway separately snapshots and removes current Agent sessions from routing and concurrently sends WebSocket `GoingAway` closes outside the global session-registry lock. If graceful WebSocket close does not finish before the same shutdown context expires, the remaining connections are force-closed. Active stream waiters are failed with a shutdown error before session close. No shutdown timeout/default capacity value is increased by RA-1.
+On `SIGINT`/`SIGTERM`, the Gateway enters draining state before HTTP server shutdown. Draining makes `/readyz` fail with `503`, while `/healthz` continues to represent process liveness. Draining also rejects new Agent handshakes and new public ingress with `503`, but only for requests that already have an established connection to answer on (a keep-alive request on a reused connection): the listeners are closed immediately afterwards, so a request that arrives on a *new* connection is never answered at all and the client observes a TCP connection refusal (for public TLS ingress, a failed TLS handshake) instead of a `503`.
+
+The HTTP listeners are then given the existing bounded `shutdown timeout` to finish ordinary in-flight HTTP requests. Because Go HTTP shutdown does not own upgraded WebSocket connections, the Gateway separately snapshots and removes current Agent sessions from routing and concurrently sends WebSocket `GoingAway` closes outside the global session-registry lock. The tunnel drain runs in its own fresh bounded `shutdown timeout` window instead of inheriting the listener window: a single in-flight public request may legitimately consume the entire listener window (it is waiting on its tunneled response), which would otherwise leave the drain with an already-expired context and report a completed drain as a failure. Active stream waiters are failed with a shutdown error before session close, and if graceful WebSocket close does not finish before that tunnel-drain window expires, the remaining connections are force-closed. Total `SIGINT`/`SIGTERM` shutdown time is therefore bounded by at most two `shutdown timeout` windows; no shutdown timeout/default capacity value is increased by RA-1.
 
 The real Agent-to-Gateway E2E restart check now requires the Gateway process to exit cleanly after its interrupt within the harness deadline; the test no longer silently treats a forced kill as successful graceful shutdown. The already-running Agent must then reconnect to the restarted Gateway and restore the route.
 
@@ -186,13 +205,17 @@ The real Agent-to-Gateway E2E restart check now requires the Gateway process to 
 
 The initial deployment package is now `deploy/gateway/`: Docker Compose runs only the Tunnel Gateway and Caddy public edge. Caddy owns public TLS and forwards to the Gateway over certificate-verified HTTPS using a deployment-local CA; the Gateway itself remains TLS-only and is not published directly on a host port.
 
-The internal Gateway listener also exposes `/readyz` and low-cardinality aggregate `/metrics` in addition to `/healthz`. Caddy blocks `/readyz` and `/metrics` on the public edge. Packaging, diagnostics, certificate bootstrap and release provenance are documented in `docs/runtime/packaging-and-operations.md`.
+The Gateway exposes `/healthz`, `/readyz` and low-cardinality aggregate `/metrics` on a separate administrative listener (`-ops-listen`, loopback inside the container) and never on the public listener. Caddy additionally refuses `/readyz` and `/metrics` on the public edge as defence in depth. It deliberately does **not** refuse `/healthz`, because `/healthz` is one of the most common tenant health paths and the separate listener already removed the Gateway-local shadowing; an edge refusal would only make a tenant's own `/healthz` unreachable. Packaging, diagnostics, certificate bootstrap and release provenance are documented in `docs/runtime/packaging-and-operations.md`.
 
 ## R-3 bounded resource model
 
-Gateway resource safety uses both count and byte budgets. The default Agent→Gateway queue limits are 2 MiB per stream, 8 MiB per authenticated session and 32 MiB globally; a payload must reserve all applicable budgets before it is copied into a queue. Public request headers and bodies are now written directly into bounded 32 KiB tunnel chunks; the Gateway no longer retains the full accepted request before forwarding. The global ingress byte budget is reserved only while a chunk is synchronously forwarded, and public ingress remains capped at 32 concurrent requests. Agent handshakes and public ingress also use bounded global token-bucket rates (32/s burst 64 and 256/s burst 512 respectively). Existing session/stream/frame/request limits remain in force.
+Gateway resource safety uses both count and byte budgets. The default Agent→Gateway queue limits are 2 MiB per stream, 8 MiB per authenticated session and 32 MiB globally; a payload must reserve all applicable budgets before it is copied into a queue. Public request headers and bodies are now written directly into bounded 32 KiB tunnel chunks; the Gateway no longer retains the full accepted request before forwarding. The global ingress byte budget is reserved only while a chunk is synchronously forwarded, and public ingress remains capped at 32 concurrent requests. Consequence for the budget's effective ceiling: because each reservation is released as soon as its chunk has been written, concurrent reservations cannot exceed `MaxIngressInFlight` chunks of at most 32 KiB — about 1 MiB with the shipped defaults, well below the configured 32 MiB. The configured value is the hard upper bound and the admission check, not a steady-state usage claim. Agent handshakes and public ingress also use bounded global token-bucket rates (32/s burst 64 and 256/s burst 512 respectively). Existing session/stream/frame/request limits remain in force.
 
 `/metrics` exposes only aggregate low-cardinality resource gauges/counters for queued bytes, ingress bytes/requests and rejection totals. Device IDs, endpoint IDs and hostnames are never metric labels. The Docker Compose Gateway memory limit remains 256 MiB; authenticated Agent sessions are capped at 64 and the two explicitly retained application payload budgets total 64 MiB and are not preallocated, leaving headroom for transient protocol frames, active response chunks, Go/TLS/WebSocket/runtime overhead and metadata. This is a safety envelope, not a throughput/capacity claim.
+
+## Public listener timeouts
+
+The public listener applies a header-phase deadline (`ReadHeaderTimeout`) and then bounds each body chunk individually: request-body reads carry a fresh idle read deadline, response writes carry a fresh idle write deadline, and the response phase has its own inactivity deadline. The idle read deadline is armed only while request-body bytes are actually read off the wire: a request that carries no body is not wrapped at all, because Go's server starts its background read as soon as a bodyless request's handler begins, so a deadline armed for a body that does not exist would fire during the response phase and abort a healthy tunneled response. `http.Server.ReadTimeout`/`WriteTimeout` are deliberately *not* set, because they are whole-message deadlines: with the shipped limits they would require roughly 550 KB/s for an 8 MiB request body and 800 KB/s for a 32 MiB response, silently truncating slower but progressing transfers. A client or Agent that stops making progress is still bounded by the idle deadlines and the response-phase deadline.
 
 ## RA-2 admission-control and DoS isolation
 
@@ -200,11 +223,27 @@ Public ingress now resolves and validates the external Host route and confirms t
 
 For valid online routes, the existing global hard ceilings remain authoritative and unchanged. RA-2 adds internal low-cardinality route- and device-key admission state using only validated external assignment/device IDs. An uncontended route/device may still use the full configured global ingress ceiling. Once another valid key is observed contending, the noisy key is temporarily constrained to a derived fair share, so it cannot immediately reacquire all released concurrency or all refilled rate capacity; the neighboring route/device can make progress on retry. This adaptive state does not add user-controlled metric labels and all fairness rejections continue to roll into the aggregate ingress rejection counter.
 
+Pre-authentication Agent connections are throttled per trusted peer *before* a pending-handshake slot is taken (`16/s` burst `32` by default, keyed on the trusted peer address so one peer cannot cycle the bounded slots). A rejected pre-authentication connection consumes no pending-handshake slot, and the authenticated handshake rate bucket is never spent by unauthenticated traffic.
+
 Agent handshake admission keeps the existing `64` global pending-handshake ceiling and `32/s` burst-`64` validated-handshake rate. The global rate token is now consumed only after a structurally valid `client_hello` resolves to current authorization metadata and its session token matches. The initial unauthenticated WebSocket preface has a bounded sub-deadline (one quarter of the existing handshake timeout, capped at 2 seconds) so silent pre-auth sockets release pending-handshake slots well before the full authentication timeout. After metadata/token validation, a single device is limited to a derived three-quarter share of pending/rate capacity, reserving global headroom for other authorized devices. The original global ceilings remain unchanged and still fail closed.
 
 ## R-4 streaming public ingress
 
 The Gateway preserves the existing HTTP/1 request wire semantics but no longer serializes an accepted public request into a full in-memory buffer. `http.Request.Write` feeds a bounded tunnel writer that fragments every write into at most 32 KiB data chunks, reserves the R-3 global ingress byte budget only for the chunk currently being forwarded, and releases that reservation immediately after the WebSocket write completes. The request context is checked between chunks, so public cancellation/timeout stops forwarding and normal stream teardown releases the remaining resources. `bytes_from_public` continues to count the exact serialized request bytes actually sent as tunnel data, including request line/headers/framing as before. The 8 MiB accepted request-body limit and server header limits remain unchanged.
+
+### Response-phase deadline and cancellation
+
+Both directions of a tunneled exchange are cancellation-aware, and the tunneled-response phase is separately bounded. The request-forwarding phase is bounded per 32 KiB chunk by the existing write timeout; the response phase (tunneled response headers plus body) has an explicit *inactivity* deadline that every byte forwarded in either direction re-arms. When it fires, the stream is failed with `stream_error: resource_limit`, the public request is answered `504`, and the bounded public-ingress slot is released. Because the deadline is inactivity-based rather than total-duration, it adds no throughput floor: a progressing transfer of any size is never cut off. The ingress handler also owns the stream context and cancels it when it returns, so a public cancellation (or the deadline) detaches the stream without waiting for the Agent — an Agent that keeps answering heartbeats but never completes a response cannot hold one of the bounded global ingress slots.
+
+## Public ingress request sanitisation
+
+The tunneled request is constructed by the Gateway rather than forwarded as the client's bytes:
+
+- hop-by-hop headers are removed (including those nominated by `Connection`);
+- every client-supplied forwarding header (`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Real-IP`) is discarded;
+- `Host` is rewritten to the canonical external hostname routing actually matched (lower-case, no port, no trailing dot);
+- `X-Forwarded-For` and `X-Real-IP` are set from the *trusted peer only* — the immediate peer address, or, when that peer is inside the configured `-trusted-proxy` set, the last `X-Forwarded-For` hop the edge appended. With no configured trusted proxy the Gateway never trusts a client-supplied forwarding header, so an internet client cannot spoof the client address a tenant application sees;
+- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` and `Forwarded` are set from the Gateway's own view of the request.
 
 ## R-5 HTTP proxy correctness and stream isolation
 

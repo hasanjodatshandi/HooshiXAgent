@@ -29,6 +29,26 @@ if bad:
     raise SystemExit(1)
 PY
 
+# Every module the build links must be disclosed in THIRD_PARTY_NOTICES. go.mod
+# is the authority, so this check is derived from `go list -m all` rather than
+# from a hand-maintained list that would silently fall behind.
+python3 - <<'PY'
+from pathlib import Path
+import subprocess, sys
+
+notices = Path('THIRD_PARTY_NOTICES').read_text(encoding='utf-8')
+listing = subprocess.run(['go', 'list', '-m', 'all'], check=True, capture_output=True, text=True).stdout
+modules = [line.split()[0] for line in listing.splitlines() if line.strip()]
+if len(modules) < 2:
+    raise SystemExit('go list -m all reported no dependencies to check')
+required = modules[1:]  # modules[0] is this module itself
+missing = [module for module in required if module not in notices]
+if missing:
+    print('THIRD_PARTY_NOTICES is missing module dependencies:', *missing, sep='\n', file=sys.stderr)
+    raise SystemExit(1)
+print(f'THIRD_PARTY_NOTICES covers {len(required)} Go module dependencies')
+PY
+
 # External runtime/build image references must retain tag readability plus immutable digest identity.
 grep -Eq '^FROM golang:1\.27\.0-alpine3\.24@sha256:[0-9a-f]{64} AS build$' deploy/gateway/Dockerfile
 grep -Eq '^FROM alpine:3\.24\.1@sha256:[0-9a-f]{64}$' deploy/gateway/Dockerfile
@@ -97,6 +117,52 @@ if 'contents: write' not in publish or "if: github.event_name == 'push'" not in 
     raise SystemExit('publish job is not tag-push-only with contents write')
 if any(token in publish for token in ['id-token: write','attestations: write','artifact-metadata: write']):
     raise SystemExit('publish job contains attestation minting privileges')
+PY
+
+# The supported Windows distribution is HooshiXAgent-Setup.exe (ADR-0014), and it
+# must be published exactly like every other artifact: built from the verified
+# commit by a Windows job, tied to the released Agent binary, included in the
+# release checksum manifest (which is what puts it inside the SBOM scan and the
+# Artifact Attestations), and required by attest/publish so an installer that
+# cannot be built blocks publication instead of silently shipping without it.
+python3 - <<'PY'
+from pathlib import Path
+import sys
+
+workflow = Path('.github/workflows/release.yml').read_text()
+required = [
+    'windows-setup:',
+    'runs-on: windows-latest',
+    'scripts/build-setup.ps1',
+    'HOOSHIX_RELEASE_SHA256SUMS',
+    'HOOSHIX_VERSION',
+    'dist/HooshiXAgent-Setup.exe',
+    'release-setup-${{ needs.policy.outputs.release_sha }}',
+]
+for item in required:
+    if item not in workflow:
+        raise SystemExit(f'release workflow does not build, upload or verify the supported Windows installer: {item}')
+
+setup_job = workflow.split('\n  windows-setup:', 1)[1].split('\n  finalize:', 1)[0]
+if '-File scripts/build-setup.ps1' not in setup_job:
+    raise SystemExit('the Windows installer job does not invoke scripts/build-setup.ps1')
+
+finalize_job = workflow.split('\n  finalize:', 1)[1].split('\n  attest:', 1)[0]
+if 'supply-chain-artifacts.sh' not in finalize_job:
+    raise SystemExit('the finalize job does not run the SBOM/vulnerability scan over the complete candidate')
+
+for job, body in (
+    ('attest', workflow.split('\n  attest:', 1)[1].split('\n  publish:', 1)[0]),
+    ('publish', workflow.split('\n  publish:', 1)[1]),
+):
+    needs_block = body.split('steps:', 1)[0]
+    if 'windows-setup' not in needs_block:
+        raise SystemExit(f'the {job} job does not depend on the Windows installer job, so an unbuildable installer would not block publication')
+
+scan = Path('scripts/release/supply-chain-artifacts.sh').read_text()
+if "-name '*.exe'" not in scan:
+    raise SystemExit('the SBOM/vulnerability scan does not cover the .exe release artifact')
+print('release workflow publishes the supported Windows installer under the same checksum/SBOM/attestation rules as the archives')
 PY
 
 release_dir="$work/release"

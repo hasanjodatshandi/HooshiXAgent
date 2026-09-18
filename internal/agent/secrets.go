@@ -141,3 +141,13 @@ func decodeSecretState(data []byte) (SecretState, error) {
 	}
 	return state, nil
 }
+
+// zeroBytes overwrites a plaintext secret buffer in place. Both secret stores
+// encode the seed and session token to a byte slice before they hand it to the
+// platform writer, and that slice must not be left readable in the heap (or in
+// a core dump) after the write.
+func zeroBytes(data []byte) {
+	for index := range data {
+		data[index] = 0
+	}
+}

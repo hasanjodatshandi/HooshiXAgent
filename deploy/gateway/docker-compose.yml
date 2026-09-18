@@ -8,6 +8,17 @@ services:
     command:
       - -listen
       - 0.0.0.0:8443
+      # Gateway-local liveness/readiness/metrics are served on a separate
+      # administrative listener. It is bound to loopback inside the container
+      # (the container healthcheck below uses it) and is never published, so it
+      # can never shadow a tenant route.
+      - -ops-listen
+      - 127.0.0.1:9090
+      # The Caddy edge terminates public TLS and supplies the client address.
+      # Only this trusted peer set may contribute an X-Forwarded-For hop; every
+      # other client-supplied forwarding header is discarded by the Gateway.
+      - -trusted-proxy
+      - ${HOOSHIX_TRUSTED_PROXY:-172.16.0.0/12}
       - -tls-cert
       - /run/hooshix-tls/gateway.crt
       - -tls-key
@@ -42,6 +53,10 @@ services:
       - "256"
       - -ingress-burst
       - "512"
+      - -preauth-rate
+      - "16"
+      - -preauth-burst
+      - "32"
     volumes:
       - type: bind
         source: ${HOOSHIX_METADATA_DIR:-./runtime/metadata}
@@ -82,7 +97,7 @@ services:
     mem_limit: 256m
     cpus: 1.0
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--cacert", "/run/hooshix-tls/ca.crt", "https://gateway:8443/readyz"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:9090/readyz"]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -140,10 +155,27 @@ services:
     mem_limit: 256m
     cpus: 1.0
     healthcheck:
+      # Verify the public certificate instead of skipping verification. Two
+      # roots can be in play: the real ACME chain (production dynamic mode),
+      # already trusted through the image's ca-certificates bundle, and Caddy's
+      # own internal CA root (static compatibility / localhost, and the CI
+      # fixtures). Concatenating both when the internal root exists covers every
+      # mode without ever falling back to an unverified handshake.
+      #
+      # This only asserts that the edge is up and terminating TLS for an HTTP
+      # request: any status code (200/404/502/...) proves an HTTP response came
+      # back, so --fail is deliberately not used. The neutral "/" probe path is
+      # intentional: the edge itself refuses /readyz, and /healthz must stay a
+      # tenant route, so neither is a valid edge-liveness signal. %{http_code}
+      # is 000 exactly when no HTTP response arrived (TLS/connection failure),
+      # which is the only condition reported unhealthy.
       test:
         - CMD-SHELL
         - >-
-          curl --fail --silent --show-error --insecure --resolve "$${HOOSHIX_PUBLIC_HOST}:443:127.0.0.1" "https://$${HOOSHIX_PUBLIC_HOST}/healthz" >/dev/null
+          cat /etc/ssl/certs/ca-certificates.crt > /tmp/hooshix-healthca.pem 2>/dev/null;
+          cat /data/caddy/pki/authorities/local/root.crt >> /tmp/hooshix-healthca.pem 2>/dev/null;
+          code="$$(curl --silent --show-error --cacert /tmp/hooshix-healthca.pem --resolve "$${HOOSHIX_PUBLIC_HOST}:443:127.0.0.1" --output /dev/null --write-out '%{http_code}' "https://$${HOOSHIX_PUBLIC_HOST}/")";
+          case "$$code" in [1-5][0-9][0-9]) exit 0 ;; *) exit 1 ;; esac
       interval: 10s
       timeout: 3s
       retries: 6

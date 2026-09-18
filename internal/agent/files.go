@@ -68,7 +68,7 @@ func ensureStateMarker(stateDir string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == configLockName || name == "config.json" || name == "secrets.json" || name == "secrets.dpapi" || name == "status.json" || name == pairingCapabilityFile || name == "token.txt" || strings.HasPrefix(name, ".tmp-hooshix-") {
+		if name == configLockName || name == "config.json" || name == "secrets.json" || name == "secrets.dpapi" || name == "status.json" || name == pairingCapabilityFile || name == pairingEndpointFile || name == "token.txt" || strings.HasPrefix(name, ".tmp-hooshix-") {
 			continue
 		}
 		return fmt.Errorf("refusing unowned non-empty Agent state directory: unexpected entry %q", name)
@@ -129,6 +129,13 @@ func writePrivateFile(stateDir, path string, data []byte) error {
 	}
 	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("replace private file: %w", err)
+	}
+	// Flush the directory entry so the rename survives a power loss outside a
+	// transaction. On Windows syncDirectory is a documented no-op (NTFS has no
+	// fsync-on-directory), but the file contents themselves are already flushed
+	// by the temp.Sync above.
+	if err := syncDirectory(stateDir); err != nil {
+		return fmt.Errorf("sync private state directory: %w", err)
 	}
 	if err := protectPrivateStateFile(path); err != nil {
 		return fmt.Errorf("protect private file: %w", err)

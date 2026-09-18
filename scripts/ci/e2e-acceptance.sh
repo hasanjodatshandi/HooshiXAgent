@@ -22,6 +22,6 @@ go build -o "$agent_binary" ./cmd/agent
 
 HOOSHIX_GATEWAY_BINARY="$gateway_binary" \
 HOOSHIX_AGENT_BINARY="$agent_binary" \
-  fail_if_no_tests ./tests/integration -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives'
+  fail_if_no_tests ./tests/integration -run 'TestAgentGatewayEndToEndAcceptance|TestAgentGatewayLargeRequestStreaming|TestAgentGatewayAuthorizationExpiryFailClosed|TestAgentGatewayEndToEndSecurityNegatives|TestRealTunnelHEADAndSSE|TestRealAgentRecoversAfterLongMetadataOutage'
 
 echo "Agent↔Gateway E2E Acceptance: PASSED — real Agent/Gateway binaries, validated external contract metadata, stable test hostname, public tunnel path, restart/reconnect recovery, large-body streaming, authorization-expiry fail-closed behavior, offline/error behavior and security negatives were exercised."

@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "event_id": "status-traffic-002",
+  "observed_at": "2026-08-29T12:05:00Z",
+  "kind": "traffic_delta",
+  "device_id": "device-001",
+  "endpoint_id": "endpoint-001"
+}

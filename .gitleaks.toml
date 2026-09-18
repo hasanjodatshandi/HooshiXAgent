@@ -12,3 +12,10 @@ id = "generic-api-key"
   regexTarget = "line"
   paths = ['''^contracts/v1/fixtures/(external|invalid)/device-session-authorization\..*\.json$''']
   regexes = ['''"token_sha256"\s*:\s*"fceb6a20fda55e114a7a11d0ee3ad98191d517c27f42591f2b16421f57a063f8"''']
+
+  [[rules.allowlists]]
+  description = "The same synthetic fixture digest in its exact Go test declaration."
+  condition = "AND"
+  regexTarget = "line"
+  paths = ['''(^|[\\/])internal[\\/]contractv1[\\/]contract_agreement_test\.go$''']
+  regexes = ['''const tokenSHA256Fixture = "fceb6a20fda55e114a7a11d0ee3ad98191d517c27f42591f2b16421f57a063f8"''']

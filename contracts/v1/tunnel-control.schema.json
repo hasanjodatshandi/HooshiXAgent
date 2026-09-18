@@ -39,35 +39,23 @@
     "timestamp": {
       "type": "string",
       "format": "date-time",
-      "maxLength": 35,
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
-    },
-    "base": {
-      "type": "object",
-      "required": ["contract_version", "message_type"],
-      "properties": {
-        "contract_version": { "const": 1 },
-        "message_type": { "type": "string" }
-      }
+      "maxLength": 30,
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?Z$",
+      "description": "RFC3339 UTC with the literal Z suffix, bounded component ranges, and at most 9 fractional digits (nanosecond precision). Maximum length 30."
     },
     "client_hello": {
-      "allOf": [
-        { "$ref": "#/$defs/base" },
-        {
-          "type": "object",
-          "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_token", "client_nonce"],
-          "properties": {
-            "contract_version": { "const": 1 },
-            "message_type": { "const": "client_hello" },
-            "device_id": { "$ref": "#/$defs/id" },
-            "authorization_id": { "$ref": "#/$defs/id" },
-            "token_id": { "$ref": "#/$defs/id" },
-            "session_token": { "type": "string", "minLength": 32, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" },
-            "client_nonce": { "$ref": "#/$defs/nonce32" }
-          },
-          "additionalProperties": false
-        }
-      ]
+      "type": "object",
+      "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_token", "client_nonce"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "client_hello" },
+        "device_id": { "$ref": "#/$defs/id" },
+        "authorization_id": { "$ref": "#/$defs/id" },
+        "token_id": { "$ref": "#/$defs/id" },
+        "session_token": { "type": "string", "minLength": 32, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" },
+        "client_nonce": { "$ref": "#/$defs/nonce32" }
+      },
+      "additionalProperties": false
     },
     "server_challenge": {
       "type": "object",
@@ -93,6 +81,7 @@
       "additionalProperties": false
     },
     "session_ready": {
+      "$comment": "Cross-field contract rule: idle_timeout_seconds >= 2 * heartbeat_interval_seconds. JSON Schema 2020-12 cannot compare two instance values arithmetically, so the rule is enumerated exactly over heartbeat_interval_seconds 8..60; the values 5..7 are already dominated by the idle_timeout_seconds minimum of 15.",
       "type": "object",
       "required": ["contract_version", "message_type", "session_id", "heartbeat_interval_seconds", "idle_timeout_seconds"],
       "properties": {
@@ -100,9 +89,65 @@
         "message_type": { "const": "session_ready" },
         "session_id": { "$ref": "#/$defs/id" },
         "heartbeat_interval_seconds": { "type": "integer", "minimum": 5, "maximum": 60 },
-        "idle_timeout_seconds": { "type": "integer", "minimum": 15, "maximum": 300 }
+        "idle_timeout_seconds": { "type": "integer", "minimum": 15, "maximum": 300 },
+        "resume_challenge": { "$ref": "#/$defs/nonce32" }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 8 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 16 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 9 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 18 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 10 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 20 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 11 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 22 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 12 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 24 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 13 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 26 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 14 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 28 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 15 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 30 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 16 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 32 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 17 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 34 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 18 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 36 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 19 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 38 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 20 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 40 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 21 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 42 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 22 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 44 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 23 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 46 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 24 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 48 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 25 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 50 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 26 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 52 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 27 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 54 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 28 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 56 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 29 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 58 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 30 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 60 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 31 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 62 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 32 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 64 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 33 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 66 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 34 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 68 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 35 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 70 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 36 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 72 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 37 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 74 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 38 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 76 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 39 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 78 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 40 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 80 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 41 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 82 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 42 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 84 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 43 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 86 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 44 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 88 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 45 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 90 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 46 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 92 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 47 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 94 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 48 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 96 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 49 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 98 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 50 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 100 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 51 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 102 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 52 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 104 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 53 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 106 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 54 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 108 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 55 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 110 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 56 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 112 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 57 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 114 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 58 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 116 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 59 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 118 } } } },
+        { "if": { "required": ["heartbeat_interval_seconds"], "properties": { "heartbeat_interval_seconds": { "const": 60 } } }, "then": { "properties": { "idle_timeout_seconds": { "minimum": 120 } } } }
+      ]
     },
     "ping": {
       "type": "object",
@@ -190,7 +235,7 @@
     },
     "resume_session": {
       "type": "object",
-      "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_id", "resume_nonce", "signature"],
+      "required": ["contract_version", "message_type", "device_id", "authorization_id", "token_id", "session_id", "resume_nonce", "resume_challenge", "issued_at", "signature"],
       "properties": {
         "contract_version": { "const": 1 },
         "message_type": { "const": "resume_session" },
@@ -199,19 +244,22 @@
         "token_id": { "$ref": "#/$defs/id" },
         "session_id": { "$ref": "#/$defs/id" },
         "resume_nonce": { "$ref": "#/$defs/nonce32" },
+        "resume_challenge": { "$ref": "#/$defs/nonce32" },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
         "signature": { "$ref": "#/$defs/signature64" }
       },
       "additionalProperties": false
     },
     "session_resumed": {
       "type": "object",
-      "required": ["contract_version", "message_type", "session_id", "next_sequence", "resumed_at"],
+      "required": ["contract_version", "message_type", "session_id", "next_sequence", "resumed_at", "resume_challenge"],
       "properties": {
         "contract_version": { "const": 1 },
         "message_type": { "const": "session_resumed" },
         "session_id": { "$ref": "#/$defs/id" },
         "next_sequence": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
-        "resumed_at": { "$ref": "#/$defs/timestamp" }
+        "resumed_at": { "$ref": "#/$defs/timestamp" },
+        "resume_challenge": { "$ref": "#/$defs/nonce32" }
       },
       "additionalProperties": false
     }

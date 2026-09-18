@@ -249,7 +249,15 @@ func TestServiceSpecFoundations(t *testing.T) {
 	}{
 		{goos: "linux", want: []string{"WantedBy=default.target", "ExecStart="}},
 		{goos: "darwin", want: []string{"com.hooshix.agent", "RunAtLoad"}},
-		{goos: "windows", want: []string{"schtasks.exe", "/SC ONLOGON", "/RL LIMITED"}, notWant: []string{"sc.exe create"}},
+		// Windows persistence is the LocalSystem SCM service (ADR-0014), not a
+		// logon Scheduled Task: the spec must name the service, request
+		// automatic start and carry the runtime `service run-service` entry
+		// point, and must never reappear as a logon task.
+		{
+			goos:    "windows",
+			want:    []string{"sc.exe create " + WindowsServiceName, "start= auto", "service run-service", "actions= restart/5000"},
+			notWant: []string{"schtasks.exe", "ONLOGON", "Scheduled"},
+		},
 	}
 	for _, test := range tests {
 		test := test

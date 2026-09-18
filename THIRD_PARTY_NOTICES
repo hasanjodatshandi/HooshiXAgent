@@ -1,0 +1,88 @@
+THIRD PARTY NOTICES
+===================
+
+HooshiXAgent itself is not licensed by this file: no project licence has been
+chosen yet, and that decision belongs to the project owner. This file records
+the third-party components the shipped artifacts contain or depend on, and the
+licence each one is distributed under. It is a notice, not a licence grant for
+HooshiXAgent.
+
+There is intentionally no top-level `LICENSE` file in this repository. Adding
+one is an owner decision, not an engineering default.
+
+`scripts/ci/supply-chain.sh` fails when a Go module in `go list -m all` is not
+listed here, so this file cannot silently fall behind `go.mod`.
+
+
+1. Go module dependencies (linked into the Agent and Gateway binaries)
+---------------------------------------------------------------------
+
+go.mod is the authoritative version list. Licences were read from each module's
+own distribution in the module cache, not from memory.
+
+  github.com/coder/websocket
+    Version: v1.8.15
+    Licence: ISC
+    File: LICENSE.txt
+    Role: WebSocket transport (wss:// Agent<->Gateway tunnel, TLS-only).
+
+  github.com/santhosh-tekuri/jsonschema/v5
+    Version: v5.3.1
+    Licence: Apache-2.0
+    File: LICENSE (the file text is the Apache License, Version 2.0)
+    Role: JSON Schema validation of the language-neutral contracts.
+
+  golang.org/x/sys
+    Version: v0.48.0
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: Windows syscalls (service, DACL, known folders) and Unix helpers.
+
+The Go standard library and toolchain are covered by the Go project's own
+licence (BSD-3-Clause); the built binaries link it statically. `govulncheck`
+runs in `scripts/ci/go-quality.sh` against exactly these modules.
+
+
+2. Container image components (Gateway deployment)
+--------------------------------------------------
+
+The Gateway deployment runs two digest-pinned images. Both are unmodified
+upstream images; the full per-package inventory and licence set for each is
+enumerated in the Syft SPDX SBOM generated for every release by
+`scripts/release/supply-chain-artifacts.sh`, which is the authoritative
+component list for a given release.
+
+  caddy:2.11.4-alpine@sha256:5f5c8640...
+    Licence: Apache-2.0
+    Role: public TLS edge, On-Demand TLS authority enforcement, reverse proxy to
+          the Gateway (see deploy/gateway/README.md).
+
+  alpine:3.24.1@sha256:28bd5fe8...
+    Licence: the Alpine base image redistributes multiple components under their
+      own licences; the notable ones are musl libc (MIT) and BusyBox
+      (GPL-2.0-only). The image additionally installs (see
+      deploy/gateway/Dockerfile) ca-certificates, curl and
+      libcrypto3/libssl3/openssl (Apache-2.0).
+    Role: runtime base for the Gateway image.
+
+  golang:1.27.0-alpine3.24@sha256:4c9fe601...
+    Licence: build-only. The Go toolchain and Alpine components as above.
+    Role: build stage; no part of it is copied into the runtime image except the
+          statically built Gateway binary.
+
+Image-level licence review before distributing a Gateway image must be done
+against that image's SBOM, not against this summary: the summary lists what this
+repository deliberately selects, while the SBOM lists everything an image
+actually contains.
+
+
+3. Build and CI tooling (not redistributed)
+-------------------------------------------
+
+These run in CI or at build time and are not shipped inside any release
+artifact: GitHub Actions (pinned by commit SHA), Syft and Trivy (digest-pinned
+images used to produce SBOMs and vulnerability scans), Gitleaks, Semgrep,
+govulncheck, goimports, and `github.com/akavel/rsrc` (Windows resource compiler
+used to build the tray icon/manifest resources). Their licence terms apply to
+their own use; none of their code is linked into the Agent, the Gateway or the
+installers.

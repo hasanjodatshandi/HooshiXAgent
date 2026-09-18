@@ -38,6 +38,8 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = commandConfigure(args[1:], stdin, stdout)
 	case "rotate":
 		err = commandRotate(args[1:], stdin, stdout)
+	case "unpair":
+		err = commandUnpair(args[1:], stdout)
 	case "expose":
 		err = commandExpose(args[1:], stdout)
 	case "status":
@@ -204,6 +206,79 @@ func readConfirmLine(reader io.Reader) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
+// commandUnpair clears the pairing and returns the Agent to the unpaired
+// (pending_config) state. It is a single operation: when the machine-wide
+// service owns the state the command coordinates with the running service
+// (which is the only process that can rewrite a LocalSystem DPAPI secret
+// store), and otherwise it applies the same atomic state transaction itself.
+func commandUnpair(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("unpair", flag.ContinueOnError)
+	flags.SetOutput(stdout)
+	stateDir := flags.String("state-dir", "", "Agent state directory")
+	resetIdentity := flags.Bool("reset-identity", false, "ALSO replace the device Ed25519 identity (a NEW public key must be registered in the panel before re-pairing); without it the existing identity is kept so the same device can be re-paired as itself")
+	jsonOutput := flags.Bool("json", false, "JSON output")
+	flags.Usage = func() { printUnpairUsage(stdout, flags) }
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	dir, err := NormalizeStateDir(*stateDir)
+	if err != nil {
+		return err
+	}
+	result, err := unpairState(dir, *resetIdentity)
+	if err != nil {
+		return err
+	}
+	return printUnpairResult(stdout, *jsonOutput, result)
+}
+
+func printUnpairUsage(stdout io.Writer, flags *flag.FlagSet) {
+	fmt.Fprintln(stdout, "usage: hooshix-agent unpair [--state-dir <dir>] [--reset-identity] [--json]")
+	fmt.Fprintln(stdout, "Clears the pairing record (gateway URL/aliases, trust anchor, device/authorization/token IDs)")
+	fmt.Fprintln(stdout, "and the session token, returning the agent to the unpaired \"waiting for pairing\" state.")
+	fmt.Fprintln(stdout, "Local endpoint mappings are preserved: they are local exposure configuration, not pairing material.")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "  default (no flags)   KEEPS this device's Ed25519 identity: re-pairing the same device reuses the")
+	fmt.Fprintln(stdout, "                       public key the panel already authorized.")
+	fmt.Fprintln(stdout, "--reset-identity       REPLACES the identity with a new one. Use only when a genuinely new device")
+	fmt.Fprintln(stdout, "                       identity is wanted; the new public key must be registered in the panel.")
+	fmt.Fprintln(stdout, "                       The replacement key is created by the process that owns the secret store")
+	fmt.Fprintln(stdout, "                       (the Agent service on Windows), never by an unrelated account.")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Running it on an already-unpaired agent succeeds and reports that there was nothing to clear.")
+	flags.PrintDefaults()
+}
+
+func printUnpairResult(stdout io.Writer, asJSON bool, result UnpairResult) error {
+	identity := "device identity preserved"
+	if !result.IdentityPreserved {
+		identity = "device identity REPLACED"
+	}
+	key := result.PublicKey
+	if key == "" {
+		key = "none"
+	}
+	var summary string
+	switch {
+	case result.AlreadyUnpaired:
+		summary = fmt.Sprintf("already unpaired: no pairing record or session token to clear state_dir=%s %s public_key=%s endpoints_preserved=%d\n",
+			result.StateDir, identity, key, result.LocalEndpoints)
+	case result.IdentityPreserved:
+		summary = fmt.Sprintf("unpaired: cleared pairing and session token state_dir=%s device=%s %s public_key=%s endpoints_preserved=%d\nregister this device again from the panel to reconnect\n",
+			result.StateDir, result.DeviceID, identity, key, result.LocalEndpoints)
+	default:
+		summary = fmt.Sprintf("unpaired: cleared pairing, session token, and the previous identity state_dir=%s device=%s %s public_key=%s endpoints_preserved=%d\nregister the NEW public key in the panel before re-pairing\n",
+			result.StateDir, result.DeviceID, identity, key, result.LocalEndpoints)
+	}
+	if asJSON {
+		return printResult(stdout, true, result, "%s", summary)
+	}
+	_, err := io.WriteString(stdout, summary)
+	return err
+}
 func commandExpose(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("expose requires add, remove, or list")
@@ -322,7 +397,7 @@ func commandStatus(args []string, stdout io.Writer) error {
 		"secret_store":        store.Kind(),
 		"update_channel":      config.UpdateChannel,
 	}
-	return printResult(stdout, *jsonOutput, result, "device=%s public_key=%s gateway=%s gateways=%d endpoints=%d credentials=%t secret_store=%s\n", config.DeviceID, PublicKeyBase64(publicKey), config.GatewayURL, len(config.GatewayCandidates()), len(config.Endpoints), state.SessionToken != "", store.Kind())
+	return printResult(stdout, *jsonOutput, result, "state_dir=%s device=%s public_key=%s gateway=%s gateways=%d endpoints=%d credentials=%t secret_store=%s\n", dir, config.DeviceID, PublicKeyBase64(publicKey), config.GatewayURL, len(config.GatewayCandidates()), len(config.Endpoints), state.SessionToken != "", store.Kind())
 }
 
 func commandDoctor(args []string, stdout io.Writer) error {
@@ -365,7 +440,7 @@ func commandDoctor(args []string, stdout io.Writer) error {
 			conn.Close()
 		}
 	}
-	fmt.Fprintf(stdout, "doctor: PASSED device=%s endpoints=%d secret_store=%s\n", config.DeviceID, len(config.Endpoints), store.Kind())
+	fmt.Fprintf(stdout, "doctor: PASSED state_dir=%s device=%s endpoints=%d secret_store=%s\n", dir, config.DeviceID, len(config.Endpoints), store.Kind())
 	return nil
 }
 
@@ -465,11 +540,24 @@ func printResult(writer io.Writer, asJSON bool, value any, format string, args .
 }
 
 func printUsage(writer io.Writer) {
-	commands := []string{"configure", "doctor", "expose add|remove|list", "init", "rotate", "run", "service-spec", "status", "update-info", "version"}
-	sort.Strings(commands)
+	commands := []struct{ name, description string }{
+		{"init", "initialize the state directory and the device identity"},
+		{"configure", "apply externally issued pairing credentials (token on stdin)"},
+		{"rotate", "replace the device Ed25519 identity, keeping the session token"},
+		{"unpair", "clear the pairing and session token; keeps the device identity unless --reset-identity"},
+		{"expose add|remove|list", "manage approved local loopback mappings"},
+		{"status", "show the current state summary"},
+		{"doctor", "validate the local configuration, identity and credentials"},
+		{"run", "run the long-lived tunnel client"},
+		{"service-spec", "print the native service definition for this platform"},
+		{"update-info", "print version/platform/channel information"},
+		{"version", "print the agent version"},
+	}
+	sort.Slice(commands, func(i, j int) bool { return commands[i].name < commands[j].name })
 	fmt.Fprintln(writer, "usage: hooshix-agent <command> [options]")
 	fmt.Fprintln(writer, "commands:")
 	for _, command := range commands {
-		fmt.Fprintln(writer, "  "+command)
+		fmt.Fprintf(writer, "  %-24s %s\n", command.name, command.description)
 	}
+	fmt.Fprintln(writer, "run `hooshix-agent <command> --help` for one command's options")
 }

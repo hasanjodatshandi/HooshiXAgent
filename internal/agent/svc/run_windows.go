@@ -34,6 +34,10 @@ func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 	if _, err := agent.EnsurePairingCapability(resolvedStateDir); err != nil {
 		return err
 	}
+	// State creation is explicit here; the HTTP handlers only read state.
+	if _, _, err := agent.LoadOrCreateIdentity(agent.NewPlatformSecretStore(resolvedStateDir)); err != nil {
+		return err
+	}
 	app, err := webapp.NewApp(resolvedStateDir, logger)
 	if err != nil {
 		return err
@@ -42,7 +46,9 @@ func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 	if inService, svcErr := svc.IsWindowsService(); svcErr == nil && inService {
 		return errors.New("pairing-ui already served by the service in service context")
 	}
-	return app.Serve(signalContext(), PairingListenAddr, logger)
+	ctx, stop := signalContext()
+	defer stop()
+	return app.Serve(ctx, PairingListenAddr, logger)
 }
 
 func runSupervisorForeground(stateDir string) error {
@@ -53,7 +59,8 @@ func runSupervisorForeground(stateDir string) error {
 	if err != nil {
 		return err
 	}
-	ctx := signalContext()
+	ctx, stop := signalContext()
+	defer stop()
 	go sup.LoopStatusWriter(ctx, statusInterval)
 	if err := sup.Run(ctx); err != nil {
 		return fmt.Errorf("supervisor: %w", err)

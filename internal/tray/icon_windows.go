@@ -26,8 +26,19 @@ var (
 )
 
 // readiness describes how well the tunnel is doing, mapped to a color:
-// green = connected, yellow = degraded/reconnecting/waiting, red = terminal
-// failure or the service being unreachable.
+//
+//   - green: the tunnel is connected;
+//   - yellow: the agent service is running but the tunnel is not connected
+//     (starting, reconnecting, or not paired yet);
+//   - red: the tunnel is unusable — a terminal failure, or the agent service
+//     itself is not running / cannot be queried.
+//
+// Service availability maps to red deliberately. This file always documented
+// "red = terminal failure or the service being unreachable", but the code sent
+// `service:unknown` and `service:stopped` to yellow along with every
+// running-but-not-connected state, so the operator could not tell "the service
+// is down" from "the service is up and merely unpaired" — the owner read the
+// yellow of an unpaired agent as "the service failed to start".
 type readiness int
 
 const (
@@ -41,15 +52,19 @@ func readinessFromState(state TrayState) readiness {
 	switch {
 	case isUpState(state):
 		return readinessGreen
-	case state.Phase == "service:unknown" || state.Phase == "exiting":
-		return readinessYellow
-	case hasSuffix(state.Phase, "terminal"):
+	case serviceUnavailable(state) || hasSuffix(state.Phase, "terminal"):
 		return readinessRed
-	case hasSuffix(state.Phase, "reconnecting"):
-		return readinessYellow
 	default:
 		return readinessYellow
 	}
+}
+
+// serviceUnavailable reports whether the snapshot says the agent service
+// itself is unusable: SCM could not be queried, or the service is not running.
+// An empty phase is the pre-first-poll snapshot, which is unknown rather than
+// known-bad, so it is not reported as unavailable.
+func serviceUnavailable(state TrayState) bool {
+	return state.Phase == "service:unknown" || state.Phase == "service:stopped"
 }
 
 // hasSuffix is strings.HasSuffix without re-importing strings in a file that

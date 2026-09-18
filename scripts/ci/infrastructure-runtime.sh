@@ -27,9 +27,22 @@ if ! grep -q '^https:// {' deploy/gateway/Caddyfile; then
   echo "production Caddyfile must use a dynamic HTTPS catch-all site" >&2
   exit 1
 fi
+if ! grep -q -- '- -ops-listen' deploy/gateway/docker-compose.yml || \
+   ! grep -q '127.0.0.1:9090' deploy/gateway/docker-compose.yml; then
+  echo "Gateway operational endpoints must be served on the loopback administrative listener" >&2
+  exit 1
+fi
+if ! grep -q 'http://127.0.0.1:9090/readyz' deploy/gateway/docker-compose.yml; then
+  echo "Gateway container health must use the administrative readiness endpoint" >&2
+  exit 1
+fi
 for caddy_config in deploy/gateway/Caddyfile deploy/gateway/Caddyfile.static; do
-  if ! grep -q 'health_uri /readyz' "$caddy_config"; then
-    echo "Caddy upstream active health must use Gateway readiness: $caddy_config" >&2
+  if ! grep -q '@internal_ops path /readyz /metrics' "$caddy_config"; then
+    echo "Caddy must refuse the internal /readyz and /metrics paths on every public hostname: $caddy_config" >&2
+    exit 1
+  fi
+  if grep -qE '@internal_ops path.*/healthz' "$caddy_config"; then
+    echo "Caddy must NOT refuse /healthz on the public edge: it is a common tenant health path and a tenant-hosted /healthz must reach the tenant application: $caddy_config" >&2
     exit 1
   fi
   if ! grep -q 'header_up Host {host}' "$caddy_config"; then

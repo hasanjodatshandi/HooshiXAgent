@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// WindowsServiceName is the SCM name of the Windows Agent service. It lives
+// here, not only in internal/agent/svc, so the persistence spec the shipped
+// binary emits and the service the runtime installer actually registers can
+// never drift apart; internal/agent/svc.ServiceName aliases it.
+const WindowsServiceName = "HooshiXAgent"
+
 type ServiceSpec struct {
 	OS       string `json:"os"`
 	Name     string `json:"name"`
@@ -29,8 +35,6 @@ func NativeServiceSpec(goos, binary, stateDir string) (ServiceSpec, error) {
 		return ServiceSpec{}, err
 	}
 	spec := ServiceSpec{OS: goos, Name: "hooshix-agent", Binary: absoluteBinary, StateDir: absoluteState}
-	quotedCommand := strconv.Quote(absoluteBinary) + " run --state-dir " + strconv.Quote(absoluteState)
-
 	switch goos {
 	case "linux":
 		spec.Native = fmt.Sprintf(`[Unit]
@@ -64,7 +68,22 @@ WantedBy=default.target
 </dict></plist>
 `, xmlEscape(absoluteBinary), xmlEscape(absoluteState))
 	case "windows":
-		spec.Native = "schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN HooshiXAgent /TR " + strconv.Quote(quotedCommand)
+		// Windows Agent persistence is the LocalSystem SCM service registered by
+		// `hooshix-agent service install` (internal/agent/svc.Install), started
+		// by SCM at boot — NOT a logon-triggered task. An edge tunnel agent has
+		// to serve its assigned routes on a device that may have no interactive
+		// logon session, which a per-user logon task cannot do; a second
+		// persistence mechanism on the same device would also race the service
+		// for the state tree and the fixed loopback pairing port. This is
+		// ADR-0014's accepted model, and this string is what the shipped binary
+		// reports as its native persistence definition.
+		//
+		// The service command line deliberately carries no --state-dir: the
+		// service resolves the machine-wide state directory itself through
+		// ServiceStateDir(), so a second, per-invocation state path cannot exist.
+		spec.Native = "sc.exe create " + WindowsServiceName + " binPath= " +
+			scBinPath(absoluteBinary) + " start= auto DisplayName= \"HooshiX Edge Agent\" depend= Tcpip/Dnscache" +
+			"\nsc.exe failure " + WindowsServiceName + " reset= 86400 actions= restart/5000"
 	default:
 		return ServiceSpec{}, fmt.Errorf("unsupported service platform %q", goos)
 	}
@@ -74,4 +93,12 @@ WantedBy=default.target
 func xmlEscape(value string) string {
 	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
 	return replacer.Replace(value)
+}
+
+// scBinPath renders the SCM service command line for `sc.exe create binPath=`.
+// sc.exe parses the value itself, so a quoting backslash is required rather
+// than Go string quoting, and the binary path must be quoted because it
+// normally contains spaces (C:\Program Files\...).
+func scBinPath(binary string) string {
+	return `\"` + binary + `\" service run-service`
 }

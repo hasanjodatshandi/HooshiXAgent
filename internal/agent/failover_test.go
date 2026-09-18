@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 func TestGatewayCandidatesDeduplicateAndPreserveOrder(t *testing.T) {
@@ -177,5 +175,3 @@ func TestConfigureCommandPersistsAliases(t *testing.T) {
 		t.Fatalf("status missing gateway candidates: %s", statusOut.String())
 	}
 }
-
-var _ = contractv1.ProtocolVersion

@@ -56,6 +56,35 @@ if REAL_OPENSSL="$real_openssl" PATH="$work/fakebin:$PATH" \
 fi
 [[ ! -e "$work/failed-generation/tls/ca.key" && ! -e "$work/failed-generation/tls/ca.crt" ]]
 
+# The deployment CA must be a well-formed trust anchor, not merely a signing
+# key. An extension-less CA is accepted by Go, Caddy and Schannel, but strict
+# OpenSSL 3.x verification rejects it while validating any issued certificate
+# ("CA cert does not include key usage extension"), so strict clients refuse the
+# projected CA. Verify the CA profile and a strict verification of the Gateway
+# certificate it issued.
+HOOSHIX_TLS_DIR="$work/ca-profile/tls" HOOSHIX_METADATA_DIR="$work/ca-profile/metadata" \
+  bash deploy/gateway/bootstrap-internal-tls.sh >/dev/null
+ca_profile_cert="$work/ca-profile/tls/ca.crt"
+ca_profile_text="$(openssl x509 -in "$ca_profile_cert" -noout -text)"
+grep -q 'X509v3 Basic Constraints: critical' <<<"$ca_profile_text" ||
+  { echo "deployment CA has no critical basicConstraints" >&2; exit 1; }
+grep -q 'CA:TRUE' <<<"$ca_profile_text" ||
+  { echo "deployment CA certificate is not marked as a CA" >&2; exit 1; }
+grep -q 'X509v3 Key Usage: critical' <<<"$ca_profile_text" ||
+  { echo "deployment CA has no critical keyUsage" >&2; exit 1; }
+grep -q 'Certificate Sign' <<<"$ca_profile_text" ||
+  { echo "deployment CA keyUsage omits certificate signing" >&2; exit 1; }
+grep -q 'X509v3 Subject Key Identifier' <<<"$ca_profile_text" ||
+  { echo "deployment CA has no subjectKeyIdentifier" >&2; exit 1; }
+openssl x509 -in "$ca_profile_cert" -noout -subject |
+  grep -q 'CN=HooshiX Gateway Deployment CA' ||
+  { echo "deployment CA subject changed" >&2; exit 1; }
+if ! openssl verify -x509_strict -CAfile "$ca_profile_cert" "$work/ca-profile/tls/gateway.crt" >/dev/null 2>&1; then
+  echo "strict OpenSSL 3.x clients reject the deployment CA as a trust anchor" >&2
+  openssl verify -x509_strict -CAfile "$ca_profile_cert" "$work/ca-profile/tls/gateway.crt" >&2 || true
+  exit 1
+fi
+
 # Existing CA key/cert must match.
 HOOSHIX_TLS_DIR="$work/mismatch/tls" HOOSHIX_METADATA_DIR="$work/mismatch/metadata" \
   bash deploy/gateway/bootstrap-internal-tls.sh >/dev/null

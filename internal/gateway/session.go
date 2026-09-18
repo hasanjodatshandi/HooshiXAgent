@@ -29,12 +29,17 @@ type session struct {
 	authorized atomic.Bool
 
 	// Observability counters (Phase 5). Bounded aggregate telemetry only:
-	// never authorization, routing, or business authority.
-	agentBytes  atomic.Uint64 // data-frame bytes received from the Agent
-	publicBytes atomic.Uint64 // data-frame bytes sent toward the Agent
-	pingLatency atomic.Int64  // last heartbeat round-trip in nanoseconds
-	reconnected atomic.Bool   // session replaced a previous live session
-	pendingPing atomic.Value  // pendingPing{id, sentAt} of the last outbound ping
+	// never authorization, routing, or business authority. Byte counters live
+	// on gatewayResources because they are process-lifetime monotonic.
+	pingLatency atomic.Int64 // last heartbeat round-trip in nanoseconds
+	pendingPing atomic.Value // pendingPing{id, sentAt} of the last outbound ping
+
+	// resumeChallenge is the per-transport resume proof the Gateway issued to
+	// the Agent over this transport (session_ready / session_resumed). A
+	// resume_session must present this exact value bound into its signature,
+	// and it is rotated on every accepted resume, so a captured resume frame
+	// is not a bearer token for the lifetime of the session.
+	resumeChallenge atomic.Value // string
 
 	// resumeArmed enforces one-shot replay protection for resume_session:
 	// an accepted resume must be explicitly rearmed by the authenticated
@@ -66,7 +71,34 @@ type pendingPing struct {
 	sentAt time.Time
 }
 
-func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64) *session {
+// protocolCloseError pairs a session-fatal error with the WebSocket close code
+// the protocol close-code table assigns to its cause
+// (contracts/v1/tunnel-protocol.md Section 11c).
+type protocolCloseError struct {
+	code   websocket.StatusCode
+	reason string
+	err    error
+}
+
+func (e *protocolCloseError) Error() string { return e.err.Error() }
+func (e *protocolCloseError) Unwrap() error { return e.err }
+
+func closeViolation(code websocket.StatusCode, reason string, err error) error {
+	return &protocolCloseError{code: code, reason: reason, err: err}
+}
+
+// closeCodeFor resolves the close code a terminal session error obliges the
+// Gateway to send, falling back when the error carries no protocol
+// classification (a transport failure, which is not a peer violation).
+func closeCodeFor(err error, fallback websocket.StatusCode, fallbackReason string) (websocket.StatusCode, string) {
+	var protocolErr *protocolCloseError
+	if errors.As(err, &protocolErr) {
+		return protocolErr.code, protocolErr.reason
+	}
+	return fallback, fallbackReason
+}
+
+func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64, resumeChallenge string) *session {
 	sess := &session{
 		gateway:                gateway,
 		conn:                   conn,
@@ -91,6 +123,7 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	sess.outbound.Store(lastOutbound)
 	sess.lastSeen.Store(time.Now().UnixNano())
 	sess.authorized.Store(true)
+	sess.resumeChallenge.Store(resumeChallenge)
 	// A fresh full handshake arms the one-shot resume slot for this new
 	// session identity.
 	sess.resumeArmed.Store(true)
@@ -98,13 +131,23 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 	return sess
 }
 
+// currentResumeChallenge returns the resume proof the Gateway last issued for
+// this session identity.
+func (sess *session) currentResumeChallenge() string {
+	if value, ok := sess.resumeChallenge.Load().(string); ok {
+		return value
+	}
+	return ""
+}
+
 // resumeInto binds this session's identity to a replacement WebSocket after
 // a successful resume_session. The stream table starts empty (streams were
 // bound to the lost transport); sequence numbering restarts on the new
 // connection per ADR-0007's independent per-direction rule, so the resumed
-// control writer continues from the fresh handshake frame. It returns nil
-// when the original session is no longer resumable.
-func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.SequenceTracker) *session {
+// control writer continues from the fresh handshake frame. resumeChallenge is
+// the freshly rotated proof for the *next* resume on this identity. It returns
+// nil when the original session is no longer resumable.
+func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.SequenceTracker, resumeChallenge string) *session {
 	if sess == nil || !sess.authorized.Load() {
 		return nil
 	}
@@ -138,6 +181,7 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 	resumed.outbound.Store(0)
 	resumed.lastSeen.Store(time.Now().UnixNano())
 	resumed.authorized.Store(true)
+	resumed.resumeChallenge.Store(resumeChallenge)
 	// The fresh transport may itself be resumed later (a later network
 	// drop must not lock the device out of the fast path), so the resumed
 	// session starts armed for exactly one future resume.
@@ -156,12 +200,15 @@ func (sess *session) run(parent context.Context) {
 		frame, err := readProtocolFrame(ctx, sess.conn)
 		if err != nil {
 			sess.failAll(err)
-			sess.close(websocket.StatusNormalClosure, "session ended")
+			code, reason := closeCodeFor(err, websocket.StatusNormalClosure, "session ended")
+			sess.close(code, reason)
 			return
 		}
 		if err := sess.inbound.Accept(frame.Sequence); err != nil {
 			sess.failAll(err)
-			sess.close(websocket.StatusPolicyViolation, "sequence violation")
+			// Non-contiguous/replayed sequence values are a protocol error,
+			// not a policy violation (contracts/v1/tunnel-protocol.md 11c).
+			sess.close(websocket.StatusProtocolError, "sequence violation")
 			return
 		}
 		sess.lastSeen.Store(time.Now().UnixNano())
@@ -170,7 +217,8 @@ func (sess *session) run(parent context.Context) {
 		case contractv1.KindControl:
 			if err := sess.handleControl(ctx, frame); err != nil {
 				sess.failAll(err)
-				sess.close(websocket.StatusPolicyViolation, "control violation")
+				code, reason := closeCodeFor(err, websocket.StatusPolicyViolation, "control violation")
+				sess.close(code, reason)
 				return
 			}
 		case contractv1.KindData:
@@ -181,7 +229,7 @@ func (sess *session) run(parent context.Context) {
 			}
 		default:
 			sess.failAll(errors.New("unknown frame kind"))
-			sess.close(websocket.StatusPolicyViolation, "unknown frame kind")
+			sess.close(websocket.StatusProtocolError, "unknown frame kind")
 			return
 		}
 	}
@@ -270,6 +318,12 @@ func (sess *session) terminateAuthorization(ctx context.Context, reasonCode stri
 			})
 			revokeCancel()
 		}
+		if metadataTemporarilyUnavailable(err) {
+			// Drop all authority and streams, but let the Agent reauthenticate
+			// once a fresh snapshot is available. This is not a revocation.
+			sess.close(websocket.StatusTryAgainLater, "authorization metadata unavailable")
+			return
+		}
 		sess.close(websocket.StatusPolicyViolation, "authorization invalid")
 	})
 }
@@ -329,7 +383,9 @@ func sessionRevocationReason(reason string) string {
 }
 func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) error {
 	if err := contractv1.ValidateControlPayload(frame.Payload, frame.StreamID, time.Now().UTC()); err != nil {
-		return err
+		// Malformed/unacceptable control payload data is close code 1007;
+		// the remaining control violations are 1008 (section 11c).
+		return closeViolation(websocket.StatusInvalidFramePayloadData, "invalid frame payload data", err)
 	}
 	var envelope struct {
 		MessageType string `json:"message_type"`
@@ -391,12 +447,14 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 		if err := json.Unmarshal(frame.Payload, &message); err != nil {
 			return err
 		}
-		sess.finishStream(frame.StreamID, fmt.Errorf("agent stream error %s: %s", message.Code, message.Message))
+		// Agent-controlled text is logged quoted: it may contain control
+		// characters or log-forging sequences.
+		sess.finishStream(frame.StreamID, fmt.Errorf("agent stream error %q: %q", message.Code, message.Message))
 		return nil
 	case "session_revoked":
 		return errors.New("agent may not originate session_revoked")
 	default:
-		return fmt.Errorf("unexpected agent control message: %s", envelope.MessageType)
+		return fmt.Errorf("unexpected agent control message: %q", envelope.MessageType)
 	}
 }
 
@@ -438,6 +496,7 @@ func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRo
 	}
 	sess.nextID++
 	stream := newStream(
+		ctx,
 		streamID,
 		sess.gateway.limits.MaxStreamQueueFrames,
 		sess.gateway.limits.MaxStreamQueueBytes,
@@ -470,7 +529,7 @@ func (sess *session) detachStream(streamID uint32, err error) *stream {
 	sess.mu.Unlock()
 	if stream != nil {
 		stream.finish(err)
-		stream.releaseRemaining()
+		stream.releaseQueuedChunks()
 	}
 	return stream
 }
@@ -683,8 +742,23 @@ func (sess *session) signalClosed() {
 	sess.doneOnce.Do(func() { close(sess.done) })
 }
 
+// detachFromRouting removes the session from device routing synchronously at
+// terminal-state time. The WebSocket close handshake can take the peer's whole
+// close timeout (5 s by default), and leaving the session registered for that
+// window would keep a dead session as the device's routing primary while a
+// healthy standby tunnel is already available. unregisterSession is
+// identity-checked, so a session that was already replaced (reconnect/resume)
+// is left alone.
+func (sess *session) detachFromRouting() {
+	if sess.gateway == nil {
+		return
+	}
+	sess.gateway.unregisterSession(sess)
+}
+
 func (sess *session) close(status websocket.StatusCode, reason string) {
 	sess.signalClosed()
+	sess.detachFromRouting()
 	sess.closeOnce.Do(func() {
 		if sess.closeConn != nil {
 			_ = sess.closeConn(status, reason)
@@ -694,6 +768,7 @@ func (sess *session) close(status websocket.StatusCode, reason string) {
 
 func (sess *session) forceClose() {
 	sess.signalClosed()
+	sess.detachFromRouting()
 	sess.forceCloseOnce.Do(func() {
 		if sess.closeNowConn != nil {
 			_ = sess.closeNowConn()
@@ -707,7 +782,11 @@ type queuedPayload struct {
 }
 
 type stream struct {
-	id       uint32
+	id uint32
+	// ctx is the ingressing request's context (plus the response-phase
+	// inactivity deadline). Read selects on it so a tunnel read can never
+	// outlive the request that owns the stream slot.
+	ctx      context.Context
 	incoming chan queuedPayload
 	buffer   []byte
 	queueMu  sync.Mutex
@@ -715,7 +794,11 @@ type stream struct {
 	// terminalBuffer holds payload chunks that were still queued when the
 	// terminal frame arrived; Read drains them before surfacing the
 	// terminal error so close races can never truncate tunneled bodies.
+	// terminalBytes is their reserved byte total: the reservation stays held
+	// while the bytes are retained and is released exactly once, either on
+	// dequeue in Read or when the abandoned tail is discarded.
 	terminalBuffer []byte
+	terminalBytes  int64
 	terminalErr    error
 	terminalReady  bool
 	terminal       chan struct{}
@@ -726,9 +809,10 @@ type stream struct {
 	finishOnce     sync.Once
 }
 
-func newStream(id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
+func newStream(ctx context.Context, id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
 	return &stream{
 		id:            id,
+		ctx:           ctx,
 		incoming:      make(chan queuedPayload, queueFrames),
 		terminal:      make(chan struct{}),
 		streamBudget:  newByteBudget(queueBytes),
@@ -792,9 +876,13 @@ func (stream *stream) Read(data []byte) (int, error) {
 		stream.queueMu.Lock()
 		if stream.terminalReady {
 			if len(stream.terminalBuffer) > 0 {
-				stream.buffer = stream.terminalBuffer
+				tail := stream.terminalBuffer
+				size := stream.terminalBytes
 				stream.terminalBuffer = nil
+				stream.terminalBytes = 0
 				stream.queueMu.Unlock()
+				stream.releaseQueued(size)
+				stream.buffer = tail
 				continue
 			}
 			err := stream.terminalErr
@@ -811,6 +899,12 @@ func (stream *stream) Read(data []byte) (int, error) {
 			stream.buffer = chunk.data
 		case <-stream.terminal:
 			// loop: the next pass drains terminalBuffer or returns the error
+		case <-stream.ctx.Done():
+			// The owning public request is gone (client cancellation) or the
+			// response-phase inactivity deadline fired. Fail the read so the
+			// ingress handler tears the stream down instead of holding its
+			// global ingress slot for a stalled Agent.
+			return 0, stream.ctx.Err()
 		}
 	}
 	n := copy(data, stream.buffer)
@@ -823,12 +917,14 @@ func (stream *stream) finish(err error) {
 		stream.queueMu.Lock()
 		stream.closed = true
 		// Move still-queued chunks into the terminal buffer so Read can
-		// deliver them before the terminal error: no-discard semantics.
+		// deliver them before the terminal error: no-discard semantics. The
+		// byte reservation stays held while the tail is retained and is
+		// released on dequeue in Read (or when the tail is discarded), so
+		// retained bytes are always accounted for.
 		var tail []byte
 		for {
 			select {
 			case chunk := <-stream.incoming:
-				stream.releaseQueued(chunk.size)
 				tail = append(tail, chunk.data...)
 				continue
 			default:
@@ -836,6 +932,7 @@ func (stream *stream) finish(err error) {
 			break
 		}
 		stream.terminalBuffer = tail
+		stream.terminalBytes = int64(len(tail))
 		stream.terminalErr = err
 		stream.terminalReady = true
 		stream.queueMu.Unlock()
@@ -843,13 +940,12 @@ func (stream *stream) finish(err error) {
 	})
 }
 
-// releaseRemaining drains any payload chunks left in the queue after the
-// reader stopped (detached stream: client cancelled, handler returned). It
-// keeps the shared byte budgets correct so abandoned streams cannot starve
-// the session or global queues. finish() has already drained the queue into
-// terminalBuffer under queueMu and enqueue() rejects post-finish sends, so at
-// most a few in-flight chunks can remain; drain without blocking.
-func (stream *stream) releaseRemaining() {
+// releaseQueuedChunks drains payload chunks left in the queue after the reader
+// stopped (detached stream: client cancelled, handler returned) without
+// touching the retained terminal tail, which a still-running reader may yet
+// deliver. It keeps the shared byte budgets correct so abandoned streams
+// cannot starve the session or global queues.
+func (stream *stream) releaseQueuedChunks() {
 	for {
 		select {
 		case chunk := <-stream.incoming:
@@ -857,5 +953,20 @@ func (stream *stream) releaseRemaining() {
 		default:
 			return
 		}
+	}
+}
+
+// discardRetained releases every byte this stream still holds, including a
+// terminal tail the reader never drained. It must only be called once the
+// reader has stopped, otherwise it would truncate a queued body.
+func (stream *stream) discardRetained() {
+	stream.releaseQueuedChunks()
+	stream.queueMu.Lock()
+	size := stream.terminalBytes
+	stream.terminalBuffer = nil
+	stream.terminalBytes = 0
+	stream.queueMu.Unlock()
+	if size > 0 {
+		stream.releaseQueued(size)
 	}
 }

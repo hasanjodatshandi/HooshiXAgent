@@ -102,6 +102,17 @@ Gateway adds no Linux capabilities. Caddy adds only `NET_BIND_SERVICE`. Host bin
 
 These values are defensive ceilings. They are not a statement that 64 sessions, 256 requests/second, or any synthetic R-12 level is a production SLO.
 
+## Windows Agent delivery
+
+Windows Agent persistence is the **service model** (`docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md`, Accepted 2026-09-16, superseding the Windows clauses of ADR-0010): the `HooshiXAgent` service runs under the LocalSystem default account with no password-bearing account, Agent state lives at `%ProgramData%\HooshiXAgent`, secrets are protected by DPAPI in the service account's user scope (`CRYPTPROTECT_UI_FORBIDDEN`, **not** machine scope), and the installer applies an explicit state-tree ACL before any secret is created. The supported Windows distribution channel is `HooshiXAgent-Setup.exe` (`cmd/hooshix-setup`), and the archive installer now installs the same service model at the same machine-wide paths, with legacy per-user-task cleanup on both install and uninstall.
+
+Both Windows distribution channels — `HooshiXAgent-Setup.exe` and the zip's `Install-HooshiXAgent.ps1` — now install that same service model at the same machine-wide paths. The qualifying statements that remain true:
+
+- `HooshiXAgent-Setup.exe` **is published**: `.github/workflows/release.yml` builds it in the `windows-setup` job, verifies that it embeds the released `hooshix-agent.exe` verbatim, and folds it into the release `SHA256SUMS`, SBOM/vulnerability scan and Artifact Attestations alongside the six platform archives (ADR-0014 rollout step R5, executed 2026-09-17). Windows binaries are still **not** Authenticode-signed, so the accepted unsigned-MVP risk recorded in `docs/runtime/packaging-and-operations.md` now attaches to a published artifact;
+- `scripts/ci/windows-service-install-smoke.ps1` is the real install/run/restart/uninstall gate for that distribution, and an elevated real-machine run on 2026-09-17 observed the accepted model end to end (LocalSystem `AUTO_START` service with the `service run-service` image path, restart/5000 recovery, restricted `%ProgramData%\HooshiXAgent` state tree, ARP entry, tray auto-start task, and full removal on uninstall). The gate is now invoked by the `windows-distribution-build` CI job, which passes the distribution it already built via `-SetupExe` and keeps its build-integrity steps; the gate fails closed rather than skipping. Because no workflow run has been observed since the wiring landed, automated CI evidence for Windows service installation and reboot persistence is pending the next Windows CI run and must not be reported as `Passed` before then. The gate is recorded in `docs/engineering/executable-runtime-gate.md` section 7 (G1).
+
+Linux (`systemd --user`) and macOS (LaunchAgent) persistence remain user-scoped under ADR-0010.
+
 ## Failure semantics
 
 Current important fail-closed behavior includes:

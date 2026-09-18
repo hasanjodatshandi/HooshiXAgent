@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,12 @@ const MaxGatewayAliases = 4
 // MaxStreams, so accepting more entries would only grow state and attack
 // surface without adding capacity.
 const MaxEndpoints = 64
+
+// MaxCAFileSize bounds how much of a configured trust-anchor file is read
+// while validating it. Any realistic PEM CA bundle is far below this; the
+// bound exists so a path pointed at a huge or special file cannot turn
+// validation into an unbounded read.
+const MaxCAFileSize = 1 << 20
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
@@ -73,7 +80,22 @@ func DefaultConfig() Config {
 	return Config{Version: configVersion, UpdateChannel: "stable"}
 }
 
+// DefaultStateDir resolves the state directory a CLI invocation uses when
+// --state-dir is omitted. On Windows it prefers the machine-wide service state
+// directory whenever a service installation already owns state there: an
+// operator following the CLI help on a machine with the service installed must
+// operate on the SAME identity the service uses, not silently create a second
+// identity under their user profile and register the wrong public key.
 func DefaultStateDir() (string, error) {
+	if runtime.GOOS == "windows" && serviceInstallationPresent() {
+		return ServiceStateDir(), nil
+	}
+	return defaultLocalStateDir()
+}
+
+// defaultLocalStateDir is the per-user state directory, used when no service
+// installation owns machine-wide state.
+func defaultLocalStateDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home: %w", err)
@@ -231,6 +253,51 @@ func (config Config) ValidateRuntime() error {
 	}
 	if config.UpdateChannel != "stable" && config.UpdateChannel != "beta" {
 		return fmt.Errorf("unsupported update channel %q", config.UpdateChannel)
+	}
+	return nil
+}
+
+// ValidateCAFile verifies that path names an existing, readable regular file
+// whose contents include at least one PEM CERTIFICATE block that parses and
+// installs into a real x509 trust pool.
+//
+// The check is deliberately about content, not about existence. The Agent
+// reads this path at session time while running as LocalSystem, so accepting
+// an unvalidated operator-supplied path would make the configured trust
+// anchor an arbitrary file-read primitive for the service account. Merely
+// parsing as PEM is not enough either: a PEM PRIVATE KEY block is valid PEM
+// and is still not a trust anchor, so at least one parsed certificate is
+// required. Whether that certificate is a CA is not required — pinning a
+// self-signed server certificate is a supported self-hosted/test deployment.
+func ValidateCAFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("CA file path is empty")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open CA file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect CA file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("CA file must be a regular file, not a directory or device")
+	}
+	if info.Size() == 0 {
+		return errors.New("CA file is empty")
+	}
+	if info.Size() > MaxCAFileSize {
+		return fmt.Errorf("CA file exceeds the %d byte trust-anchor limit", MaxCAFileSize)
+	}
+	pemData, err := io.ReadAll(io.LimitReader(file, MaxCAFileSize))
+	if err != nil {
+		return fmt.Errorf("read CA file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return errors.New("CA file contains no PEM certificate that loads as a trust anchor")
 	}
 	return nil
 }

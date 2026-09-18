@@ -103,6 +103,8 @@ func TestGatewayEntropyFailureFailsAuthenticationWithoutPanic(t *testing.T) {
 
 	server := httptest.NewTLSServer(gateway.Handler())
 	defer server.Close()
+	opsServer := httptest.NewTLSServer(gateway.OpsHandler())
+	defer opsServer.Close()
 	client := server.Client()
 	conn := dialRawAgent(t, client, server.URL)
 	defer conn.CloseNow()
@@ -115,7 +117,7 @@ func TestGatewayEntropyFailureFailsAuthenticationWithoutPanic(t *testing.T) {
 		t.Fatal("authentication unexpectedly continued after entropy failure")
 	}
 
-	response, err := client.Get(server.URL + "/healthz")
+	response, err := opsServer.Client().Get(opsServer.URL + "/healthz")
 	if err != nil {
 		t.Fatalf("Gateway stopped serving after entropy failure: %v", err)
 	}
@@ -137,19 +139,31 @@ func TestGatewayBeginDrainRejectsNewWorkButKeepsLiveness(t *testing.T) {
 	gateway.BeginDrain()
 
 	for _, test := range []struct {
-		path string
-		want int
+		name    string
+		path    string
+		want    int
+		opsOnly bool
 	}{
-		{path: "/healthz", want: http.StatusOK},
-		{path: "/readyz", want: http.StatusServiceUnavailable},
-		{path: agentPath, want: http.StatusServiceUnavailable},
-		{path: "/public", want: http.StatusServiceUnavailable},
+		{name: "healthz", path: "/healthz", want: http.StatusOK, opsOnly: true},
+		{name: "readyz", path: "/readyz", want: http.StatusServiceUnavailable, opsOnly: true},
+		{name: "agent", path: agentPath, want: http.StatusServiceUnavailable},
+		{name: "public", path: "/public", want: http.StatusServiceUnavailable},
+		// The operational paths are only servable by the administrative
+		// handler. On the public listener they are ordinary tenant paths and
+		// must be resolved as ingress (503 while draining), never as a
+		// Gateway-local endpoint.
+		{name: "public-healthz-is-ingress", path: "/healthz", want: http.StatusServiceUnavailable},
+		{name: "public-metrics-is-ingress", path: "/metrics", want: http.StatusServiceUnavailable},
 	} {
-		t.Run(test.path, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "https://gateway.test"+test.path, nil)
 			request.Host = testRouteHost
 			response := httptest.NewRecorder()
-			gateway.Handler().ServeHTTP(response, request)
+			handler := gateway.Handler()
+			if test.opsOnly {
+				handler = gateway.OpsHandler()
+			}
+			handler.ServeHTTP(response, request)
 			if response.Code != test.want {
 				t.Fatalf("status=%d want=%d body=%q", response.Code, test.want, response.Body.String())
 			}
@@ -207,4 +221,95 @@ func TestGatewayCloseIsBoundedAndForceClosesStuckWebSocket(t *testing.T) {
 	if got := gateway.sessionForDevice(sess.deviceID); got != nil {
 		t.Fatal("drained Gateway still exposed a session")
 	}
+}
+
+// TestGatewayDrainAfterInflightTunneledRequestSucceedsInFreshWindow proves the
+// ordering contract cmd/gateway relies on: http.Server.Shutdown can spend its
+// whole bounded window waiting for one in-flight public request (the tunnel
+// response is what it is waiting on), and a tunnel drain started with its own
+// fresh bounded window then completes successfully and releases that request.
+// Sharing one window instead hands the drain an already-expired context, which
+// reports a completed drain as "context deadline exceeded" and exits 1 — the
+// same drain against a slower window is what a restart-on-failure supervisor
+// would treat as a crash.
+func TestGatewayDrainAfterInflightTunneledRequestSucceedsInFreshWindow(t *testing.T) {
+	identity := newTestIdentity(t)
+	limits := DefaultLimits()
+	gateway, err := New(testMetadata(t, identity, testRouteHost), NopStatusSink{}, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A real loopback backend that never answers, so the public request stays
+	// genuinely in flight over a real tunnel for the whole drain.
+	backendReached := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	var reachOnce sync.Once
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachOnce.Do(func() { close(backendReached) })
+		<-releaseBackend
+	}))
+	defer local.Close()
+	defer close(releaseBackend)
+
+	tlsServer := httptest.NewTLSServer(gateway.Handler())
+	defer tlsServer.Close()
+	peer := connectMockAgent(t, context.Background(), tlsServer.URL, tlsServer.Client(), identity, local.URL)
+	defer peer.close()
+	waitFor(t, 2*time.Second, func() bool { return gateway.sessionForDevice(identity.deviceID) != nil })
+
+	type outcome struct {
+		status int
+		err    error
+	}
+	inflight := make(chan outcome, 1)
+	go func() {
+		request, err := newPublicRequestAsync(t, tlsServer.URL+"/inflight", testRouteHost, nil)
+		if err != nil {
+			inflight <- outcome{err: err}
+			return
+		}
+		response, err := tlsServer.Client().Do(request)
+		if err != nil {
+			inflight <- outcome{err: err}
+			return
+		}
+		defer response.Body.Close()
+		_, err = io.Copy(io.Discard, response.Body)
+		inflight <- outcome{status: response.StatusCode, err: err}
+	}()
+
+	select {
+	case <-backendReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tunneled request never reached the loopback backend")
+	}
+
+	// Production shutdown ordering: enter draining, give the listener its own
+	// bounded window, then drain tunnels in a separate fresh bounded window.
+	gateway.BeginDrain()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	serverErr := tlsServer.Config.Shutdown(shutdownCtx)
+	if !errors.Is(serverErr, context.DeadlineExceeded) {
+		t.Fatalf("listener shutdown error=%v want a bounded timeout with the tunneled request still in flight", serverErr)
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDrain()
+	if err := gateway.Close(drainCtx); err != nil {
+		t.Fatalf("tunnel drain in a fresh bounded window failed: %v", err)
+	}
+
+	select {
+	case got := <-inflight:
+		t.Logf("in-flight tunneled request released by the drain: status=%d error=%v", got.status, got.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight tunneled request was not released by the drain")
+	}
+
+	if got := gateway.sessionForDevice(identity.deviceID); got != nil {
+		t.Fatal("drained Gateway still exposed a session")
+	}
+	waitFor(t, time.Second, func() bool { return len(gateway.resources.ingressSlots) == 0 })
 }

@@ -97,7 +97,7 @@ func TestStatusExporterBackpressureDoesNotBlockCriticalCaller(t *testing.T) {
 		t.Fatalf("unexpected status failures while sink is intentionally blocked: %d", failures)
 	}
 	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(recorder.Body.String(), fmt.Sprintf("hooshix_gateway_status_dropped_total %d", dropped)) {
 		t.Fatalf("drop accounting not exposed in aggregate metrics: %s", recorder.Body.String())
 	}
@@ -179,7 +179,7 @@ func TestStatusMetricsRemainAggregateLowCardinality(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	metrics := recorder.Body.String()
 	for _, forbidden := range []string{"device-cardinality-", "session-cardinality-", "endpoint-cardinality-"} {
 		if strings.Contains(metrics, forbidden) {

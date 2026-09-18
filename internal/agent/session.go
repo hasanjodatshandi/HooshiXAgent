@@ -25,6 +25,10 @@ type agentSession struct {
 	limits    Limits
 	logger    *slog.Logger
 	sessionID string
+	// resumeChallenge is the Gateway-issued per-transport proof the Agent
+	// must bind into its next resume_session transcript. It is only usable
+	// while this transport is the one the Gateway issued it over.
+	resumeChallenge string
 
 	inbound       contractv1.SequenceTracker
 	outbound      atomic.Uint64
@@ -61,6 +65,7 @@ type agentStream struct {
 	sessionBudget *agentByteBudget
 	finish        sync.Once
 	terminal      sync.Once
+	logger        *slog.Logger
 }
 
 func authenticateAgent(
@@ -142,19 +147,23 @@ func authenticateAgent(
 	if ready.SessionID != challenge.SessionID {
 		return nil, errors.New("session_ready session ID mismatch")
 	}
+	if err := contractv1.ValidateReadyNegotiation(ready, conn.Subprotocol()); err != nil {
+		return nil, err
+	}
 
 	sess := &agentSession{
-		conn:          conn,
-		config:        config,
-		limits:        limits,
-		logger:        logger,
-		sessionID:     ready.SessionID,
-		inbound:       inbound,
-		streams:       make(map[uint32]*agentStream),
-		queueBudget:   newAgentByteBudget(limits.MaxSessionQueueBytes),
-		closed:        make(chan struct{}),
-		controlWrites: make(chan agentWriteRequest, 32),
-		dataWrites:    make(chan agentWriteRequest, 2),
+		conn:            conn,
+		config:          config,
+		limits:          limits,
+		logger:          logger,
+		sessionID:       ready.SessionID,
+		resumeChallenge: ready.ResumeChallenge,
+		inbound:         inbound,
+		streams:         make(map[uint32]*agentStream),
+		queueBudget:     newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:          make(chan struct{}),
+		controlWrites:   make(chan agentWriteRequest, 32),
+		dataWrites:      make(chan agentWriteRequest, 2),
 	}
 	sess.writeMessage = func(ctx context.Context, frame []byte) error {
 		return conn.Write(ctx, websocket.MessageBinary, frame)
@@ -166,21 +175,23 @@ func authenticateAgent(
 }
 
 // newResumedAgentSession builds an Agent session after a Gateway-confirmed
-// session_resumed reply. It skips the challenge round trip and continues the
-// outbound sequence from lastOutbound.
-func newResumedAgentSession(conn *websocket.Conn, config Config, limits Limits, logger *slog.Logger, sessionID string, inbound contractv1.SequenceTracker, lastOutbound uint64) *agentSession {
+// session_resumed reply. It skips the challenge round trip, continues the
+// outbound sequence from lastOutbound, and adopts the rotated resume
+// challenge the Gateway issued for the next transport.
+func newResumedAgentSession(conn *websocket.Conn, config Config, limits Limits, logger *slog.Logger, sessionID, resumeChallenge string, inbound contractv1.SequenceTracker, lastOutbound uint64) *agentSession {
 	sess := &agentSession{
-		conn:          conn,
-		config:        config,
-		limits:        limits,
-		logger:        logger,
-		sessionID:     sessionID,
-		inbound:       inbound,
-		streams:       make(map[uint32]*agentStream),
-		queueBudget:   newAgentByteBudget(limits.MaxSessionQueueBytes),
-		closed:        make(chan struct{}),
-		controlWrites: make(chan agentWriteRequest, 32),
-		dataWrites:    make(chan agentWriteRequest, 2),
+		conn:            conn,
+		config:          config,
+		limits:          limits,
+		logger:          logger,
+		sessionID:       sessionID,
+		resumeChallenge: resumeChallenge,
+		inbound:         inbound,
+		streams:         make(map[uint32]*agentStream),
+		queueBudget:     newAgentByteBudget(limits.MaxSessionQueueBytes),
+		closed:          make(chan struct{}),
+		controlWrites:   make(chan agentWriteRequest, 32),
+		dataWrites:      make(chan agentWriteRequest, 2),
 	}
 	sess.writeMessage = func(ctx context.Context, frame []byte) error {
 		return conn.Write(ctx, websocket.MessageBinary, frame)
@@ -335,6 +346,7 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		cancel:        cancel,
 		streamBudget:  newAgentByteBudget(sess.limits.MaxStreamQueueBytes),
 		sessionBudget: sess.queueBudget,
+		logger:        sess.logger,
 	}
 	sess.streams[frame.StreamID] = stream
 	sess.mu.Unlock()
@@ -363,39 +375,12 @@ func (sess *agentSession) handleData(parent context.Context, frame contractv1.Fr
 	if stream.enqueue(frame.Payload) {
 		return nil
 	}
-	if sess.waitForStreamSpace(stream, frame.Payload) {
-		return nil
-	}
+	// A full stream must not stop the shared reader from consuming other
+	// streams and heartbeats. Apply the existing resource-limit policy to
+	// this stream only; do not wait for its local consumer here.
 	_ = sess.sendStreamTerminalError(stream, "resource_limit", "stream input byte/frame budget exhausted or stalled", true)
 	sess.finishStream(frame.StreamID)
 	return nil
-}
-
-// enqueueRetryWait bounds how long the session read loop waits for a full
-// stream queue to drain before declaring the stream stalled. A fast burst
-// of gateway data frames must not kill a stream just because the bounded
-// per-stream buffer is momentarily full (the local writer drains it within
-// milliseconds on healthy targets); only a genuinely stalled consumer
-// should fail the stream. The wait is capped so a stalled local target
-// cannot pin the single session read loop indefinitely.
-const enqueueRetryWait = 2 * time.Second
-
-func (sess *agentSession) waitForStreamSpace(stream *agentStream, payload []byte) bool {
-	deadline := time.After(enqueueRetryWait)
-	for {
-		select {
-		case <-stream.ctx.Done():
-			return false
-		case <-sess.closed:
-			return false
-		case <-deadline:
-			return false
-		case <-stream.space:
-			if stream.enqueue(payload) {
-				return true
-			}
-		}
-	}
 }
 
 func (stream *agentStream) enqueue(data []byte) bool {
@@ -406,7 +391,7 @@ func (stream *agentStream) enqueue(data []byte) bool {
 		return false
 	}
 	if !stream.sessionBudget.TryAcquire(size) {
-		stream.streamBudget.Release(size)
+		stream.releaseBudget(stream.streamBudget, size)
 		return false
 	}
 	queued := agentQueuedPayload{Data: append([]byte(nil), data...), Size: size}
@@ -414,18 +399,29 @@ func (stream *agentStream) enqueue(data []byte) bool {
 	case stream.incoming <- queued:
 		return true
 	default:
-		stream.sessionBudget.Release(size)
-		stream.streamBudget.Release(size)
+		stream.releaseBudget(stream.sessionBudget, size)
+		stream.releaseBudget(stream.streamBudget, size)
 		return false
 	}
 }
 
 func (stream *agentStream) releaseQueued(size int64) {
-	stream.sessionBudget.Release(size)
-	stream.streamBudget.Release(size)
+	stream.releaseBudget(stream.sessionBudget, size)
+	stream.releaseBudget(stream.streamBudget, size)
 	select {
 	case stream.space <- struct{}{}:
 	default:
+	}
+}
+
+// releaseBudget returns bytes to a budget. The accounting is balanced by
+// construction, so a failure means a double release somewhere; the budget
+// clamps instead of panicking (see agentbudget.ByteBudget.Release) and the
+// anomaly is logged so it stays visible without killing the tunnel.
+func (stream *agentStream) releaseBudget(budget *agentByteBudget, size int64) {
+	if err := budget.Release(size); err != nil {
+		stream.logger.Warn("agent byte budget underflow; clamped", "error", err, "size", size,
+			"budget_used", budget.Used(), "budget_limit", budget.Limit())
 	}
 }
 

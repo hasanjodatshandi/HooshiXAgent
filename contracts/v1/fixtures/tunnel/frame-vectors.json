@@ -1,4 +1,5 @@
 {
+  "$comment": "Language-neutral frame golden vectors. A vector states either the complete frame as `frame_hex`, or - for payloads too large to inline - a `header_hex` plus `payload_repeat`, where the payload is `count` copies of `byte`. The 24-byte header is fixture-pinned in both forms.",
   "vectors": [
     {
       "name": "data-stream-7-sequence-1",
@@ -7,6 +8,30 @@
       "sequence": 1,
       "payload_utf8": "hello",
       "frame_hex": "48585431010200000000000700000005000000000000000168656c6c6f"
+    },
+    {
+      "name": "control-stream-0-sequence-2",
+      "kind": "control",
+      "stream_id": 0,
+      "sequence": 2,
+      "payload_utf8": "{\"contract_version\":1,\"message_type\":\"stream_close\",\"reason_code\":\"completed\"}",
+      "frame_hex": "4858543101010000000000000000004e00000000000000027b22636f6e74726163745f76657273696f6e223a312c226d6573736167655f74797065223a2273747265616d5f636c6f7365222c22726561736f6e5f636f6465223a22636f6d706c65746564227d"
+    },
+    {
+      "name": "data-max-payload-1048576",
+      "kind": "data",
+      "stream_id": 3,
+      "sequence": 4,
+      "payload_repeat": { "byte": 97, "count": 1048576 },
+      "header_hex": "485854310102000000000003001000000000000000000004"
+    },
+    {
+      "name": "control-max-payload-65536",
+      "kind": "control",
+      "stream_id": 0,
+      "sequence": 5,
+      "payload_repeat": { "byte": 120, "count": 65536 },
+      "header_hex": "485854310101000000000000000100000000000000000005"
     }
   ]
 }

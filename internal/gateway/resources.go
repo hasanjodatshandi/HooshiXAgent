@@ -32,19 +32,17 @@ func newHardKeyedAdmissionLimiter(maxInFlight, rate, burst int) *keyedAdmissionL
 	return gatewayresources.NewHardKeyedAdmissionLimiter(maxInFlight, rate, burst)
 }
 
+type keyedRateLimiter = gatewayresources.KeyedTokenBuckets
+
+func newKeyedRateLimiter(rate, burst int) *keyedRateLimiter {
+	return gatewayresources.NewKeyedTokenBuckets(rate, burst)
+}
+
 const (
 	admissionAccepted            = gatewayresources.Accepted
 	admissionRejectedRate        = gatewayresources.RejectedRate
 	admissionRejectedConcurrency = gatewayresources.RejectedConcurrency
 )
-
-type budgetBuffer = gatewayresources.BudgetBuffer
-
-func newBudgetBuffer(budget *byteBudget) *budgetBuffer {
-	return gatewayresources.NewBudgetBuffer(budget)
-}
-
-func fairnessShare(global int) int { return gatewayresources.FairnessShare(global) }
 
 var errResourceBudget = gatewayresources.ErrBudgetExhausted
 
@@ -59,6 +57,7 @@ type gatewayResources struct {
 	ingressRouteAdmission    *keyedAdmissionLimiter
 	ingressDeviceAdmission   *keyedAdmissionLimiter
 	handshakeDeviceAdmission *keyedAdmissionLimiter
+	preAuthRate              *keyedRateLimiter
 	queueRejects             atomicUint64
 	handshakeRejects         atomicUint64
 	ingressRejects           atomicUint64
@@ -79,5 +78,12 @@ func newGatewayResources(limits Limits) gatewayResources {
 		ingressRouteAdmission:    newKeyedAdmissionLimiter(limits.MaxIngressInFlight, limits.IngressRatePerSecond, limits.IngressRateBurst),
 		ingressDeviceAdmission:   newKeyedAdmissionLimiter(limits.MaxIngressInFlight, limits.IngressRatePerSecond, limits.IngressRateBurst),
 		handshakeDeviceAdmission: newHardKeyedAdmissionLimiter(limits.MaxPendingHandshakes, limits.HandshakeRatePerSecond, limits.HandshakeRateBurst),
+		// Pre-authentication admission is a per-peer connection rate applied
+		// before a pending-handshake slot is taken, so a peer that opens
+		// sockets and stalls in the unauthenticated preface cannot cycle the
+		// global handshake slots at will. It is deliberately separate from
+		// handshakeRate/handshakeDeviceAdmission: the authenticated handshake
+		// budget is never spent by unauthenticated traffic.
+		preAuthRate: newKeyedRateLimiter(limits.PreAuthRatePerSecond, limits.PreAuthRateBurst),
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/gateway/gatewayresources"
 )
 
 func TestAdaptiveIngressAdmissionPreservesUncontendedCapacityAndIsolatesNoisyKeys(t *testing.T) {
@@ -70,7 +71,7 @@ func TestAdaptiveIngressRateLeavesRefillCapacityForNeighbor(t *testing.T) {
 	}
 
 	later := now.Add(time.Second)
-	for i := 0; i < fairnessShare(limits.IngressRatePerSecond); i++ {
+	for i := 0; i < gatewayresources.FairnessShare(limits.IngressRatePerSecond); i++ {
 		if got := resources.ingressRouteAdmission.TryAcquire("route-a", later); got != admissionAccepted {
 			t.Fatalf("fair route-a refill %d rejected: %v", i+1, got)
 		}
@@ -184,13 +185,13 @@ func TestValidatedHandshakeDeviceFairnessReservesGlobalCapacity(t *testing.T) {
 	server := httptest.NewTLSServer(gateway.Handler())
 	defer server.Close()
 
-	held := make([]*websocket.Conn, 0, fairnessShare(limits.MaxPendingHandshakes))
+	held := make([]*websocket.Conn, 0, gatewayresources.FairnessShare(limits.MaxPendingHandshakes))
 	defer func() {
 		for _, conn := range held {
 			conn.CloseNow()
 		}
 	}()
-	for i := 0; i < fairnessShare(limits.MaxPendingHandshakes); i++ {
+	for i := 0; i < gatewayresources.FairnessShare(limits.MaxPendingHandshakes); i++ {
 		conn := dialRawAgent(t, server.Client(), server.URL)
 		held = append(held, conn)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -217,7 +218,9 @@ func TestValidatedHandshakeDeviceFairnessReservesGlobalCapacity(t *testing.T) {
 		t.Fatal("single device occupied the reserved validated-handshake capacity")
 	}
 	cancel()
-	waitFor(t, time.Second, func() bool { return len(gateway.handshakeSlots) == fairnessShare(limits.MaxPendingHandshakes) })
+	waitFor(t, time.Second, func() bool {
+		return len(gateway.handshakeSlots) == gatewayresources.FairnessShare(limits.MaxPendingHandshakes)
+	})
 
 	neighbor := dialRawAgent(t, server.Client(), server.URL)
 	defer neighbor.CloseNow()

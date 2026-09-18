@@ -52,7 +52,7 @@ func TestGatewayHoldsMultipleTunnelsPerDevice(t *testing.T) {
 
 	// The active_tunnels metric exposes both bounded tunnels.
 	metrics := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
+	gateway.OpsHandler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "https://gateway.test/metrics", nil))
 	body := metrics.Body.String()
 	if !strings.Contains(body, "hooshix_gateway_active_tunnels 2\n") {
 		t.Fatalf("active_tunnels must report 2:\n%s", body)
