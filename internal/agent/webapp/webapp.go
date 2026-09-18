@@ -199,7 +199,26 @@ func (app *App) requireLocalRequest(next http.Handler) http.Handler {
 		}
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin != "" {
-			if !isLoopbackOrigin(origin) {
+			if origin == "null" {
+				// Chromium can deliberately serialize the origin as "null" for a
+				// user-initiated local form navigation when Referrer-Policy is
+				// no-referrer. Accept only the browser-provided Fetch Metadata
+				// shape for a same-origin top-level POST to an exact loopback Host.
+				// Capability and CSRF validation still run in the inner handler.
+				if !isSameOriginLoopbackNavigation(r) {
+					app.logger.Warn("cross-origin local UI request rejected",
+						"method", r.Method,
+						"path", r.URL.Path,
+						"origin_null", true,
+						"host_loopback", isLoopbackRequestHost(r.Host),
+						"fetch_site", r.Header.Get("Sec-Fetch-Site"),
+						"fetch_mode", r.Header.Get("Sec-Fetch-Mode"),
+						"fetch_dest", r.Header.Get("Sec-Fetch-Dest"),
+					)
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			} else if !isLoopbackOrigin(origin) {
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return
 			}
@@ -212,6 +231,27 @@ func (app *App) requireLocalRequest(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isSameOriginLoopbackNavigation is the narrowly-scoped fallback for browsers
+// that emit Origin: null for a top-level form POST from the loopback UI. A
+// foreign site, iframe, fetch/XHR, scripted navigation or rebinding Host does
+// not satisfy this shape.
+func isSameOriginLoopbackNavigation(r *http.Request) bool {
+	return r.Method == http.MethodPost &&
+		isLoopbackRequestHost(r.Host) &&
+		r.Header.Get("Sec-Fetch-Site") == "same-origin" &&
+		r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+		r.Header.Get("Sec-Fetch-Dest") == "document" &&
+		r.Header.Get("Sec-Fetch-User") == "?1"
+}
+
+func isLoopbackRequestHost(hostPort string) bool {
+	host := hostPort
+	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = parsedHost
+	}
+	return isLoopbackHost(host)
 }
 
 // isLoopbackHost reports whether host (a bare host name, without port) is one

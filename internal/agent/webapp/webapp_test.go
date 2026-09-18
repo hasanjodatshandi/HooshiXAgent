@@ -471,6 +471,49 @@ func TestRefererRejectsCrossSitePostWhenOriginMissing(t *testing.T) {
 	}
 }
 
+func TestNullOriginAcceptsOnlyUserInitiatedSameOriginLoopbackNavigation(t *testing.T) {
+	app, capability := newTestApp(t)
+	csrf := app.ensureCSRFToken()
+	newRequest := func() *http.Request {
+		request := newLoopbackRequest(http.MethodPost, "/pairing/rotate?cap="+capability, strings.NewReader("hooshix_csrf="+csrf))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Origin", "null")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		request.Header.Set("Sec-Fetch-Mode", "navigate")
+		request.Header.Set("Sec-Fetch-Dest", "document")
+		request.Header.Set("Sec-Fetch-User", "?1")
+		return request
+	}
+
+	request := newRequest()
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("same-origin null-Origin navigation status=%d want=303: %s", recorder.Code, recorder.Body.String())
+	}
+
+	for name, mutate := range map[string]func(*http.Request){
+		"foreign host": func(request *http.Request) { request.Host = "attacker.example" },
+		"cross-site":   func(request *http.Request) { request.Header.Set("Sec-Fetch-Site", "cross-site") },
+		"scripted":     func(request *http.Request) { request.Header.Del("Sec-Fetch-User") },
+		"fetch":        func(request *http.Request) { request.Header.Set("Sec-Fetch-Mode", "cors") },
+		"subresource":  func(request *http.Request) { request.Header.Set("Sec-Fetch-Dest", "empty") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The accepted request rotated the capability, so authenticate the
+			// rejection cases with the current value to isolate the origin gate.
+			capability = app.currentCapability()
+			request := newRequest()
+			mutate(request)
+			recorder := httptest.NewRecorder()
+			app.Handler().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status=%d want=403", recorder.Code)
+			}
+		})
+	}
+}
+
 // TestTunnelHealthRendersStatusSnapshot proves the pairing page surfaces the
 // service-written status.json fields (connection, reconnects, last error) and
 // escapes error text derived from remote input.
