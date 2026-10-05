@@ -42,6 +42,119 @@ The Go standard library and toolchain are covered by the Go project's own
 licence (BSD-3-Clause); the built binaries link it statically. `govulncheck`
 runs in `scripts/ci/go-quality.sh` against exactly these modules.
 
+Test-only module graph (not linked into the Agent, Gateway or Connector
+binaries). `github.com/quic-go/quic-go` is imported only by
+`tests/integration/private_udp_e2e_test.go`, so its own requirements enter
+`go list -m all` and are disclosed here even though no shipped artifact
+contains them. The `vendor/golang.org/x/...` packages that do appear inside the
+binaries are the Go standard library's own vendored copies, already covered by
+the paragraph above.
+
+  github.com/quic-go/quic-go
+    Version: v0.63.0
+    Licence: MIT
+    File: LICENSE (Copyright (c) 2016 the quic-go authors & Google, Inc.)
+    Role: QUIC client used by the private-UDP end-to-end test.
+
+  github.com/quic-go/qpack
+    Version: v0.6.0 // indirect
+    Licence: MIT
+    File: LICENSE.md (Copyright 2019 Marten Seemann)
+    Role: QUIC dependency, required through `github.com/quic-go/quic-go`.
+
+  github.com/quic-go/go-ossfuzz-seeds
+    Version: v0.1.0
+    Licence: MIT
+    File: LICENSE (Copyright 2026 Marten Seemann)
+    Role: fuzz-seed corpus required through the QUIC module graph.
+
+  golang.org/x/crypto
+    Version: v0.54.0 // indirect
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: required through the QUIC test dependency.
+
+  golang.org/x/net
+    Version: v0.56.0 // indirect
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: required through the QUIC HTTP/3 layer in tests.
+
+  golang.org/x/text
+    Version: v0.40.0 // indirect
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: required through `golang.org/x/net` in tests.
+
+Remaining entries are module-graph members of the test/tool requirements above
+and are likewise not linked into any shipped binary:
+
+  github.com/stretchr/testify
+    Version: v1.12.1
+    Licence: MIT
+    File: LICENSE (Copyright (c) 2012-2020 Mat Ryer, Tyler Bunnell and contributors)
+    Role: assertion library required through the QUIC module's test tooling.
+
+  github.com/davecgh/go-spew
+    Version: v1.1.1
+    Licence: ISC
+    File: LICENSE
+    Role: required through `github.com/stretchr/testify`.
+
+  github.com/pmezard/go-difflib
+    Version: v1.0.0
+    Licence: BSD-3-Clause
+    File: LICENSE (Copyright (c) 2013, Patrick Mezard)
+    Role: required through `github.com/stretchr/testify`.
+
+  gopkg.in/yaml.v3
+    Version: v3.0.1
+    Licence: MIT and Apache-2.0 (dual, as stated in the module's LICENSE)
+    File: LICENSE, NOTICE
+    Role: required through `github.com/stretchr/testify`.
+
+  go.yaml.in/yaml/v3
+    Version: v3.0.5
+    Licence: MIT and Apache-2.0 (dual, as stated in the module's LICENSE)
+    File: LICENSE, NOTICE
+    Role: the relocated yaml.v3 module in the same requirement graph.
+
+  go.uber.org/mock
+    Version: v0.5.2
+    Licence: Apache-2.0
+    File: LICENSE (the file text is the Apache License, Version 2.0)
+    Role: mock generation tooling in the module graph.
+
+  github.com/jordanlewis/gcassert
+    Version: v0.0.0-20250430164644-389ef753e22e
+    Licence: MIT
+    File: LICENSE.txt (Copyright (c) 2020 Jordan Lewis)
+    Role: architecture assertion tooling in the module graph.
+
+  golang.org/x/mod
+    Version: v0.37.0
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: module graph tooling required through the Go tool modules above.
+
+  golang.org/x/sync
+    Version: v0.22.0
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: required through `golang.org/x/tools`.
+
+  golang.org/x/term
+    Version: v0.45.0
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: terminal handling required through the Go tool modules above.
+
+  golang.org/x/tools
+    Version: v0.47.0
+    Licence: BSD-3-Clause (Go Authors)
+    File: LICENSE
+    Role: analysis/tooling support in the module graph.
+
 
 2. Container image components (Gateway deployment)
 --------------------------------------------------
