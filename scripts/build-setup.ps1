@@ -56,13 +56,24 @@ if (Test-Path $makeIco) {
 # checkout without Python still builds.
 $tintScript = Join-Path $repo "scripts\tint_ico.py"
 if (Test-Path $tintScript) {
+  $tinted = @(
+    (Join-Path $repo "internal\tray\hooshix-green.ico"),
+    (Join-Path $repo "internal\tray\hooshix-yellow.ico"),
+    (Join-Path $repo "internal\tray\hooshix-red.ico")
+  )
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($python) {
-    & $python.Source $tintScript $ico `
-      --green (Join-Path $repo "internal\tray\hooshix-green.ico") `
-      --yellow (Join-Path $repo "internal\tray\hooshix-yellow.ico") `
-      --red (Join-Path $repo "internal\tray\hooshix-red.ico")
-    if ($LASTEXITCODE -ne 0) { throw "icon tinting failed" }
+    & $python.Source $tintScript $ico --green $tinted[0] --yellow $tinted[1] --red $tinted[2]
+    if ($LASTEXITCODE -ne 0) { Write-Host "icon tinting could not be regenerated (exit $LASTEXITCODE)" }
+  }
+  # Regenerating is only a convenience: the tray embeds these files, so what the
+  # build really needs is that they exist. A host whose Python has no Pillow (or
+  # no Python at all) still ships the committed icons and produces a working
+  # distribution; a tree with neither must say so here rather than failing
+  # later inside go build's embed loader.
+  $missing = @($tinted | Where-Object { -not (Test-Path $_) })
+  if ($missing.Count -gt 0) {
+    throw "status icons missing and cannot be regenerated: $($missing -join ', ')"
   }
 }
 # Resolve rsrc.exe (embeds the icon/manifest resources) from GOPATH or PATH
