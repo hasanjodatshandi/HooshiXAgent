@@ -89,6 +89,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # tests/integration fails closed under CI=true when the product
+          # binaries are absent (see scripts/ci/go-quality.sh), so this leg has
+          # to export them the same way rather than turn those assertions into
+          # a red run.
+          go build -o "$RUNNER_TEMP/hooshix-agent.exe" ./cmd/agent
+          go build -o "$RUNNER_TEMP/hooshix-gateway.exe" ./cmd/gateway
+          export HOOSHIX_AGENT_BINARY="$RUNNER_TEMP/hooshix-agent.exe"
+          export HOOSHIX_GATEWAY_BINARY="$RUNNER_TEMP/hooshix-gateway.exe"
           go test -count=1 ./...
 
       - name: Clean Agent package install / rollback / uninstall (Unix)
