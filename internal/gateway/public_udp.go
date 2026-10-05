@@ -50,15 +50,21 @@ func (flow *publicUDPFlow) addRequestCredit(size int) {
 	for {
 		current := flow.credit.Load()
 		next := min(current+3*int64(size), maxUDPResponseCredit)
-		if flow.credit.CompareAndSwap(current, next) { return }
+		if flow.credit.CompareAndSwap(current, next) {
+			return
+		}
 	}
 }
 
 func (flow *publicUDPFlow) spendResponseCredit(size int) bool {
 	for {
 		current := flow.credit.Load()
-		if current < int64(size) { return false }
-		if flow.credit.CompareAndSwap(current, current-int64(size)) { return true }
+		if current < int64(size) {
+			return false
+		}
+		if flow.credit.CompareAndSwap(current, current-int64(size)) {
+			return true
+		}
 	}
 }
 
