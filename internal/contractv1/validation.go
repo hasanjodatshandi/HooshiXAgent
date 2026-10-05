@@ -399,6 +399,12 @@ type StreamOpen struct {
 	AssignmentID    string `json:"assignment_id"`
 	LocalEndpointID string `json:"local_endpoint_id"`
 	RequestID       string `json:"request_id"`
+	Mode            string `json:"mode,omitempty"`
+}
+
+type StreamHalfClose struct {
+	ContractVersion int    `json:"contract_version"`
+	MessageType     string `json:"message_type"`
 }
 
 type StreamClose struct {
@@ -641,6 +647,21 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 			if err := validateID(name, value); err != nil {
 				return err
 			}
+		}
+		if message.Mode != "" && !oneOfStrings(message.Mode, "http", "tcp", "udp") {
+			return errors.New("invalid stream_open mode")
+		}
+		return nil
+	case "stream_half_close":
+		if err := streamScope(); err != nil {
+			return err
+		}
+		var message StreamHalfClose
+		if err := decodeControlStrict(data, &message); err != nil {
+			return err
+		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_half_close" {
+			return errors.New("invalid stream_half_close envelope")
 		}
 		return nil
 	case "stream_close":

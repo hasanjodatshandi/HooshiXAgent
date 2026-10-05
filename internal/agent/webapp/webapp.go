@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/enrollment"
 )
 
 // PairingPayload is the single-paste format produced by the panel.
@@ -60,6 +61,15 @@ type App struct {
 	// pairing.endpoint.json; a client that already holds it can prove the
 	// loopback port belongs to this process before handing over the capability.
 	endpointToken string
+
+	enrollmentMu      sync.Mutex
+	enrollmentClient  *enrollment.Client
+	pendingEnrollment *pendingEnrollment
+}
+
+type pendingEnrollment struct {
+	serverURL string
+	session   enrollment.Session
 }
 
 // currentCapability returns the live pairing capability. The value changes
@@ -91,7 +101,12 @@ func NewApp(stateDir string, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load pairing capability: %w", err)
 	}
-	return &App{stateDir: normalized, logger: logger, capability: capability}, nil
+	return &App{
+		stateDir:         normalized,
+		logger:           logger,
+		capability:       capability,
+		enrollmentClient: enrollment.NewClient(nil),
+	}, nil
 }
 
 // StateDir exposes the normalized state directory.
@@ -110,6 +125,8 @@ func (app *App) Handler() http.Handler {
 	mux.HandleFunc("/expose", app.handleExpose)
 	mux.HandleFunc("/expose/add", app.handleExposeAdd)
 	mux.HandleFunc("/expose/remove", app.handleExposeRemove)
+	mux.HandleFunc("/enrollment/start", app.handleEnrollmentStart)
+	mux.HandleFunc("/enrollment/claim", app.handleEnrollmentClaim)
 	return app.requireLocalRequest(app.requireCapability(mux))
 }
 
@@ -437,11 +454,15 @@ func pairedText(paired bool, gateway, device, caFile string) string {
 
 func exposeRowsHTML(endpoints []agent.Endpoint, csrfToken, capability string) string {
 	if len(endpoints) == 0 {
-		return "<tr><td colspan=\"3\">no local services exposed yet</td></tr>"
+		return "<tr><td colspan=\"4\">no local services exposed yet</td></tr>"
 	}
 	rows := ""
 	for _, endpoint := range endpoints {
-		rows += "<tr><td><code>" + htmlEscape(endpoint.ID) + "</code></td><td>" + htmlEscape(endpoint.Target) +
+		protocol := endpoint.Protocol
+		if protocol == "" {
+			protocol = "tcp"
+		}
+		rows += "<tr><td><code>" + htmlEscape(endpoint.ID) + "</code></td><td>" + htmlEscape(protocol) + "</td><td>" + htmlEscape(endpoint.Target) +
 			"</td><td><form method=\"post\" action=\"/expose/remove?cap=" + htmlEscape(url.QueryEscape(capability)) +
 			"\"><input type=\"hidden\" name=\"id\" value=\"" + htmlEscape(endpoint.ID) +
 			"\"><input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\"><button>Remove</button></form></td></tr>"
@@ -762,8 +783,12 @@ func (app *App) handleExposeAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSpace(r.PostFormValue("id"))
 	target := strings.TrimSpace(r.PostFormValue("target"))
+	protocol := strings.TrimSpace(r.PostFormValue("protocol"))
+	if protocol == "" {
+		protocol = "tcp"
+	}
 	if err := agent.MutateConfig(app.stateDir, func(config *agent.Config) error {
-		config.SetEndpoint(agent.Endpoint{ID: id, Target: target})
+		config.SetEndpoint(agent.Endpoint{ID: id, Target: target, Protocol: protocol})
 		return config.ValidateRuntime()
 	}); err != nil {
 		app.setNotice("expose failed: " + err.Error())
@@ -949,10 +974,11 @@ var pageTemplate = `<!doctype html>
 <form method="post" action="/expose/add?cap=%s">
 <input type="hidden" name="hooshix_csrf" value="%s">
 <input name="id" placeholder="web-001" required pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,63}" title="endpoint id: letters, digits, . _ : -">
+<select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP / QUIC</option></select>
 <input id="target" name="target" placeholder="127.0.0.1:4000" required>
 <button type="submit">Add service</button>
 </form>
-<table><tr><th>endpoint id</th><th>local target</th><th></th></tr>
+<table><tr><th>endpoint id</th><th>protocol</th><th>local target</th><th></th></tr>
 %s
 </table>
 <datalist id="expose-ids">%s</datalist>

@@ -73,3 +73,19 @@ func DialLocalTarget(ctx context.Context, target string, timeout time.Duration) 
 	}
 	return nil, fmt.Errorf("dial localhost loopback candidates: %w", lastErr)
 }
+
+// DialLocalUDPTarget keeps one connected UDP socket per tunnel flow, so a
+// datagram reply cannot be delivered to another client's flow.
+func DialLocalUDPTarget(ctx context.Context, target string, timeout time.Duration) (net.Conn, error) {
+	if err := ValidateLocalTarget(target); err != nil {
+		return nil, err
+	}
+	host, port, _ := net.SplitHostPort(target)
+	dialer := net.Dialer{Timeout: timeout}
+	if !isLocalhostName(host) {
+		return dialer.DialContext(ctx, "udp", net.JoinHostPort(host, port))
+	}
+	// UDP connect cannot discover whether a remote service exists. Prefer
+	// IPv4 consistently; an IPv6-only service should use an explicit ::1.
+	return dialer.DialContext(ctx, "udp", net.JoinHostPort("127.0.0.1", port))
+}

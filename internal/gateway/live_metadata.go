@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
+	contractv2 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv2"
 )
 
 const (
@@ -196,6 +197,38 @@ func (source *LiveMetadata) RevocationReason(ctx context.Context, subjectKind, s
 	return active.RevocationReason(ctx, subjectKind, subjectID, at)
 }
 
+func (source *LiveMetadata) ServiceEndpoint(ctx context.Context, endpointID string, at time.Time) (contractv2.ServiceEndpoint, error) {
+	active, err := source.activeSnapshot(at)
+	if err != nil {
+		return contractv2.ServiceEndpoint{}, err
+	}
+	return active.ServiceEndpoint(ctx, endpointID, at)
+}
+
+func (source *LiveMetadata) PublicTCPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error) {
+	active, err := source.activeSnapshot(at)
+	if err != nil {
+		return nil, err
+	}
+	return active.PublicTCPEndpoints(ctx, at)
+}
+
+func (source *LiveMetadata) PublicUDPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error) {
+	active, err := source.activeSnapshot(at)
+	if err != nil {
+		return nil, err
+	}
+	return active.PublicUDPEndpoints(ctx, at)
+}
+
+func (source *LiveMetadata) ConnectorGrant(ctx context.Context, grantID string, at time.Time) (contractv2.ConnectorGrant, error) {
+	active, err := source.activeSnapshot(at)
+	if err != nil {
+		return contractv2.ConnectorGrant{}, err
+	}
+	return active.ConnectorGrant(ctx, grantID, at)
+}
+
 func (source *LiveMetadata) activeSnapshot(at time.Time) (*SnapshotMetadata, error) {
 	if source == nil {
 		return nil, ErrMetadataUnavailable
@@ -363,17 +396,23 @@ func loadLiveGeneration(root string) (*SnapshotMetadata, [sha256.Size]byte, erro
 	for _, spec := range []struct {
 		category string
 		add      func([]byte) error
+		required bool
 	}{
-		{category: "authorizations", add: source.addAuthorizationJSON},
-		{category: "routes", add: source.addRouteJSON},
-		{category: "revocations", add: source.addRevocationJSON},
+		{category: "authorizations", add: source.addAuthorizationJSON, required: true},
+		{category: "routes", add: source.addRouteJSON, required: true},
+		{category: "revocations", add: source.addRevocationJSON, required: true},
+		{category: "service_endpoints", add: source.addServiceEndpointJSON},
+		{category: "connector_grants", add: source.addConnectorGrantJSON},
 	} {
 		dir := filepath.Join(root, spec.category)
-		if err := validateTrustedMetadataDirectory(dir, false); err != nil {
+		if err := validateTrustedMetadataDirectory(dir, !spec.required); err != nil {
 			return nil, zero, fmt.Errorf("validate metadata category %s: %w", spec.category, err)
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			if !spec.required && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, zero, fmt.Errorf("read metadata category %s: %w", spec.category, err)
 		}
 		for _, entry := range entries {
@@ -426,13 +465,26 @@ func statGenerationFingerprint(root string) ([sha256.Size]byte, error) {
 		return zero, err
 	}
 	hasher := sha256.New()
-	for _, category := range []string{"authorizations", "routes", "revocations"} {
+	for _, spec := range []struct {
+		category string
+		required bool
+	}{
+		{category: "authorizations", required: true},
+		{category: "routes", required: true},
+		{category: "revocations", required: true},
+		{category: "service_endpoints"},
+		{category: "connector_grants"},
+	} {
+		category := spec.category
 		dir := filepath.Join(root, category)
-		if err := validateTrustedMetadataDirectory(dir, false); err != nil {
+		if err := validateTrustedMetadataDirectory(dir, !spec.required); err != nil {
 			return zero, err
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			if !spec.required && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return zero, err
 		}
 		for _, entry := range entries {

@@ -11,6 +11,7 @@
     { "$ref": "#/$defs/pong" },
     { "$ref": "#/$defs/health_report" },
     { "$ref": "#/$defs/stream_open" },
+    { "$ref": "#/$defs/stream_half_close" },
     { "$ref": "#/$defs/stream_close" },
     { "$ref": "#/$defs/stream_error" },
     { "$ref": "#/$defs/session_revoked" },
@@ -197,6 +198,16 @@
         "assignment_id": { "$ref": "#/$defs/id" },
         "local_endpoint_id": { "$ref": "#/$defs/id" },
         "request_id": { "$ref": "#/$defs/id" }
+        ,"mode": { "enum": ["http", "tcp", "udp"] }
+      },
+      "additionalProperties": false
+    },
+    "stream_half_close": {
+      "type": "object",
+      "required": ["contract_version", "message_type"],
+      "properties": {
+        "contract_version": { "const": 1 },
+        "message_type": { "const": "stream_half_close" }
       },
       "additionalProperties": false
     },

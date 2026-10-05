@@ -290,6 +290,7 @@ func commandExpose(args []string, stdout io.Writer) error {
 		stateDir := flags.String("state-dir", "", "Agent state directory")
 		id := flags.String("id", "", "local endpoint ID")
 		target := flags.String("target", "", "loopback host:port")
+		protocol := flags.String("protocol", "tcp", "tcp or udp")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -299,12 +300,15 @@ func commandExpose(args []string, stdout io.Writer) error {
 		if err := ValidateLocalTarget(*target); err != nil {
 			return err
 		}
+		if *protocol != "tcp" && *protocol != "udp" {
+			return errors.New("protocol must be tcp or udp")
+		}
 		dir, err := NormalizeStateDir(*stateDir)
 		if err != nil {
 			return err
 		}
 		if err := MutateConfig(dir, func(config *Config) error {
-			config.SetEndpoint(Endpoint{ID: *id, Target: *target})
+			config.SetEndpoint(Endpoint{ID: *id, Target: *target, Protocol: *protocol})
 			return nil
 		}); err != nil {
 			return err

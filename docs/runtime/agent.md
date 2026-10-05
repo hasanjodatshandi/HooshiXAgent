@@ -157,9 +157,14 @@ Manage approved local mappings:
 
 ```bash
 hooshix-agent expose add --state-dir <dir> --id local-http-001 --target 127.0.0.1:8080
+hooshix-agent expose add --state-dir <dir> --id local-udp-001 --target 127.0.0.1:5353 --protocol udp
 hooshix-agent expose list --state-dir <dir>
 hooshix-agent expose remove --state-dir <dir> --id local-http-001
 ```
+
+UDP mappings are opt-in; existing mappings remain TCP. Each UDP tunnel frame
+contains one datagram of at most 1200 bytes. The Agent-side support is a Phase
+6 foundation and does not enable private or public UDP routing by itself.
 
 Diagnostics:
 

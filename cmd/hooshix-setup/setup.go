@@ -11,6 +11,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -130,7 +131,78 @@ func run() error {
 		_ = os.Remove(backup)
 	}
 	committed = true
+	if err := enrollInstalledAgent(); err != nil {
+		fmt.Println("warning: automatic device enrollment did not complete:", err)
+		fmt.Println("         the service remains installed; re-run Setup or use the tray pairing page.")
+	}
 	fmt.Println("done. The HooshiX Agent service and tray are running.")
+	return nil
+}
+
+func enrollInstalledAgent() error {
+	stdinInfo, err := os.Stdin.Stat()
+	if err != nil || stdinInfo.Mode()&os.ModeCharDevice == 0 {
+		return nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Panel server URL (for example https://agent.hooshix.com; leave blank to pair later): ")
+	serverURL, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	serverURL = strings.TrimSpace(serverURL)
+	if serverURL == "" {
+		fmt.Println("device enrollment skipped; use the tray icon when you are ready.")
+		return nil
+	}
+	defaultName, _ := os.Hostname()
+	if strings.TrimSpace(defaultName) == "" {
+		defaultName = "Windows PC"
+	}
+	fmt.Printf("Device name [%s]: ", defaultName)
+	deviceName, readErr := reader.ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	deviceName = strings.TrimSpace(deviceName)
+	if deviceName == "" {
+		deviceName = defaultName
+	}
+	stateDir, err := serviceStateDir()
+	if err != nil {
+		return err
+	}
+	started, err := agent.StartServiceEnrollment(stateDir, serverURL, deviceName)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nApprove device code %s at:\n%s\n", started.UserCode, started.VerificationURI)
+	if err := openEnrollmentBrowser(started.VerificationURI); err != nil {
+		fmt.Println("note: the approval page could not be opened automatically; copy the URL above:", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, started.ExpiresAt)
+	if err != nil {
+		return errors.New("Agent service returned an invalid enrollment expiry")
+	}
+	for time.Now().Before(expiresAt) {
+		claimed, claimErr := agent.ClaimServiceEnrollment(stateDir)
+		if claimErr != nil {
+			return claimErr
+		}
+		if claimed.State == "claimed" {
+			fmt.Printf("device %s enrolled successfully.\n", claimed.DeviceID)
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return errors.New("device approval expired; start enrollment again")
+}
+
+func openEnrollmentBrowser(target string) error {
+	command := exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("open browser: %w", err)
+	}
 	return nil
 }
 

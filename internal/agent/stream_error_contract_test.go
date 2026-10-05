@@ -49,6 +49,10 @@ func TestPermanentPolicyViolationClassification(t *testing.T) {
 	transient := []websocket.CloseError{
 		{Code: websocket.StatusPolicyViolation, Reason: "idle timeout"},
 		{Code: websocket.StatusPolicyViolation, Reason: "session ended"},
+		// Enrollment publishes before returning credentials, but Gateways activate
+		// that generation asynchronously. The first authentication can race that
+		// short propagation window and must reconnect with normal backoff.
+		{Code: websocket.StatusPolicyViolation, Reason: "authentication failed"},
 	}
 	for _, tc := range transient {
 		if permanentPolicyViolation(tc) {
@@ -59,7 +63,6 @@ func TestPermanentPolicyViolationClassification(t *testing.T) {
 	permanent := []websocket.CloseError{
 		{Code: websocket.StatusPolicyViolation, Reason: "control violation"},
 		{Code: websocket.StatusPolicyViolation, Reason: "sequence violation"},
-		{Code: websocket.StatusPolicyViolation, Reason: "authentication failed"},
 		{Code: websocket.StatusPolicyViolation}, // no reason: assume breach
 	}
 	for _, tc := range permanent {

@@ -163,11 +163,21 @@ The payload contains only:
 - `local_endpoint_id` — opaque identifier of an Agent-local approved mapping;
 - `request_id` — correlation identifier.
 
+Agent and Gateway require the single `hooshix.tunnel.v1` WebSocket subprotocol.
+It includes resume proof and TCP half-close semantics; there is no downgrade or
+legacy handshake path. `stream_open.mode` may be `http`, `tcp`, or `udp`; omission means
+HTTP. In UDP mode, one kind `0x02` frame is exactly one datagram, never a byte
+stream or a fragment; the Phase 6 UDP profile limits it to 1200 bytes. Private
+TCP authority uses the scoped Connector grant ID in the existing
+`assignment_id` slot; this identifier remains opaque to the Agent and never
+conveys a raw target.
+
 The payload does **not** contain an IP address, hostname, URL, scheme, file path, socket path, or arbitrary local target. The Agent resolves `local_endpoint_id` against its own locally approved mapping and independently enforces the local-target/SSRF policy.
 
 ## 9. Data
 
-Kind `0x02` data frames contain opaque stream bytes.
+Kind `0x02` data frames contain opaque stream bytes for HTTP/TCP, or one opaque
+datagram for UDP mode. UDP mode never uses TCP half-close.
 
 Rules:
 
@@ -177,6 +187,12 @@ Rules:
 - data carries no JSON control metadata.
 
 ## 10. Stream close and error
+
+`stream_half_close` is a stream-scoped, payload-free control message available
+only when the Agent advertised that capability. It means the sender will emit
+no more data for that stream. Queued data is delivered first; the opposite
+direction remains open. A second half-close is idempotent. `stream_close` and
+`stream_error` remain full terminal events and release both directions.
 
 `stream_close` performs normal stream shutdown and contains a bounded `reason_code`.
 
@@ -210,18 +226,10 @@ Health reports are telemetry only. They refresh liveness observation on the Gate
 
 ## 11b. Session resume
 
-Per ADR-0015, this extension is enabled **only** when the verified WSS
-handshake selects the `hooshix.resume-proof.v1` WebSocket subprotocol. New
-Agents offer it and new Gateways select it when offered. Without that selection,
-the Gateway emits the original `session_ready` shape (no `resume_challenge`)
-and the Agent uses full authentication, even if it retained old resume material.
-With the extension selected, `resume_challenge` is mandatory and validated;
-absence is an error, not a downgrade. Resume on an unnegotiated connection is
-rejected. Both full and resume handshakes have a finite handshake deadline.
-
-The JSON schema allows the baseline and extended `session_ready` shapes;
-the runtime must additionally enforce the negotiated shape through
-`ValidateReadyNegotiation`. Frame version and external metadata version stay 1.
+Per ADR-0015, the verified WSS handshake must select `hooshix.tunnel.v1`.
+`resume_challenge` is mandatory in every `session_ready`; absence or a different
+subprotocol is an error. Both full and resume handshakes have a finite deadline.
+The runtime enforces this through `ValidateReadyNegotiation`.
 
 `resume_session` is an Agent→Gateway session-level fast-path request on stream ID `0` sent as the first control frame of a new WebSocket connection after a transport interruption:
 

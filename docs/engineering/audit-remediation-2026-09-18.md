@@ -17,7 +17,7 @@ Control Panel was not audited or changed.
 | Resume timeout | Bound authentication/resume by the configured handshake deadline. | `TestResumeHandshakeHasItsOwnDeadline`. |
 | HA health | The actual primary worker updates the health machine exposed by the runner; standby workers have independent machines. | `TestHAHealthTracksRealAuthenticatedPrimary`. |
 | HA failure isolation | A gateway-local permanent failure does not terminate healthy siblings; device-wide revocation still does. | `TestPermanentAliasFailureDoesNotCancelHealthyPrimary`. |
-| Protocol compatibility | Negotiate resume proof through a WebSocket subprotocol; baseline v1 peers retain the baseline strict handshake shape. No unnegotiated resume is accepted. | Legacy/new Agent and Gateway negotiation tests; ADR-0015. |
+| Tunnel protocol | Require the unified TLS WebSocket subprotocol with bound resume proof and half-close; no downgrade path. | Negotiation, replay and end-to-end tests; ADR-0015. |
 | Multiplexing | A full stream queue terminates only that stream instead of blocking the shared reader for two seconds. | Stream isolation test; large-request streaming passed ten repetitions. |
 | Windows first start | Initialize the state identity and pairing capability before the logger/listener. Persistent archive installation establishes the state access policy first. | DPAPI bootstrap/restart test; archive installer lifecycle smoke. |
 | Windows service recovery | Reset the failure count after 86,400 seconds, not one second. | Installed dependency documentation confirms seconds; build and service package tests pass. Native SCM policy application remains an isolated-host validation item. |

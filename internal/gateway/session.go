@@ -22,6 +22,7 @@ type session struct {
 	authorizationID        string
 	tokenID                string
 	authorizationExpiresAt time.Time
+	supportsHalfClose      bool
 
 	inbound    contractv1.SequenceTracker
 	outbound   atomic.Uint64
@@ -98,7 +99,7 @@ func closeCodeFor(err error, fallback websocket.StatusCode, fallbackReason strin
 	return fallback, fallbackReason
 }
 
-func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64, resumeChallenge string) *session {
+func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, authorizationID, tokenID string, authorizationExpiresAt time.Time, inbound contractv1.SequenceTracker, lastOutbound uint64, resumeChallenge string, supportsHalfClose bool) *session {
 	sess := &session{
 		gateway:                gateway,
 		conn:                   conn,
@@ -107,6 +108,7 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 		authorizationID:        authorizationID,
 		tokenID:                tokenID,
 		authorizationExpiresAt: authorizationExpiresAt,
+		supportsHalfClose:      supportsHalfClose,
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
 		queueBudget:            newByteBudget(gateway.limits.MaxSessionQueueBytes),
@@ -165,6 +167,7 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 		authorizationID:        sess.authorizationID,
 		tokenID:                sess.tokenID,
 		authorizationExpiresAt: sess.authorizationExpiresAt,
+		supportsHalfClose:      sess.supportsHalfClose,
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
 		queueBudget:            newByteBudget(sess.gateway.limits.MaxSessionQueueBytes),
@@ -442,6 +445,15 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 	case "stream_close":
 		sess.finishStream(frame.StreamID, io.EOF)
 		return nil
+	case "stream_half_close":
+		sess.mu.Lock()
+		stream := sess.streams[frame.StreamID]
+		sess.mu.Unlock()
+		if stream == nil {
+			return nil
+		}
+		stream.halfClose()
+		return nil
 	case "stream_error":
 		var message contractv1.StreamError
 		if err := json.Unmarshal(frame.Payload, &message); err != nil {
@@ -470,6 +482,10 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 		}
 		return fmt.Errorf("data for unknown stream %d", frame.StreamID)
 	}
+	if stream.datagram && len(frame.Payload) > contractv1.MaxUDPDatagram {
+		sess.errorStream(frame.StreamID, "resource_limit", "UDP datagram exceeds tunnel limit", false, errors.New("oversize Agent UDP datagram"))
+		return nil
+	}
 	if err := stream.enqueue(frame.Payload); err != nil {
 		sess.gateway.logger.Warn("stream enqueue rejected", "stream_id", frame.StreamID, "bytes", len(frame.Payload), "error", err)
 		sess.errorStream(frame.StreamID, "resource_limit", "stream response queue exhausted", true, fmt.Errorf("stream %d inbound queue: %w", frame.StreamID, err))
@@ -480,6 +496,28 @@ func (sess *session) handleData(frame contractv1.Frame) error {
 }
 
 func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRouteAssignment) (*stream, error) {
+	return sess.openStreamTarget(ctx, route.EndpointID, route.AssignmentID, route.LocalEndpointID, "")
+}
+
+func (sess *session) openPrivateStream(ctx context.Context, endpointID, grantID, localEndpointID string) (*stream, error) {
+	if !sess.supportsHalfClose {
+		return nil, errors.New("agent does not support private TCP streams")
+	}
+	return sess.openStreamTarget(ctx, endpointID, grantID, localEndpointID, "tcp")
+}
+
+func (sess *session) openPrivateUDPFlow(ctx context.Context, endpointID, grantID, localEndpointID string) (*stream, error) {
+	return sess.openStreamTarget(ctx, endpointID, grantID, localEndpointID, "udp")
+}
+
+func (sess *session) sendDatagram(ctx context.Context, streamID uint32, packet []byte) error {
+	if len(packet) > contractv1.MaxUDPDatagram {
+		return errors.New("UDP datagram exceeds tunnel limit")
+	}
+	return sess.sendFrame(ctx, contractv1.KindData, streamID, packet)
+}
+
+func (sess *session) openStreamTarget(ctx context.Context, endpointID, authorityID, localEndpointID, mode string) (*stream, error) {
 	requestID, err := sess.gateway.newID("request")
 	if err != nil {
 		return nil, fmt.Errorf("generate request ID: %w", err)
@@ -504,22 +542,36 @@ func (sess *session) openStream(ctx context.Context, route contractv1.EndpointRo
 		sess.gateway.resources.queueBytes,
 		&sess.gateway.resources.queueRejects,
 	)
+	stream.datagram = mode == "udp"
 	sess.streams[streamID] = stream
 	sess.mu.Unlock()
 
 	message := contractv1.StreamOpen{
 		ContractVersion: contractv1.ProtocolVersion,
 		MessageType:     "stream_open",
-		EndpointID:      route.EndpointID,
-		AssignmentID:    route.AssignmentID,
-		LocalEndpointID: route.LocalEndpointID,
+		EndpointID:      endpointID,
+		AssignmentID:    authorityID,
+		LocalEndpointID: localEndpointID,
 		RequestID:       requestID,
+		Mode:            mode,
 	}
 	if err := sess.sendControl(ctx, streamID, message); err != nil {
 		sess.finishStream(streamID, err)
 		return nil, err
 	}
 	return stream, nil
+}
+
+func (sess *session) halfCloseStream(streamID uint32) error {
+	if !sess.supportsHalfClose {
+		return errors.New("agent does not support stream half-close")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sess.gateway.limits.WriteTimeout)
+	defer cancel()
+	return sess.sendControl(ctx, streamID, contractv1.StreamHalfClose{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "stream_half_close",
+	})
 }
 
 func (sess *session) detachStream(streamID uint32, err error) *stream {
@@ -783,6 +835,9 @@ type queuedPayload struct {
 
 type stream struct {
 	id uint32
+	// datagram keeps KindData frame boundaries for UDP flows. TCP/HTTP retain
+	// their byte-stream Read behavior.
+	datagram bool
 	// ctx is the ingressing request's context (plus the response-phase
 	// inactivity deadline). Read selects on it so a tunnel read can never
 	// outlive the request that owns the stream slot.
@@ -797,16 +852,21 @@ type stream struct {
 	// terminalBytes is their reserved byte total: the reservation stays held
 	// while the bytes are retained and is released exactly once, either on
 	// dequeue in Read or when the abandoned tail is discarded.
-	terminalBuffer []byte
-	terminalBytes  int64
-	terminalErr    error
-	terminalReady  bool
-	terminal       chan struct{}
-	streamBudget   *byteBudget
-	sessionBudget  *byteBudget
-	globalBudget   *byteBudget
-	rejectCounter  *atomic.Uint64
-	finishOnce     sync.Once
+	terminalBuffer  []byte
+	terminalPackets []queuedPayload
+	terminalBytes   int64
+	terminalErr     error
+	terminalReady   bool
+	terminal        chan struct{}
+	streamBudget    *byteBudget
+	sessionBudget   *byteBudget
+	globalBudget    *byteBudget
+	rejectCounter   *atomic.Uint64
+	finishOnce      sync.Once
+}
+
+func (stream *stream) halfClose() {
+	stream.finish(nil)
 }
 
 func newStream(ctx context.Context, id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
@@ -862,6 +922,9 @@ func (stream *stream) releaseQueued(size int64) {
 }
 
 func (stream *stream) Read(data []byte) (int, error) {
+	if stream.datagram {
+		return 0, errors.New("byte-stream read on UDP flow")
+	}
 	for len(stream.buffer) == 0 {
 		// Queued payload chunks are always drained first: a terminal frame
 		// only means "no more data follows", so chunks racing the close
@@ -912,6 +975,47 @@ func (stream *stream) Read(data []byte) (int, error) {
 	return n, nil
 }
 
+func (stream *stream) ReadDatagram() ([]byte, error) {
+	if !stream.datagram {
+		return nil, errors.New("datagram read on byte stream")
+	}
+	for {
+		select {
+		case packet := <-stream.incoming:
+			stream.releaseQueued(packet.size)
+			return packet.data, nil
+		default:
+		}
+		stream.queueMu.Lock()
+		if stream.terminalReady {
+			if len(stream.terminalPackets) > 0 {
+				packet := stream.terminalPackets[0]
+				stream.terminalPackets[0] = queuedPayload{}
+				stream.terminalPackets = stream.terminalPackets[1:]
+				stream.terminalBytes -= packet.size
+				stream.queueMu.Unlock()
+				stream.releaseQueued(packet.size)
+				return packet.data, nil
+			}
+			err := stream.terminalErr
+			stream.queueMu.Unlock()
+			if err == nil {
+				return nil, io.EOF
+			}
+			return nil, err
+		}
+		stream.queueMu.Unlock()
+		select {
+		case packet := <-stream.incoming:
+			stream.releaseQueued(packet.size)
+			return packet.data, nil
+		case <-stream.terminal:
+		case <-stream.ctx.Done():
+			return nil, stream.ctx.Err()
+		}
+	}
+}
+
 func (stream *stream) finish(err error) {
 	stream.finishOnce.Do(func() {
 		stream.queueMu.Lock()
@@ -925,14 +1029,21 @@ func (stream *stream) finish(err error) {
 		for {
 			select {
 			case chunk := <-stream.incoming:
-				tail = append(tail, chunk.data...)
+				if stream.datagram {
+					stream.terminalPackets = append(stream.terminalPackets, chunk)
+					stream.terminalBytes += chunk.size
+				} else {
+					tail = append(tail, chunk.data...)
+				}
 				continue
 			default:
 			}
 			break
 		}
 		stream.terminalBuffer = tail
-		stream.terminalBytes = int64(len(tail))
+		if !stream.datagram {
+			stream.terminalBytes = int64(len(tail))
+		}
 		stream.terminalErr = err
 		stream.terminalReady = true
 		stream.queueMu.Unlock()
@@ -964,6 +1075,7 @@ func (stream *stream) discardRetained() {
 	stream.queueMu.Lock()
 	size := stream.terminalBytes
 	stream.terminalBuffer = nil
+	stream.terminalPackets = nil
 	stream.terminalBytes = 0
 	stream.queueMu.Unlock()
 	if size > 0 {

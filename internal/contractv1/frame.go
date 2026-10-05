@@ -15,6 +15,7 @@ const (
 	ProtocolVersion          = 1
 	MaxControlPayload        = 64 * 1024
 	MaxDataPayload           = 1024 * 1024
+	MaxUDPDatagram           = 1200
 	MaxSequence       uint64 = ^uint64(0)
 )
 

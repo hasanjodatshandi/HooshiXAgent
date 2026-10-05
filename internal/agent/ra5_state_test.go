@@ -301,8 +301,8 @@ func TestRA5PermanentFailureStopsReconnectLoop(t *testing.T) {
 	if attempts.Load() != 1 {
 		t.Fatalf("permanent failure retried %d times", attempts.Load())
 	}
-	if !permanentRemoteSessionError(websocket.CloseError{Code: websocket.StatusPolicyViolation, Reason: "authentication failed"}) {
-		t.Fatal("policy violation was not classified permanent")
+	if permanentRemoteSessionError(websocket.CloseError{Code: websocket.StatusPolicyViolation, Reason: "authentication failed"}) {
+		t.Fatal("authentication propagation race was incorrectly classified permanent")
 	}
 	if permanentRemoteSessionError(websocket.CloseError{Code: websocket.StatusTryAgainLater, Reason: "overloaded"}) {
 		t.Fatal("try-again-later was incorrectly classified permanent")

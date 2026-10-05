@@ -44,7 +44,7 @@ type stubGateway struct {
 }
 
 func (stub *stubGateway) serve(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.ResumeProofSubprotocol}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.TunnelSubprotocol}})
 	if err != nil {
 		stub.t.Errorf("stub gateway accept: %v", err)
 		return
@@ -345,7 +345,7 @@ func dialStubGateway(t *testing.T, ctx context.Context, server *httptest.Server,
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}}
 	wssURL := "wss" + strings.TrimPrefix(server.URL, "https") + "/agent/v1/connect"
-	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.ResumeProofSubprotocol}})
+	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.TunnelSubprotocol}})
 	if err != nil {
 		t.Fatalf("dial stub gateway: %v", err)
 	}

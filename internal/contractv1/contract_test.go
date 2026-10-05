@@ -283,6 +283,25 @@ func TestControlPayloadScopeAndStrictness(t *testing.T) {
 	if err := ValidateControlPayload(streamOpen, 0, fixtureTime); err == nil {
 		t.Fatal("stream_open on session stream must be rejected")
 	}
+	tcpOpen := []byte(`{"contract_version":1,"message_type":"stream_open","endpoint_id":"endpoint-001","assignment_id":"grant-001","local_endpoint_id":"local-tcp-001","request_id":"request-002","mode":"tcp"}`)
+	if err := ValidateControlPayload(tcpOpen, 7, fixtureTime); err != nil {
+		t.Fatalf("valid TCP stream_open: %v", err)
+	}
+	udpOpen := []byte(`{"contract_version":1,"message_type":"stream_open","endpoint_id":"endpoint-001","assignment_id":"grant-001","local_endpoint_id":"local-udp-001","request_id":"request-003","mode":"udp"}`)
+	if err := ValidateControlPayload(udpOpen, 9, fixtureTime); err != nil {
+		t.Fatalf("valid UDP stream_open: %v", err)
+	}
+	halfClose := []byte(`{"contract_version":1,"message_type":"stream_half_close"}`)
+	if err := ValidateControlPayload(halfClose, 7, fixtureTime); err != nil {
+		t.Fatalf("valid stream_half_close: %v", err)
+	}
+	if err := ValidateControlPayload(halfClose, 0, fixtureTime); err == nil {
+		t.Fatal("stream_half_close on session stream must be rejected")
+	}
+	helloWithRemovedCapability := []byte(`{"contract_version":1,"message_type":"client_hello","device_id":"device-001","authorization_id":"auth-001","token_id":"token-001","session_token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","capabilities":["stream_half_close"]}`)
+	if _, err := DecodeClientHello(helloWithRemovedCapability); err == nil {
+		t.Fatal("removed compatibility capability must be rejected")
+	}
 
 	withRawTarget := []byte(`{"contract_version":1,"message_type":"stream_open","endpoint_id":"endpoint-001","assignment_id":"assign-001","local_endpoint_id":"local-http-001","request_id":"request-001","local_target":"127.0.0.1:8080"}`)
 	if err := ValidateControlPayload(withRawTarget, 7, fixtureTime); err == nil {

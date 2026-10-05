@@ -66,6 +66,9 @@ type agentStream struct {
 	finish        sync.Once
 	terminal      sync.Once
 	logger        *slog.Logger
+	mode          string
+	peerHalfClose chan struct{}
+	peerHalfOnce  sync.Once
 }
 
 func authenticateAgent(
@@ -303,6 +306,18 @@ func (sess *agentSession) handleControl(parent context.Context, frame contractv1
 		sess.logger.Debug("gateway stream_close", "stream_id", frame.StreamID)
 		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
+	case "stream_half_close":
+		sess.mu.Lock()
+		stream := sess.streams[frame.StreamID]
+		sess.mu.Unlock()
+		if stream == nil {
+			return nil
+		}
+		if stream.mode != "tcp" {
+			return sess.sendStreamError(parent, frame.StreamID, "protocol_error", "half-close is valid only for TCP streams", false)
+		}
+		stream.peerHalfOnce.Do(func() { close(stream.peerHalfClose) })
+		return nil
 	case "stream_error":
 		sess.logger.Debug("gateway stream_error", "stream_id", frame.StreamID)
 		sess.finishStreamFromPeer(frame.StreamID)
@@ -336,6 +351,10 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		sess.mu.Unlock()
 		return sess.sendStreamError(parent, frame.StreamID, "route_revoked", "local endpoint is not configured", false)
 	}
+	if (endpoint.Protocol == "udp") != (message.Mode == "udp") {
+		sess.mu.Unlock()
+		return sess.sendStreamError(parent, frame.StreamID, "protocol_error", "local endpoint protocol mismatch", false)
+	}
 	streamCtx, cancel := context.WithCancel(parent)
 	stream := &agentStream{
 		id:            frame.StreamID,
@@ -347,6 +366,8 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		streamBudget:  newAgentByteBudget(sess.limits.MaxStreamQueueBytes),
 		sessionBudget: sess.queueBudget,
 		logger:        sess.logger,
+		mode:          message.Mode,
+		peerHalfClose: make(chan struct{}),
 	}
 	sess.streams[frame.StreamID] = stream
 	sess.mu.Unlock()
@@ -371,6 +392,11 @@ func (sess *agentSession) handleData(parent context.Context, frame contractv1.Fr
 			return nil
 		}
 		return fmt.Errorf("data received for unknown stream %d", frame.StreamID)
+	}
+	if stream.mode == "udp" && len(frame.Payload) > maxUDPDatagram {
+		_ = sess.sendStreamTerminalError(stream, "resource_limit", "UDP datagram exceeds tunnel limit", false)
+		sess.finishStream(frame.StreamID)
+		return nil
 	}
 	if stream.enqueue(frame.Payload) {
 		return nil
@@ -443,6 +469,10 @@ func (stream *agentStream) finishStream() {
 }
 
 func (sess *agentSession) serveStream(stream *agentStream) {
+	if stream.mode == "udp" {
+		sess.serveUDPStream(stream)
+		return
+	}
 	sess.logger.Debug("stream open", "stream_id", stream.id, "endpoint_id", stream.endpoint.ID, "target", stream.endpoint.Target)
 	conn, err := DialLocalTarget(stream.ctx, stream.endpoint.Target, sess.limits.DialTimeout)
 	if err != nil {
@@ -459,6 +489,7 @@ func (sess *agentSession) serveStream(stream *agentStream) {
 
 	writerDone := make(chan error, 1)
 	go func() { writerDone <- sess.writeLocal(stream, conn) }()
+	writerFinished := false
 
 	buffer := make([]byte, 32*1024)
 	sent := 0
@@ -493,11 +524,33 @@ readLoop:
 		}
 	}
 	peerClosed := stream.ctx.Err() != nil
+	if stream.mode == "tcp" && localReadErr == nil && !peerClosed {
+		if err := sess.sendControl(context.Background(), stream.id, contractv1.StreamHalfClose{
+			ContractVersion: contractv1.ProtocolVersion,
+			MessageType:     "stream_half_close",
+		}); err != nil {
+			localReadErr = err
+		} else {
+			select {
+			case <-stream.ctx.Done():
+				peerClosed = true
+			case writeErr := <-writerDone:
+				writerFinished = true
+				if writeErr != nil {
+					localReadErr = writeErr
+				}
+			case <-time.After(sess.limits.IdleTimeout):
+				localReadErr = errors.New("TCP half-closed stream idle timeout")
+			}
+		}
+	}
 	stream.cancel()
 	_ = conn.Close()
-	select {
-	case <-writerDone:
-	case <-time.After(sess.limits.WriteTimeout):
+	if !writerFinished {
+		select {
+		case <-writerDone:
+		case <-time.After(sess.limits.WriteTimeout):
+		}
 	}
 	if !peerClosed {
 		if localReadErr == nil {
@@ -529,20 +582,41 @@ func (sess *agentSession) writeLocal(stream *agentStream, conn net.Conn) error {
 		case <-stream.ctx.Done():
 			return nil
 		case queued := <-stream.incoming:
-			stream.releaseQueued(queued.Size)
-			payload := queued.Data
-			if err := conn.SetWriteDeadline(time.Now().Add(sess.limits.WriteTimeout)); err != nil {
+			if err := sess.writeLocalPayload(stream, conn, queued); err != nil {
 				return err
 			}
-			for len(payload) > 0 {
-				n, err := conn.Write(payload)
-				if err != nil {
-					return err
+		case <-stream.peerHalfClose:
+			for {
+				select {
+				case queued := <-stream.incoming:
+					if err := sess.writeLocalPayload(stream, conn, queued); err != nil {
+						return err
+					}
+				default:
+					if tcp, ok := conn.(interface{ CloseWrite() error }); ok {
+						return tcp.CloseWrite()
+					}
+					return errors.New("local TCP connection does not support half-close")
 				}
-				payload = payload[n:]
 			}
 		}
 	}
+}
+
+func (sess *agentSession) writeLocalPayload(stream *agentStream, conn net.Conn, queued agentQueuedPayload) error {
+	stream.releaseQueued(queued.Size)
+	payload := queued.Data
+	if err := conn.SetWriteDeadline(time.Now().Add(sess.limits.WriteTimeout)); err != nil {
+		return err
+	}
+	for len(payload) > 0 {
+		n, err := conn.Write(payload)
+		if err != nil {
+			return err
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 func (sess *agentSession) sendBytes(parent context.Context, streamID uint32, payload []byte) error {

@@ -1105,7 +1105,7 @@ func dialRawAgent(t testing.TB, client *http.Client, baseURL string) *websocket.
 	wssURL := "wss" + strings.TrimPrefix(baseURL, "https") + agentPath
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.ResumeProofSubprotocol}})
+	conn, _, err := websocket.Dial(ctx, wssURL, &websocket.DialOptions{HTTPClient: client, CompressionMode: websocket.CompressionDisabled, Subprotocols: []string{contractv1.TunnelSubprotocol}})
 	if err != nil {
 		t.Fatalf("dial agent WSS: %v", err)
 	}

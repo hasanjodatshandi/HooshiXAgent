@@ -14,6 +14,7 @@ import (
 	"time"
 
 	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
+	contractv2 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv2"
 )
 
 var ErrMetadataNotFound = errors.New("external metadata not found")
@@ -22,6 +23,23 @@ type MetadataSource interface {
 	Authorization(ctx context.Context, authorizationID, deviceID, tokenID string, at time.Time) (contractv1.DeviceSessionAuthorization, error)
 	RouteByHostname(ctx context.Context, hostname string, at time.Time) (contractv1.EndpointRouteAssignment, error)
 	Revoked(ctx context.Context, subjectKind, subjectID string, at time.Time) (bool, error)
+}
+
+// PrivateEndpointMetadata is the v2 authority required by Connector ingress.
+// It stays separate so existing v1 metadata adapters remain source-compatible.
+type PrivateEndpointMetadata interface {
+	ServiceEndpoint(ctx context.Context, endpointID string, at time.Time) (contractv2.ServiceEndpoint, error)
+	ConnectorGrant(ctx context.Context, grantID string, at time.Time) (contractv2.ConnectorGrant, error)
+}
+
+// PublicTCPMetadata is the authority used to reconcile public TCP listeners.
+type PublicTCPMetadata interface {
+	ServiceEndpoint(ctx context.Context, endpointID string, at time.Time) (contractv2.ServiceEndpoint, error)
+	PublicTCPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error)
+}
+
+type PublicUDPMetadata interface {
+	PublicUDPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error)
 }
 
 type StatusSink interface {
@@ -77,6 +95,9 @@ type SnapshotMetadata struct {
 	routes            map[string]routeSnapshot
 	revocations       map[revocationSubject]time.Time
 	revocationReasons map[revocationSubject]string
+	serviceEndpoints  map[string]contractv2.ServiceEndpoint
+	publicPorts       map[int]string
+	connectorGrants   map[string]contractv2.ConnectorGrant
 	readyErr          error
 }
 
@@ -86,6 +107,9 @@ func NewSnapshotMetadata() *SnapshotMetadata {
 		routes:            make(map[string]routeSnapshot),
 		revocations:       make(map[revocationSubject]time.Time),
 		revocationReasons: make(map[revocationSubject]string),
+		serviceEndpoints:  make(map[string]contractv2.ServiceEndpoint),
+		publicPorts:       make(map[int]string),
+		connectorGrants:   make(map[string]contractv2.ConnectorGrant),
 	}
 }
 
@@ -101,6 +125,8 @@ func LoadSnapshotDirectory(root string) (*SnapshotMetadata, error) {
 		{dir: "authorizations", fn: source.addAuthorizationJSON},
 		{dir: "routes", fn: source.addRouteJSON},
 		{dir: "revocations", fn: source.addRevocationJSON},
+		{dir: "service_endpoints", fn: source.addServiceEndpointJSON},
+		{dir: "connector_grants", fn: source.addConnectorGrantJSON},
 	} {
 		dir := filepath.Join(root, spec.dir)
 		if err := validateTrustedMetadataDirectory(dir, true); err != nil {
@@ -216,6 +242,92 @@ func (source *SnapshotMetadata) addRevocationJSON(data []byte) error {
 		source.revocationReasons[subject] = signal.ReasonCode
 	}
 	return nil
+}
+
+func (source *SnapshotMetadata) addServiceEndpointJSON(data []byte) error {
+	record, err := contractv2.ParseServiceEndpoint(data)
+	if err != nil {
+		return source.invalidate(err)
+	}
+	if _, exists := source.serviceEndpoints[record.EndpointID]; exists {
+		return source.invalidate(fmt.Errorf("duplicate service endpoint %q", record.EndpointID))
+	}
+	if record.PublicPort != 0 {
+		if endpointID, exists := source.publicPorts[record.PublicPort]; exists {
+			return source.invalidate(fmt.Errorf("public port %d is assigned to both %q and %q", record.PublicPort, endpointID, record.EndpointID))
+		}
+		source.publicPorts[record.PublicPort] = record.EndpointID
+	}
+	source.serviceEndpoints[record.EndpointID] = record
+	return nil
+}
+
+func (source *SnapshotMetadata) PublicTCPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error) {
+	return source.publicEndpoints(ctx, at, contractv2.ProtocolTCP), nil
+}
+
+func (source *SnapshotMetadata) PublicUDPEndpoints(ctx context.Context, at time.Time) ([]contractv2.ServiceEndpoint, error) {
+	return source.publicEndpoints(ctx, at, contractv2.ProtocolUDP), nil
+}
+
+func (source *SnapshotMetadata) publicEndpoints(ctx context.Context, at time.Time, protocol contractv2.Protocol) []contractv2.ServiceEndpoint {
+	records := make([]contractv2.ServiceEndpoint, 0, len(source.publicPorts))
+	for _, endpointID := range source.publicPorts {
+		record, err := source.ServiceEndpoint(ctx, endpointID, at)
+		if err != nil || record.Protocol != protocol {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+func (source *SnapshotMetadata) ServiceEndpoint(_ context.Context, endpointID string, at time.Time) (contractv2.ServiceEndpoint, error) {
+	record, ok := source.serviceEndpoints[endpointID]
+	if !ok {
+		return contractv2.ServiceEndpoint{}, ErrMetadataNotFound
+	}
+	if !record.Enabled {
+		return record, errors.New("service endpoint is disabled")
+	}
+	if source.revokedAt(revocationSubject{kind: "device", id: record.OwnerDeviceID}, at) {
+		return record, errors.New("service endpoint owner is revoked")
+	}
+	return record, nil
+}
+
+func (source *SnapshotMetadata) addConnectorGrantJSON(data []byte) error {
+	record, err := contractv2.ParseConnectorGrant(data)
+	if err != nil {
+		return source.invalidate(err)
+	}
+	if _, exists := source.connectorGrants[record.GrantID]; exists {
+		return source.invalidate(fmt.Errorf("duplicate connector grant %q", record.GrantID))
+	}
+	source.connectorGrants[record.GrantID] = record
+	return nil
+}
+
+func (source *SnapshotMetadata) ConnectorGrant(_ context.Context, grantID string, at time.Time) (contractv2.ConnectorGrant, error) {
+	record, ok := source.connectorGrants[grantID]
+	if !ok {
+		return contractv2.ConnectorGrant{}, ErrMetadataNotFound
+	}
+	if record.Disabled {
+		return record, errors.New("connector grant is disabled")
+	}
+	notBefore, err := time.Parse(time.RFC3339Nano, record.NotBefore)
+	if err != nil {
+		return record, errors.New("connector grant not_before is invalid")
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, record.ExpiresAt)
+	if err != nil {
+		return record, errors.New("connector grant expires_at is invalid")
+	}
+	if at.Before(notBefore) || !at.Before(expiresAt) {
+		return record, errors.New("connector grant is not active at evaluation time")
+	}
+	return record, nil
 }
 
 func (source *SnapshotMetadata) Authorization(_ context.Context, authorizationID, deviceID, tokenID string, at time.Time) (contractv1.DeviceSessionAuthorization, error) {

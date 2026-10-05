@@ -16,6 +16,7 @@ import (
 
 var domainPackages = []string{
 	"internal/contractv1",
+	"internal/contractv2",
 	"internal/agent/tunnelstates",
 	"internal/agent/agentbudget",
 	"internal/gateway/gatewayresources",

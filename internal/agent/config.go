@@ -41,8 +41,9 @@ const MaxCAFileSize = 1 << 20
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 type Endpoint struct {
-	ID     string `json:"id"`
-	Target string `json:"target"`
+	ID       string `json:"id"`
+	Target   string `json:"target"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 type Config struct {
@@ -249,6 +250,9 @@ func (config Config) ValidateRuntime() error {
 		seen[endpoint.ID] = struct{}{}
 		if err := ValidateLocalTarget(endpoint.Target); err != nil {
 			return fmt.Errorf("endpoint %s: %w", endpoint.ID, err)
+		}
+		if endpoint.Protocol != "" && endpoint.Protocol != "tcp" && endpoint.Protocol != "udp" {
+			return fmt.Errorf("endpoint %s: unsupported protocol %q", endpoint.ID, endpoint.Protocol)
 		}
 	}
 	if config.UpdateChannel != "stable" && config.UpdateChannel != "beta" {

@@ -23,6 +23,7 @@ import (
 )
 
 const agentPath = "/agent/v1/connect"
+const connectorPath = "/connector/v1/connect"
 
 type Gateway struct {
 	metadata MetadataSource
@@ -47,6 +48,8 @@ type Gateway struct {
 	// arriving from one of these addresses may contribute a client address
 	// through a forwarding header.
 	trustedProxyIPs []net.IPNet
+	connectorMu     sync.Mutex
+	connectorFlows  map[string]int
 }
 
 func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog.Logger) (*Gateway, error) {
@@ -76,6 +79,7 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 		handshakeSlots:  make(chan struct{}, limits.MaxPendingHandshakes),
 		resources:       newGatewayResources(limits),
 		trustedProxyIPs: trustedProxyIPs,
+		connectorFlows:  make(map[string]int),
 	}
 	gateway.status = newStatusExporter(status, logger, limits.MaxStatusQueueSignals, limits.StatusEmitTimeout)
 	return gateway, nil
@@ -92,6 +96,7 @@ func New(metadata MetadataSource, status StatusSink, limits Limits, logger *slog
 func (gateway *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(agentPath, gateway.handleAgent)
+	mux.HandleFunc(connectorPath, gateway.handleConnector)
 	mux.HandleFunc("/", gateway.handleIngress)
 	return mux
 }
@@ -267,7 +272,7 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	defer releaseHandshakeSlot()
 
 	conn, err := websocket.Accept(w, request, &websocket.AcceptOptions{
-		Subprotocols:    []string{contractv1.ResumeProofSubprotocol},
+		Subprotocols:    []string{contractv1.TunnelSubprotocol},
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -469,7 +474,7 @@ func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn
 // revocation applies. Any mismatch fails closed to errResumeUnavailable (never
 // to a half-resumed session).
 func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume contractv1.ResumeSession) (*session, error) {
-	if conn.Subprotocol() != contractv1.ResumeProofSubprotocol {
+	if conn.Subprotocol() != contractv1.TunnelSubprotocol {
 		return nil, errResumeUnavailable
 	}
 	gateway.mu.RLock()
@@ -639,7 +644,7 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 	// transcript, and the Gateway rotates it on every accepted resume, so a
 	// captured resume frame is not replayable for the session lifetime.
 	resumeChallenge := ""
-	if conn.Subprotocol() == contractv1.ResumeProofSubprotocol {
+	if conn.Subprotocol() == contractv1.TunnelSubprotocol {
 		resumeChallenge, err = gateway.randomBase64URL(32)
 		if err != nil {
 			return nil, fmt.Errorf("generate resume challenge: %w", err)
@@ -658,7 +663,7 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 		return nil, err
 	}
 
-	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2, resumeChallenge), nil
+	return newSession(gateway, conn, currentRecord.DeviceID, challenge.SessionID, currentRecord.AuthorizationID, currentRecord.TokenID, authorizationExpiresAt, candidate.inbound, 2, resumeChallenge, true), nil
 }
 
 // registerSession admits a tunnel session under the Phase-3 HA model. A
@@ -819,7 +824,8 @@ func routableSession(sess *session) bool {
 }
 
 func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == agentPath || strings.HasPrefix(request.URL.Path, agentPath+"/") {
+	if request.URL.Path == agentPath || strings.HasPrefix(request.URL.Path, agentPath+"/") ||
+		request.URL.Path == connectorPath || strings.HasPrefix(request.URL.Path, connectorPath+"/") {
 		// Defence in depth for the one reserved Gateway-local namespace: the
 		// Agent endpoint is served by its own mux pattern and must never be
 		// resolved as a tenant route. The operational endpoints are NOT

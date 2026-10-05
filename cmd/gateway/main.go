@@ -46,6 +46,14 @@ func run() error {
 		metadataMode         = flag.String("metadata-mode", "live", "external metadata mode: live or static compatibility")
 		metadataRefresh      = flag.Duration("metadata-refresh-interval", gateway.DefaultMetadataRefreshInterval, "live metadata current-manifest refresh interval")
 		metadataMaxAge       = flag.Duration("metadata-max-age", gateway.DefaultMetadataMaxSnapshotAge, "maximum accepted age of a live metadata generation")
+		publicTCPBind        = flag.String("public-tcp-bind", "", "host/IP for public TCP listeners; empty disables public TCP")
+		publicTCPPortMin     = flag.Int("public-tcp-port-min", 20000, "lowest allowed public TCP port")
+		publicTCPPortMax     = flag.Int("public-tcp-port-max", 29999, "highest allowed public TCP port")
+		publicTCPRefresh     = flag.Duration("public-tcp-refresh-interval", time.Second, "public TCP listener reconciliation interval")
+		publicUDPBind        = flag.String("public-udp-bind", "", "host/IP for public UDP listeners; empty disables public UDP")
+		publicUDPPortMin     = flag.Int("public-udp-port-min", 20000, "lowest allowed public UDP port")
+		publicUDPPortMax     = flag.Int("public-udp-port-max", 29999, "highest allowed public UDP port")
+		publicUDPRefresh     = flag.Duration("public-udp-refresh-interval", time.Second, "public UDP listener reconciliation interval")
 		maxAgentSessions     = flag.Int("max-agent-sessions", defaults.MaxAgentSessions, "maximum authenticated Agent sessions")
 		maxPendingHandshakes = flag.Int("max-pending-handshakes", defaults.MaxPendingHandshakes, "maximum concurrent Agent handshakes")
 		maxStreamQueueBytes  = flag.Int64("max-stream-queue-bytes", defaults.MaxStreamQueueBytes, "maximum queued Agent-to-Gateway bytes per stream")
@@ -118,6 +126,24 @@ func run() error {
 		return err
 	}
 	server := gateway.NewHTTPServer(*listenAddr, serverGateway.Handler(), limits)
+	var publicTCP *gateway.PublicTCPManager
+	if *publicTCPBind != "" {
+		publicTCP, err = gateway.NewPublicTCPManager(serverGateway, metadata, gateway.PublicTCPConfig{
+			BindHost: *publicTCPBind, PortMin: *publicTCPPortMin, PortMax: *publicTCPPortMax, ReconcileInterval: *publicTCPRefresh,
+		}, logger)
+		if err != nil {
+			return err
+		}
+	}
+	var publicUDP *gateway.PublicUDPManager
+	if *publicUDPBind != "" {
+		publicUDP, err = gateway.NewPublicUDPManager(serverGateway, metadata, gateway.PublicUDPConfig{
+			BindHost: *publicUDPBind, PortMin: *publicUDPPortMin, PortMax: *publicUDPPortMax, ReconcileInterval: *publicUDPRefresh,
+		}, logger)
+		if err != nil {
+			return err
+		}
+	}
 	// Operational endpoints are served on their own listener so they can
 	// never shadow a tenant route on the public listener.
 	var opsServer *http.Server
@@ -128,7 +154,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 4)
 	go func() {
 		logger.Info("gateway starting", "listen", *listenAddr, "metadata_mode", *metadataMode)
 		errCh <- server.ListenAndServeTLS(*tlsCert, *tlsKey)
@@ -139,12 +165,36 @@ func run() error {
 			errCh <- opsServer.ListenAndServe()
 		}()
 	}
+	if publicTCP != nil {
+		go func() {
+			logger.Info("public TCP ingress enabled", "bind_host", *publicTCPBind, "port_min", *publicTCPPortMin, "port_max", *publicTCPPortMax)
+			errCh <- publicTCP.Run(ctx)
+		}()
+	}
+	if publicUDP != nil {
+		go func() {
+			logger.Info("public UDP ingress enabled", "bind_host", *publicUDPBind, "port_min", *publicUDPPortMin, "port_max", *publicUDPPortMax)
+			errCh <- publicUDP.Run(ctx)
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
 		serverGateway.BeginDrain()
+		if publicTCP != nil {
+			publicTCP.Close()
+		}
+		if publicUDP != nil {
+			publicUDP.Close()
+		}
 		return gracefulShutdown(server, opsServer, serverGateway.Close, limits.ShutdownTimeout, logger)
 	case err := <-errCh:
+		if publicTCP != nil {
+			publicTCP.Close()
+		}
+		if publicUDP != nil {
+			publicUDP.Close()
+		}
 		closeCtx, cancel := context.WithTimeout(context.Background(), limits.ShutdownTimeout)
 		defer cancel()
 		_ = serverGateway.Close(closeCtx)

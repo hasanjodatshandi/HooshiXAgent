@@ -2,18 +2,15 @@ package contractv1
 
 import "errors"
 
-// ResumeProofSubprotocol negotiates the extended session_ready and bound resume
-// exchange without changing the strict baseline protocol-v1 handshake shape.
-const ResumeProofSubprotocol = "hooshix.resume-proof.v1"
+// TunnelSubprotocol is the single supported Agent/Gateway wire contract. It
+// includes bound resume proofs and TCP stream half-close semantics.
+const TunnelSubprotocol = "hooshix.tunnel.v1"
 
 // ValidateReadyNegotiation supplements structural payload validation with the
 // capability selected by the TLS-protected WebSocket handshake.
 func ValidateReadyNegotiation(ready SessionReady, subprotocol string) error {
-	if subprotocol == ResumeProofSubprotocol {
+	if subprotocol == TunnelSubprotocol {
 		return validateRawBase64Length("resume_challenge", ready.ResumeChallenge, 32)
 	}
-	if ready.ResumeChallenge != "" {
-		return errors.New("resume challenge without negotiated resume-proof extension")
-	}
-	return nil
+	return errors.New("required tunnel subprotocol was not negotiated")
 }

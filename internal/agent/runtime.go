@@ -410,7 +410,7 @@ func (runner *Runner) dialWithFailover(ctx context.Context, config Config, httpC
 		candidate := candidates[index]
 		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
 		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
-			Subprotocols:    []string{contractv1.ResumeProofSubprotocol},
+			Subprotocols:    []string{contractv1.TunnelSubprotocol},
 			HTTPClient:      httpClient,
 			CompressionMode: websocket.CompressionDisabled,
 		})
@@ -459,7 +459,7 @@ func (runner *Runner) runOncePinned(ctx context.Context, config Config, candidat
 		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
 		defer cancel()
 		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
-			Subprotocols:    []string{contractv1.ResumeProofSubprotocol},
+			Subprotocols:    []string{contractv1.TunnelSubprotocol},
 			HTTPClient:      httpClient,
 			CompressionMode: websocket.CompressionDisabled,
 		})
@@ -576,7 +576,7 @@ func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.
 	defer cancel()
 	previous := ""
 	challenge := ""
-	if primary && conn.Subprotocol() == contractv1.ResumeProofSubprotocol {
+	if primary && conn.Subprotocol() == contractv1.TunnelSubprotocol {
 		previous = runner.ResumableSessionID()
 		challenge = runner.ResumableResumeChallenge()
 	}
@@ -700,7 +700,7 @@ func permanentPolicyViolation(err error) bool {
 		return true
 	}
 	switch closeError.Reason {
-	case "idle timeout", "session ended":
+	case "idle timeout", "session ended", "authentication failed":
 		return false
 	default:
 		return true

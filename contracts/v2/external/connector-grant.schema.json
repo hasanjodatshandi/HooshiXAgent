@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.hooshix.local/agent/v2/external/connector-grant.schema.json",
+  "title": "HooshiX private connector grant",
+  "type": "object",
+  "required": [
+    "kind",
+    "contract_version",
+    "grant_id",
+    "endpoint_id",
+    "token_id",
+    "token_sha256",
+    "not_before",
+    "expires_at",
+    "disabled",
+    "max_connections"
+  ],
+  "properties": {
+    "kind": { "const": "connector_grant" },
+    "contract_version": { "const": 2 },
+    "grant_id": { "$ref": "#/$defs/id" },
+    "endpoint_id": { "$ref": "#/$defs/id" },
+    "token_id": { "$ref": "#/$defs/id" },
+    "token_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "not_before": { "$ref": "#/$defs/timestamp" },
+    "expires_at": { "$ref": "#/$defs/timestamp" },
+    "disabled": { "type": "boolean" },
+    "max_connections": { "type": "integer", "minimum": 1, "maximum": 16 }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 30,
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?Z$"
+    }
+  },
+  "additionalProperties": false
+}

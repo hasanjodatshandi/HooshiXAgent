@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/enrollment"
 )
 
 func readIfExists(dir, name string) ([]byte, error) {
@@ -57,6 +59,77 @@ func newTestApp(t *testing.T) (*App, string) {
 		t.Fatal(err)
 	}
 	return app, capability
+}
+
+func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing.T) {
+	app, capability := newTestApp(t)
+	store := agent.NewPlatformSecretStore(app.StateDir())
+	if _, _, err := agent.LoadOrCreateIdentity(store); err != nil {
+		t.Fatal(err)
+	}
+	panel := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.URL.Path == "/api/v1/agent/enrollments":
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]string{
+				"enrollment_id":    "enroll-ABCDEFGHIJKL",
+				"user_code":        "ABCD-EFGH",
+				"poll_token":       strings.Repeat("p", 43),
+				"challenge":        base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+				"verification_uri": "https://panel.hooshix.test/enroll",
+				"expires_at":       time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339Nano),
+			})
+		case strings.HasSuffix(request.URL.Path, "/proof"):
+			response.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(request.URL.Path, "/claim"):
+			_ = json.NewEncoder(response).Encode(map[string]string{
+				"state": "claimed", "device_id": "device-001", "authorization_id": "auth-001",
+				"token_id": "token-001", "token": strings.Repeat("t", 43),
+				"expires_at":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+				"gateway_url": "wss://tunnel.hooshix.test/agent/v1/connect",
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer panel.Close()
+	app.enrollmentClient = enrollment.NewClient(panel.Client())
+	listener, err := app.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- app.ServeListener(ctx, listener, slog.Default()) }()
+	defer func() {
+		cancel()
+		if err := <-serveDone; err != nil {
+			t.Errorf("serve enrollment UI: %v", err)
+		}
+	}()
+
+	started, err := agent.StartServiceEnrollment(app.StateDir(), panel.URL, "office PC")
+	if err != nil || started.UserCode != "ABCD-EFGH" {
+		t.Fatalf("start = %+v, %v", started, err)
+	}
+	claimed, err := agent.ClaimServiceEnrollment(app.StateDir())
+	if err != nil || claimed.State != "claimed" || claimed.DeviceID != "device-001" {
+		t.Fatalf("claim = %+v, %v", claimed, err)
+	}
+	config, err := agent.LoadConfig(app.StateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.DeviceID != "device-001" || config.GatewayURL != "wss://tunnel.hooshix.test/agent/v1/connect" {
+		t.Fatalf("config = %+v", config)
+	}
+	if token, err := agent.LoadSessionToken(store); err != nil || token != strings.Repeat("t", 43) {
+		t.Fatalf("stored token = %q, %v", token, err)
+	}
+	if app.currentCapability() == capability {
+		t.Fatal("successful enrollment did not rotate the pairing capability")
+	}
 }
 
 // writeTestCAPEM writes a real self-signed CA certificate as PEM, which is the
