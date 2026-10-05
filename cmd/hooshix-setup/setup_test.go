@@ -266,13 +266,18 @@ func TestRecaptureStateOwnershipNeedsElevationOrAppliesTheRecoveryDACL(t *testin
 		t.Fatal(err)
 	}
 	sddl := descriptor.String()
-	// The SDDL writer emits well-known SIDs as two-letter aliases (SY =
-	// LocalSystem, BA = Administrators), so both spellings are accepted.
+	// The SDDL writer replaces a SID with its well-known alias whenever one
+	// exists (SY = LocalSystem, BA = Administrators, and on a host whose
+	// console session user resolves to the local-account alias, LA). Ask
+	// Windows for this user's own spelling instead of assuming the numeric
+	// form: a DACL that names the user is correct regardless of how the
+	// reader chose to print that principal.
+	userSpelling := sddlSpelling(sid)
 	expected := []struct {
 		name    string
 		matches []string
 	}{
-		{"the target user", []string{sid.String()}},
+		{"the target user", []string{sid.String(), userSpelling}},
 		{"LocalSystem", []string{";;;SY)", "S-1-5-18"}},
 		{"Administrators", []string{";;;BA)", "S-1-5-32-544"}},
 	}
@@ -288,6 +293,25 @@ func TestRecaptureStateOwnershipNeedsElevationOrAppliesTheRecoveryDACL(t *testin
 			t.Fatalf("recovery DACL %s is missing %s", sddl, want.name)
 		}
 	}
+}
+
+// sddlSpelling returns how Windows prints this principal inside an SDDL string.
+// ConvertSecurityDescriptorToStringSecurityDescriptor substitutes a well-known
+// alias when the SID has one (SY, BA, LA for a local-account console user), so
+// the alias is read back from a descriptor built from the same SID instead of
+// being guessed: a DACL that names the principal is correct whatever spelling
+// the reader emits, and a missing ACE still matches nothing.
+func sddlSpelling(sid *windows.SID) string {
+	probe, err := windows.SecurityDescriptorFromString("D:(A;;GA;;;" + sid.String() + ")")
+	if err != nil {
+		return sid.String()
+	}
+	rendered := probe.String()
+	index := strings.LastIndex(rendered, ";;;")
+	if index < 0 {
+		return sid.String()
+	}
+	return strings.TrimSuffix(rendered[index+3:], ")")
 }
 
 // TestVerifyPayloadDigestRefusesAnythingButTheManifestedBytes proves Setup can
