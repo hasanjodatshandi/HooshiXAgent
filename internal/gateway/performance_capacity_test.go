@@ -137,9 +137,15 @@ func TestGatewayResidentSessionCapacity(t *testing.T) {
 			limits := DefaultLimits()
 			if level > limits.MaxAgentSessions {
 				limits.MaxAgentSessions = level
-				limits.HandshakeRatePerSecond = 100000
-				limits.HandshakeRateBurst = 100000
 			}
+			// Each session dials from the same loopback peer, so the authenticated
+			// handshake bucket and the per-peer pre-authentication bucket both have
+			// to cover the driven level; otherwise the probe measures token refill
+			// instead of resident-session capacity.
+			limits.HandshakeRatePerSecond = 100000
+			limits.HandshakeRateBurst = 100000
+			limits.PreAuthRatePerSecond = 100000
+			limits.PreAuthRateBurst = 100000
 			gateway, err := New(metadata, NopStatusSink{}, limits, performanceTestLogger())
 			if err != nil {
 				t.Fatal(err)
