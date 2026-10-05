@@ -76,7 +76,9 @@ grep -q 'Certificate Sign' <<<"$ca_profile_text" ||
   { echo "deployment CA keyUsage omits certificate signing" >&2; exit 1; }
 grep -q 'X509v3 Subject Key Identifier' <<<"$ca_profile_text" ||
   { echo "deployment CA has no subjectKeyIdentifier" >&2; exit 1; }
-openssl x509 -in "$ca_profile_cert" -noout -subject |
+# RFC2253 pins the subject rendering: OpenSSL 3.0.x prints `CN = Name` while 3.5
+# prints `CN=Name`, and a plain substring match on either breaks on the other.
+openssl x509 -in "$ca_profile_cert" -noout -subject -nameopt RFC2253 |
   grep -q 'CN=HooshiX Gateway Deployment CA' ||
   { echo "deployment CA subject changed" >&2; exit 1; }
 if ! openssl verify -x509_strict -CAfile "$ca_profile_cert" "$work/ca-profile/tls/gateway.crt" >/dev/null 2>&1; then
