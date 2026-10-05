@@ -1,5 +1,6 @@
 # Build-context hygiene for the Gateway image. The Dockerfile copies only
-# go.mod/go.sum, cmd/gateway, internal/gateway and internal/contractv1, so
+# go.mod/go.sum, cmd/gateway, internal/gateway (including its gatewayresources
+# subpackage) and the contractv1/contractv2 trees, so
 # everything else — the desktop payload binaries, local build output, the
 # documentation/test trees and repository metadata — must not be uploaded to
 # the daemon on every build.

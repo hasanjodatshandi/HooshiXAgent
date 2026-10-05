@@ -7,6 +7,7 @@ RUN go mod download
 COPY cmd/gateway ./cmd/gateway
 COPY internal/gateway ./internal/gateway
 COPY internal/contractv1 ./internal/contractv1
+COPY internal/contractv2 ./internal/contractv2
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/hooshix-gateway ./cmd/gateway
 
