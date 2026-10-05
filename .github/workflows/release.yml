@@ -112,7 +112,7 @@ jobs:
           sha256sum -c SHA256SUMS
 
       - name: Upload verified release archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate-${{ needs.policy.outputs.release_sha }}
           path: dist/
@@ -120,7 +120,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Gateway image candidate
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-gateway-image-${{ needs.policy.outputs.release_sha }}
           path: ${{ runner.temp }}/hooshix-gateway-image.tar
@@ -217,7 +217,7 @@ jobs:
           }
 
       - name: Upload the supported Windows installer
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-setup-${{ needs.policy.outputs.release_sha }}
           path: dist/HooshiXAgent-Setup.exe
@@ -305,7 +305,7 @@ jobs:
           grep -q 'HooshiXAgent-Setup.exe$' SHA256SUMS
 
       - name: Upload finalized release candidate
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-final-${{ needs.policy.outputs.release_sha }}
           path: dist/
