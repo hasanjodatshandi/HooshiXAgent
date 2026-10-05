@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -192,8 +193,29 @@ func publicRequest(client *http.Client, baseURL, path, body string) (*http.Respo
 
 type process struct {
 	cmd    *exec.Cmd
-	stdout bytes.Buffer
-	stderr bytes.Buffer
+	stdout syncBuffer
+	stderr syncBuffer
+}
+
+// syncBuffer captures child-process output while the process is still running.
+// exec.Cmd copies stdout/stderr on its own goroutines, so a plain bytes.Buffer
+// here races with any assertion that reads the captured log before Wait: the
+// race detector fails the run even though the outcome is correct.
+type syncBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *syncBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *syncBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
 }
 
 func startProcess(t *testing.T, binary string, args ...string) *process {
