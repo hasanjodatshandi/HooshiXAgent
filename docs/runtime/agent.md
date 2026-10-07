@@ -34,7 +34,9 @@ On Windows the Agent is a machine-wide service (ADR-0014), so its state is machi
 
 Every command supports `--state-dir`; packaged service/persistence integration uses this explicit state location without changing the secret ownership model. The owning account on Windows is the service account (LocalSystem), not the interactive desktop user.
 
-The non-secret `config.json` contains the versioned Gateway/identifier/endpoint/update-channel configuration. It never contains the Ed25519 private seed or raw session token.
+The non-secret `config.json` contains the versioned Gateway/identifier/endpoint/update-channel configuration and the optional `limits` block described under [Resource bounds](#resource-bounds). It never contains the Ed25519 private seed or raw session token.
+
+On a packaged Windows install `config.json` does not live in the state directory: Setup writes a `settings_location` pointer there and puts the settings file next to the program, at `C:\Program Files\HooshiXAgent\config.json`, where an operator can find and edit it. `ConfigPath()` follows that pointer only when it names an absolute path ending in `config.json` whose directory passes the same state-path validation as the state directory itself; anything else (relative, renamed, escaping through a reparse point, or pointing back into the state directory) is ignored and the state directory's own copy is used. A portable, container or development install that never had a pointer therefore behaves exactly as before. `agent`/`hooshix-agent` commands, the tray and the service all resolve the same file.
 
 ## Secret storage
 
@@ -197,7 +199,7 @@ For each session the Agent:
 9. dials only the loopback policy and proxies stream bytes;
 10. tears down all active streams when the session ends.
 
-Connection loss triggers bounded exponential reconnect attempts. The delay starts at 1 second and is capped at 30 seconds with bounded jitter. Cancellation or an explicit session-revoked signal stops the loop.
+Connection loss triggers bounded exponential reconnect attempts. The delay starts at 1 second and is capped at 30 seconds with bounded jitter. Cancellation or an explicit session-revoked signal stops the loop. Both bounds, and the supervisor's own retry pause, come from the `limits` block documented under [Resource bounds](#resource-bounds).
 
 ## Resource bounds
 
@@ -215,6 +217,34 @@ reconnect delay                1..30 s
 ```
 
 Protocol frame bounds remain governed by ADR-0007.
+
+Every bound above is also an operator setting. The optional `limits` block in `config.json` overrides the fields it names and leaves the rest at these defaults:
+
+```json
+{
+  "version": 1,
+  "limits": {
+    "max_streams": 64,
+    "max_queue_frames": 16,
+    "max_tunnels": 2,
+    "stream_queue_bytes": "2MiB",
+    "session_queue_bytes": "8MiB",
+    "dial_timeout": "5s",
+    "handshake_timeout": "10s",
+    "write_timeout": "10s",
+    "idle_timeout": "60s",
+    "reconnect_min": "1s",
+    "reconnect_max": "30s",
+    "retry_delay": "5s"
+  }
+}
+```
+
+Durations use Go's syntax (`5s`, `1m30s`) and byte sizes are a plain byte count or a `KiB`/`MiB`/`GiB` suffix. `retry_delay` is the supervisor's own pause before rebuilding the tunnel loop, distinct from the per-attempt `reconnect_min`/`reconnect_max` backoff.
+
+The block is validated, not trusted: counts must stay within 1..256 (1..8 for `max_tunnels`), sizes below 256 MiB, timeouts between 1 s and 15 min (1 h for the reconnect bounds), and the merged result must still satisfy every invariant — `session_queue_bytes` at least one stream queue, `reconnect_max` at least `reconnect_min`. A rejected block does not start a half-tuned Agent: the supervisor publishes `phase=pending_config` with the offending field named in `last_error` and waits for the file to change.
+
+Because the supervisor reloads the settings file on every loop iteration and polls its fingerprint every two seconds, editing `config.json` — the Gateway address, a limit, or both — takes effect within that interval without restarting the service. The device identity and the pairing records are not in that file, so a hand edit cannot re-register the device under a different key.
 
 ## OS persistence foundation
 

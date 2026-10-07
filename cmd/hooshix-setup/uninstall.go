@@ -179,6 +179,16 @@ func runUninstall() error {
 	}
 
 	fmt.Println("removing program files ...")
+	if keepConfig {
+		// Setup may have moved the editable settings file into the directory
+		// about to be deleted. Rescue it first, or --keep-config would destroy
+		// the pairing it promised to preserve.
+		if serviceState, err := stateDataDir(); err != nil {
+			record("resolve service state", err)
+		} else if err := preserveRedirectedSettings(serviceState); err != nil {
+			record("keep redirected settings", err)
+		}
+	}
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		err := os.RemoveAll(installDir)
 		if err == nil || time.Now().After(deadline) {
@@ -233,6 +243,51 @@ func runUninstall() error {
 		fmt.Println("HooshiX Agent has been removed from this computer.")
 	}
 	return nil
+}
+
+// preserveRedirectedSettings returns the operator-editable settings file to the
+// state directory when Setup redirected it into the installation directory, and
+// drops the pointer with it: once Program Files\HooshiXAgent is gone, a pointer
+// to a deleted file would leave the next install reading nothing.
+//
+// The state directory's own copy is what an unredirected install keeps, so this
+// restores exactly the layout preserveStateConfig expects.
+func preserveRedirectedSettings(stateDir string) error {
+	pointerPath := filepath.Join(stateDir, settingsLocationFile)
+	pointer, err := os.ReadFile(pointerPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read the settings location: %w", err)
+	}
+	target := strings.TrimSpace(string(pointer))
+	// Anything the Agent would not have obeyed is only a stray record.
+	if target == "" || !filepath.IsAbs(target) || filepath.Base(target) != settingsFileName ||
+		filepath.Clean(filepath.Dir(target)) == filepath.Clean(stateDir) {
+		return os.Remove(pointerPath)
+	}
+	data, err := os.ReadFile(target)
+	switch {
+	case err == nil:
+		if err := guardOwnedStateDir(stateDir); err != nil {
+			return err
+		}
+		// The service owns this tree and may have left it SYSTEM-only, so an
+		// elevated administrator cannot write into it without the same
+		// ownership recovery preserveStateConfig performs.
+		if err := recaptureStateOwnership(stateDir, ""); err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall: state ownership recovery skipped:", err)
+		}
+		if err := os.WriteFile(filepath.Join(stateDir, settingsFileName), data, 0o600); err != nil {
+			return fmt.Errorf("keep the settings file in the state directory: %w", err)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Println("  note: the redirected settings file is already gone; the state directory keeps its own copy.")
+	default:
+		return fmt.Errorf("read %s: %w", target, err)
+	}
+	return os.Remove(pointerPath)
 }
 
 // preserveStateConfig repairs ownership of the state tree (see

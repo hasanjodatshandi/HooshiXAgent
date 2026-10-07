@@ -39,6 +39,23 @@ Windows archive:
 
 Installers preserve an existing binary as `.previous` before replacing it.
 
+### HooshiXAgent-Setup.exe: server addresses and the settings file
+
+Setup asks for the two addresses it installs with, and both are re-editable afterwards in `C:\Program Files\HooshiXAgent\config.json`:
+
+```text
+Tunnel server URL [wss://tunnel.hooshix-agent.ir/agent/v1/connect]:
+Panel server URL  [https://panel.hooshix-agent.ir]:
+```
+
+Enter accepts the default. The tunnel answer is written into the settings file as `gateway_url`; an answer nobody typed never overwrites the Gateway a previous pairing recorded. `-` at the panel prompt declines enrollment, which is also what happens automatically when there is no console. A typed address is validated before anything is installed (the Gateway must be `wss://` with the exact `/agent/v1/connect` path; the panel must be an HTTPS origin), so a typo fails an install that has not touched the machine yet.
+
+For unattended installs the same two answers are available as `HOOSHIX_TUNNEL_URL` and `HOOSHIX_PANEL_URL`; a closed stdin never prompts, so Setup.exe stays scriptable (device enrollment still requires a console, because it waits for the code to be approved in the panel).
+
+Setup also moves the editable settings file out of `%ProgramData%\HooshiXAgent` and leaves a `settings_location` pointer behind, so the file an operator edits sits beside the program. The Agent, tray and CLI all resolve the pointer; an unusable pointer (relative, renamed, escaping through a reparse point) falls back to the state directory instead of misdirecting the service. Because that file now lives in the installation directory, uninstalling with *keep configuration* moves it back into the state directory first — otherwise deleting Program Files would destroy the pairing the option promised to preserve. Writes to the redirected file require an elevated or service-context process, which is the same requirement the machine-wide state directory already imposed.
+
+The settings file is where every tunnel and reconnect bound lives; see [Resource bounds](../../docs/runtime/agent.md#resource-bounds) in the runtime contract for the `limits` schema and its reload semantics.
+
 ### Checksum verification
 
 Every package ships a `SHA256SUMS` manifest next to the binary and both installers verify the binary against it before replacing anything. A missing manifest, a manifest without an entry for the binary, and a digest mismatch are all fatal: the installer exits non-zero and installs nothing.

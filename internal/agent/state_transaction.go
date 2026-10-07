@@ -377,7 +377,7 @@ func restoreStateFile(stateDir, destination, backup string, existed bool) error 
 	if err != nil {
 		return err
 	}
-	return writePrivateFile(stateDir, destination, data)
+	return writeStateFile(stateDir, destination, data)
 }
 
 func writeTransactionFileAtomic(dir, name string, data []byte) error {

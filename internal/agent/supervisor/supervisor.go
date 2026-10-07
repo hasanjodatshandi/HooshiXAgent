@@ -81,7 +81,9 @@ type Options struct {
 	TerminalRecoveryWait time.Duration
 
 	// ReconnectDelay is the pause before retrying a recoverable failure. Zero
-	// means defaultReconnectDelay.
+	// means defaultReconnectDelay. limits.retry_delay in the settings file
+	// overrides it, per iteration, so an operator can slow or speed the retry
+	// cadence without rebuilding the binary.
 	ReconnectDelay time.Duration
 
 	// NewAgentLoop constructs the runner. Nil means agent.NewRunner.
@@ -194,7 +196,29 @@ func (sup *Supervisor) Run(ctx context.Context) error {
 			continue
 		}
 
-		runner, err := sup.opts.NewAgentLoop(sup.opts.StateDir, sup.opts.Limits, sup.opts.Logger)
+		// The settings file can retune the tunnel. A block the operator
+		// mistyped must not be silently ignored and must not be a product
+		// failure either: say why in last_error, settle in the same waiting
+		// phase an incomplete config uses, and let the state watcher re-read
+		// the file the moment it is edited.
+		limits, err := config.ApplyLimits(sup.opts.Limits)
+		retryDelay := sup.opts.ReconnectDelay
+		if err == nil {
+			retryDelay, err = config.SupervisorRetryDelay(retryDelay)
+		}
+		if err != nil {
+			message := "limits in the settings file are not usable: " + agent.SanitizedError(err) +
+				"; correct or delete the limits block in " + agent.ConfigPath(sup.opts.StateDir)
+			sup.setLastError(message)
+			sup.setPhase("pending_config")
+			sup.opts.Logger.Warn("supervisor: settings limits rejected; waiting for the operator to correct them", "error", message)
+			if err := sup.waitForStateChange(runCtx, 0); err != nil {
+				return nil // cancelled
+			}
+			continue
+		}
+
+		runner, err := sup.opts.NewAgentLoop(sup.opts.StateDir, limits, sup.opts.Logger)
 		if err != nil {
 			sup.setTerminal(fmt.Sprintf("create runner: %v", agent.SanitizedError(err)))
 			return err
@@ -245,8 +269,8 @@ func (sup *Supervisor) Run(ctx context.Context) error {
 		// Recoverable: network drop, gateway restart, stale metadata.
 		sup.setPhase("reconnecting")
 		sup.setLastError(agent.SanitizedError(runErr))
-		sup.opts.Logger.Warn("supervisor: recoverable error, retrying", "error", agent.SanitizedError(runErr), "retry_in", sup.opts.ReconnectDelay.String())
-		if err := sleepCtx(runCtx, sup.opts.ReconnectDelay); err != nil {
+		sup.opts.Logger.Warn("supervisor: recoverable error, retrying", "error", agent.SanitizedError(runErr), "retry_in", retryDelay.String())
+		if err := sleepCtx(runCtx, retryDelay); err != nil {
 			return nil
 		}
 	}

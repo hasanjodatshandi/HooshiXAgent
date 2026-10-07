@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,22 @@ const (
 	// directory, so a truncated or corrupted embed cannot be promoted to
 	// C:\Program Files as a silently different executable.
 	payloadManifest = "SHA256SUMS"
+	// defaultTunnelURL is the Gateway the Agent connects to when the operator
+	// does not say otherwise, and defaultPanelURL is the panel Setup enrolls
+	// the device against. Both are only defaults: Setup asks, an answer (or the
+	// matching HOOSHIX_*_URL variable) wins, and the result is re-editable in
+	// the settings file afterwards.
+	defaultTunnelURL = "wss://tunnel.hooshix-agent.ir/agent/v1/connect"
+	defaultPanelURL  = "https://panel.hooshix-agent.ir"
+	envTunnelURL     = "HOOSHIX_TUNNEL_URL"
+	envPanelURL      = "HOOSHIX_PANEL_URL"
+	// settingsFileName and settingsLocationFile mirror the Agent's own names:
+	// the editable settings file, and the file inside the state directory that
+	// points at it from somewhere else. They are duplicated here for the same
+	// reason stateMarkerName is: the uninstaller must recognise the Agent's
+	// state layout without importing its internals.
+	settingsFileName     = "config.json"
+	settingsLocationFile = "settings_location"
 )
 
 var setupVersion = "dev"
@@ -72,6 +90,10 @@ func run() error {
 			return fmt.Errorf("uninstall: %w", err)
 		}
 		return nil
+	}
+	choices, err := collectInstallChoices(os.Stdout, bufio.NewReader(os.Stdin), stdinIsInteractive())
+	if err != nil {
+		return err
 	}
 	stage, err := stagePayload()
 	if err != nil {
@@ -105,6 +127,22 @@ func run() error {
 	if err := installPairingCapability(interactiveAccount); err != nil {
 		return fmt.Errorf("install pairing authorization: %w", err)
 	}
+	// The settings file moves next to the program before the service first
+	// reads it, so there is never a window in which the running Agent and the
+	// file the operator edits are different files.
+	stateDir, err := serviceStateDir()
+	if err != nil {
+		return fmt.Errorf("resolve the Agent state directory: %w", err)
+	}
+	if err := relocateSettingsToInstallDir(os.Stdout, stateDir, installDir); err != nil {
+		fmt.Println("warning: the settings file could not be moved next to the program:", err)
+		fmt.Println("        it stays at", filepath.Join(stateDir, settingsFileName), "and the Agent reads it from there.")
+	} else {
+		fmt.Println("settings file:", filepath.Join(installDir, settingsFileName))
+	}
+	if err := applyTunnelURL(stateDir, choices); err != nil {
+		fmt.Println("warning: the tunnel address was not written to the settings file:", err)
+	}
 	if err := runAgentCommand("service", "install"); err != nil {
 		return fmt.Errorf("install service: %w", err)
 	}
@@ -131,7 +169,7 @@ func run() error {
 		_ = os.Remove(backup)
 	}
 	committed = true
-	if err := enrollInstalledAgent(); err != nil {
+	if err := enrollInstalledAgent(choices.panelURL); err != nil {
 		fmt.Println("warning: automatic device enrollment did not complete:", err)
 		fmt.Println("         the service remains installed; re-run Setup or use the tray pairing page.")
 	}
@@ -139,22 +177,15 @@ func run() error {
 	return nil
 }
 
-func enrollInstalledAgent() error {
-	stdinInfo, err := os.Stdin.Stat()
-	if err != nil || stdinInfo.Mode()&os.ModeCharDevice == 0 {
-		return nil
-	}
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Panel server URL (for example https://agent.hooshix.com; leave blank to pair later): ")
-	serverURL, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	serverURL = strings.TrimSpace(serverURL)
+func enrollInstalledAgent(serverURL string) error {
 	if serverURL == "" {
 		fmt.Println("device enrollment skipped; use the tray icon when you are ready.")
 		return nil
 	}
+	if !stdinIsInteractive() {
+		return nil
+	}
+	reader := bufio.NewReader(os.Stdin)
 	defaultName, _ := os.Hostname()
 	if strings.TrimSpace(defaultName) == "" {
 		defaultName = "Windows PC"
@@ -196,6 +227,186 @@ func enrollInstalledAgent() error {
 		time.Sleep(2 * time.Second)
 	}
 	return errors.New("device approval expired; start enrollment again")
+}
+
+// installChoices are the two server addresses Setup collects: the Gateway the
+// Agent dials, and the panel the device enrolls against.
+type installChoices struct {
+	tunnelURL string
+	panelURL  string
+	// tunnelGiven marks an answer the operator actually supplied (typed or via
+	// HOOSHIX_TUNNEL_URL). Without it a default must never overwrite a gateway
+	// a previous pairing already recorded.
+	tunnelGiven bool
+}
+
+func stdinIsInteractive() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// collectInstallChoices resolves the tunnel and panel addresses before anything
+// is written to the machine, so a mistyped address fails an install that has not
+// happened yet instead of leaving a service that cannot connect.
+//
+// Precedence: an explicit HOOSHIX_*_URL, then a typed answer, then the shipped
+// default. A closed stdin (unattended, CI, or a silent install) never prompts,
+// which is what keeps the service-install smoke from hanging on a console that
+// is not there.
+func collectInstallChoices(out io.Writer, reader *bufio.Reader, interactive bool) (installChoices, error) {
+	choices := installChoices{tunnelURL: defaultTunnelURL, panelURL: defaultPanelURL}
+	if value, ok := trimmedEnv(os.LookupEnv, envTunnelURL); ok {
+		if err := agent.ValidateGatewayURL(value); err != nil {
+			return choices, fmt.Errorf("%s: %w", envTunnelURL, err)
+		}
+		choices.tunnelURL, choices.tunnelGiven = value, true
+	}
+	if value, ok := trimmedEnv(os.LookupEnv, envPanelURL); ok {
+		if err := validatePanelOrigin(value); err != nil {
+			return choices, fmt.Errorf("%s: %w", envPanelURL, err)
+		}
+		choices.panelURL = value
+	}
+	if !interactive {
+		// No console: an operator who did set HOOSHIX_PANEL_URL still cannot
+		// approve a device code here, so enrollment is declined, not guessed.
+		fmt.Fprintln(out, "no console: using the default tunnel address and skipping device enrollment.")
+		choices.panelURL = ""
+		return choices, nil
+	}
+	if choices.tunnelGiven {
+		fmt.Fprintf(out, "Tunnel server URL from %s: %s\n", envTunnelURL, choices.tunnelURL)
+	} else {
+		value, given, err := promptValue(out, reader, "Tunnel server URL", choices.tunnelURL, agent.ValidateGatewayURL)
+		if err != nil {
+			return choices, err
+		}
+		choices.tunnelURL, choices.tunnelGiven = value, given
+	}
+	if choices.panelURL != "" && choices.panelURL != defaultPanelURL {
+		fmt.Fprintf(out, "Panel server URL from %s: %s\n", envPanelURL, choices.panelURL)
+	} else {
+		fmt.Fprintln(out, "Press Enter to use the default; type - to pair this device later from the tray.")
+		// "-" is an answer, not an address, so it has to be accepted before the
+		// origin rule runs.
+		acceptDecline := func(raw string) error {
+			if raw == "-" {
+				return nil
+			}
+			return validatePanelOrigin(raw)
+		}
+		value, _, err := promptValue(out, reader, "Panel server URL", choices.panelURL, acceptDecline)
+		if err != nil {
+			return choices, err
+		}
+		if value == "-" {
+			value = ""
+		}
+		choices.panelURL = value
+	}
+	return choices, nil
+}
+
+// promptValue asks once per answer and re-asks on invalid input. An empty answer
+// takes the default, so accepting both defaults is two Enter presses.
+func promptValue(out io.Writer, reader *bufio.Reader, label, fallback string, validate func(string) error) (value string, given bool, err error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprintf(out, "%s [%s]: ", label, fallback)
+		raw, readErr := reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", false, readErr
+		}
+		answer := strings.TrimSpace(raw)
+		if answer == "" {
+			return fallback, false, nil
+		}
+		if validate == nil {
+			return answer, true, nil
+		}
+		if validateErr := validate(answer); validateErr != nil {
+			fmt.Fprintln(out, "  that address was not accepted:", validateErr)
+			continue
+		}
+		return answer, true, nil
+	}
+	return "", false, fmt.Errorf("%s: no valid address was entered", label)
+}
+
+// validatePanelOrigin mirrors the enrollment client's own rule: an origin only,
+// HTTPS everywhere except a loopback test server. Catching it here means Setup
+// fails before the service is installed rather than after.
+func validatePanelOrigin(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return errors.New("the panel URL must be an origin without credentials, path, query, or fragment")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if parsed.Scheme != "http" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+		return errors.New("the panel URL must use HTTPS (HTTP is only allowed for an IP/localhost test server)")
+	}
+	return nil
+}
+
+func trimmedEnv(lookup func(string) (string, bool), name string) (string, bool) {
+	value, ok := lookup(name)
+	value = strings.TrimSpace(value)
+	return value, ok && value != ""
+}
+
+// relocateSettingsToInstallDir moves the editable settings file from the service
+// state directory to the installation directory, where the operator can find it
+// beside the program, and leaves the pointer the Agent follows behind.
+//
+// The state directory's copy wins when both exist: it is what the previously
+// installed Agent was actually running, while a copy left in Program Files can
+// only be debris from an interrupted earlier install.
+func relocateSettingsToInstallDir(out io.Writer, stateDir, targetDir string) error {
+	source := filepath.Join(stateDir, settingsFileName)
+	target := filepath.Join(targetDir, settingsFileName)
+	data, err := os.ReadFile(source)
+	switch {
+	case err == nil:
+		if existing, statErr := os.Stat(target); statErr == nil && !existing.IsDir() {
+			fmt.Fprintln(out, "note: both a state and an install-directory settings file exist; keeping the state directory's contents.")
+		}
+	case errors.Is(err, os.ErrNotExist):
+		data = nil
+	default:
+		return fmt.Errorf("read the current settings file: %w", err)
+	}
+	if err := agent.WriteSettingsLocation(stateDir, target); err != nil {
+		return fmt.Errorf("record the settings location: %w", err)
+	}
+	if data != nil {
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", filepath.Base(target), err)
+		}
+		// The pointer now selects the install-directory copy, so the state
+		// directory's copy is debris. Deleting it is best-effort: leaving it
+		// cannot misdirect the Agent, which no longer reads that path.
+		if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(out, "note: the superseded settings copy is still in the state directory:", err)
+		}
+	}
+	return nil
+}
+
+// applyTunnelURL writes the Gateway address the operator chose into the settings
+// file, so the file beside the program is the whole story of where this Agent
+// connects. An answer nobody gave must not overwrite a paired gateway.
+func applyTunnelURL(stateDir string, choices installChoices) error {
+	return agent.MutateConfig(stateDir, func(config *agent.Config) error {
+		if !choices.tunnelGiven && strings.TrimSpace(config.GatewayURL) != "" {
+			return nil
+		}
+		config.GatewayURL = choices.tunnelURL
+		return nil
+	})
 }
 
 func openEnrollmentBrowser(target string) error {

@@ -68,7 +68,7 @@ func ensureStateMarker(stateDir string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == configLockName || name == "config.json" || name == "secrets.json" || name == "secrets.dpapi" || name == "status.json" || name == pairingCapabilityFile || name == pairingEndpointFile || name == "token.txt" || strings.HasPrefix(name, ".tmp-hooshix-") {
+		if name == configLockName || name == settingsFileName || name == settingsLocationName || name == "secrets.json" || name == "secrets.dpapi" || name == "status.json" || name == pairingCapabilityFile || name == pairingEndpointFile || name == "token.txt" || strings.HasPrefix(name, ".tmp-hooshix-") {
 			continue
 		}
 		return fmt.Errorf("refusing unowned non-empty Agent state directory: unexpected entry %q", name)

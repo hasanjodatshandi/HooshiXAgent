@@ -38,6 +38,20 @@ const MaxEndpoints = 64
 // validation into an unbounded read.
 const MaxCAFileSize = 1 << 20
 
+const (
+	// settingsFileName is the operator-editable settings file name.
+	settingsFileName = "config.json"
+	// settingsLocationName is the pointer file inside the state directory that
+	// redirects the settings file into the installation directory, so the file
+	// an operator edits sits next to the program instead of under ProgramData.
+	settingsLocationName = "settings_location"
+	// maxSettingsFileBytes bounds both the pointer and the settings file it
+	// names. A settings file is a few kilobytes of JSON; the bound keeps a
+	// mistyped or hostile pointer from turning a config read into an unbounded
+	// one.
+	maxSettingsFileBytes = 1 << 20
+)
+
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 
 type Endpoint struct {
@@ -47,15 +61,16 @@ type Endpoint struct {
 }
 
 type Config struct {
-	Version         int        `json:"version"`
-	GatewayURL      string     `json:"gateway_url,omitempty"`
-	GatewayAliases  []string   `json:"gateway_aliases,omitempty"`
-	CAFile          string     `json:"ca_file,omitempty"`
-	DeviceID        string     `json:"device_id,omitempty"`
-	AuthorizationID string     `json:"authorization_id,omitempty"`
-	TokenID         string     `json:"token_id,omitempty"`
-	UpdateChannel   string     `json:"update_channel"`
-	Endpoints       []Endpoint `json:"endpoints,omitempty"`
+	Version         int           `json:"version"`
+	GatewayURL      string        `json:"gateway_url,omitempty"`
+	GatewayAliases  []string      `json:"gateway_aliases,omitempty"`
+	CAFile          string        `json:"ca_file,omitempty"`
+	DeviceID        string        `json:"device_id,omitempty"`
+	AuthorizationID string        `json:"authorization_id,omitempty"`
+	TokenID         string        `json:"token_id,omitempty"`
+	UpdateChannel   string        `json:"update_channel"`
+	Endpoints       []Endpoint    `json:"endpoints,omitempty"`
+	Limits          *LimitsConfig `json:"limits,omitempty"`
 }
 
 // GatewayCandidates returns the validated, de-duplicated failover list:
@@ -117,8 +132,61 @@ func defaultLocalStateDir() (string, error) {
 	}
 }
 
+// ConfigPath returns the settings file this Agent installation reads and
+// writes. By default it is <stateDir>/config.json. Setup.exe can redirect it
+// into the installation directory next to the binaries by writing a
+// settings_location pointer inside the state directory; the pointer is the only
+// way the location moves, so a portable or development run that never had one
+// behaves exactly as before.
 func ConfigPath(stateDir string) string {
-	return filepath.Join(stateDir, "config.json")
+	if target, ok := redirectedSettingsPath(stateDir); ok {
+		return target
+	}
+	return filepath.Join(stateDir, settingsFileName)
+}
+
+// redirectedSettingsPath resolves and validates the settings_location pointer.
+// Anything malformed, relative, escaping through a reparse point, or naming a
+// file that is not config.json is ignored rather than obeyed: falling back to
+// the state directory keeps the Agent running, while trusting a bad pointer
+// would let one stray file move the Agent's configuration silently.
+func redirectedSettingsPath(stateDir string) (string, bool) {
+	data, err := readStateFile(filepath.Join(stateDir, settingsLocationName))
+	if err != nil || len(data) > maxSettingsFileBytes {
+		return "", false
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" || !filepath.IsAbs(target) || filepath.Base(target) != settingsFileName {
+		return "", false
+	}
+	target = filepath.Clean(target)
+	if samePath(filepath.Dir(target), filepath.Clean(stateDir)) {
+		return "", false
+	}
+	if err := validateStateDirectoryPath(filepath.Dir(target), true); err != nil {
+		return "", false
+	}
+	return target, true
+}
+
+// WriteSettingsLocation points this installation's settings file at path and
+// persists the pointer. Setup.exe calls it during installation so the file an
+// operator edits sits next to the program.
+func WriteSettingsLocation(stateDir, path string) error {
+	normalized, err := NormalizeStateDir(stateDir)
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(path) || filepath.Base(path) != settingsFileName {
+		return errors.New("settings location must be an absolute path ending in config.json")
+	}
+	path = filepath.Clean(path)
+	if err := validateStateDirectoryPath(filepath.Dir(path), true); err != nil {
+		return fmt.Errorf("validate settings directory: %w", err)
+	}
+	return withConfigLock(normalized, func() error {
+		return writeStateFile(normalized, filepath.Join(normalized, settingsLocationName), []byte(path+"\n"))
+	})
 }
 
 func LoadConfig(stateDir string) (Config, error) {
@@ -201,7 +269,71 @@ func saveConfigUnlocked(stateDir string, config Config) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 	data = append(data, '\n')
-	return writePrivateFile(stateDir, ConfigPath(stateDir), data)
+	return writeStateFile(stateDir, ConfigPath(stateDir), data)
+}
+
+// writeStateFile writes data to destination using the rules that fit where it
+// lives. Inside the state directory a file is private: it is created through the
+// private temp/protect path, because that directory holds the Agent's secrets.
+// Outside it the destination is the redirected operator-editable settings file
+// in the installation directory: the file is still replaced atomically, but its
+// access rights are deliberately left to the directory's own ACL. Tightening
+// them would take the file away from the tray and the CLI, and loosening the
+// directory would damage the installed binaries' permissions.
+func writeStateFile(stateDir, destination string, data []byte) error {
+	if samePath(filepath.Dir(destination), filepath.Clean(stateDir)) {
+		return writePrivateFile(stateDir, destination, data)
+	}
+	return writeSettingsOutsideState(destination, data)
+}
+
+func writeSettingsOutsideState(path string, data []byte) error {
+	if len(data) > maxSettingsFileBytes {
+		return fmt.Errorf("settings file exceeds the %d byte limit", maxSettingsFileBytes)
+	}
+	directory := filepath.Dir(path)
+	info, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("settings directory %s is unavailable: %w", filepath.Base(path), err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("settings directory %s is not a directory", filepath.Base(path))
+	}
+	if existing, err := os.Lstat(path); err == nil {
+		if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
+			return errors.New("refusing to replace a non-regular settings file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect settings file: %w", err)
+	}
+	temp, err := os.CreateTemp(directory, ".tmp-hooshix-settings-*")
+	if err != nil {
+		return fmt.Errorf("create settings temp file: %w", err)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	// World-readable on purpose: the settings file is not a secret (identity
+	// key material stays in the state directory) and both the LocalSystem
+	// service and the signed-in user's tray/CLI must read the same file.
+	if err := temp.Chmod(0o644); err != nil {
+		temp.Close()
+		return fmt.Errorf("chmod settings temp file: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return fmt.Errorf("write settings file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return fmt.Errorf("sync settings file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close settings temp file: %w", err)
+	}
+	if err := os.Rename(tempName, path); err != nil {
+		return fmt.Errorf("replace settings file: %w", err)
+	}
+	return nil
 }
 
 func (config Config) ValidateRuntime() error {

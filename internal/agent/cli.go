@@ -460,7 +460,17 @@ func commandRun(args []string, stderr io.Writer) error {
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	runner, err := NewRunner(dir, DefaultLimits(), logger)
+	// Headless `run` must honour the same settings-file limits the service
+	// applies, otherwise a container or portable install would tune nothing.
+	config, err := LoadConfig(dir)
+	if err != nil {
+		return err
+	}
+	limits, err := config.ApplyLimits(DefaultLimits())
+	if err != nil {
+		return err
+	}
+	runner, err := NewRunner(dir, limits, logger)
 	if err != nil {
 		return err
 	}
