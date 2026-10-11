@@ -19,3 +19,20 @@ id = "generic-api-key"
   regexTarget = "line"
   paths = ['''(^|[\\/])internal[\\/]contractv1[\\/]contract_agreement_test\.go$''']
   regexes = ['''const tokenSHA256Fixture = "fceb6a20fda55e114a7a11d0ee3ad98191d517c27f42591f2b16421f57a063f8"''']
+
+  # The connector-bundle fixtures are base64url literals, so the flagged secret is
+  # only visible after Gitleaks decodes them; regexTarget must therefore be "secret"
+  # (the decoded token), not "line" (the encoded source line).
+  [[rules.allowlists]]
+  description = "The synthetic connector-bundle fixture in the CLI test: a fabricated grant id/token id and a hand-typed placeholder token, not an issued credential."
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''(^|[\\/])cmd[\\/]hooshix-connector[\\/]main_test\.go$''']
+  regexes = ['''^AbCdEfGh0123456789abcdefghijklm-_$''']
+
+  [[rules.allowlists]]
+  description = "The same synthetic connector-bundle fixture in the parser test, asserted as the exact string the Panel would publish for it."
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''(^|[\\/])internal[\\/]connector[\\/]bundle_test\.go$''']
+  regexes = ['''^AbCdEfGh0123456789abcdefghijklm-_$''']

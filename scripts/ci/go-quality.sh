@@ -72,17 +72,20 @@ fi
 go mod verify
 go vet ./...
 
-# tests/integration asserts real Agent↔Gateway behavior over real processes and
-# fails closed in CI when the product binaries are missing. Build and export
-# them here so the default `go test ./...` below actually executes those
-# end-to-end assertions instead of skipping every one of them and printing ok.
-# This gate must never report success without running a single tunneled request.
+# tests/integration asserts real Agent↔Gateway↔Connector behavior over real
+# processes and fails closed in CI when the product binaries are missing. Build
+# and export them here so the default `go test ./...` below actually executes
+# those end-to-end assertions instead of skipping every one of them and printing
+# ok. This gate must never report success without running a real tunneled
+# request, and never without executing the connector executable.
 source "$repo_root/scripts/ci/test-guard.sh"
 go build -o "$runtime_dir/hooshix-agent${bin_suffix}" ./cmd/agent
 go build -o "$runtime_dir/hooshix-gateway${bin_suffix}" ./cmd/gateway
+go build -o "$runtime_dir/hooshix-connector${bin_suffix}" ./cmd/hooshix-connector
 HOOSHIX_AGENT_BINARY="$runtime_dir/hooshix-agent${bin_suffix}"
 HOOSHIX_GATEWAY_BINARY="$runtime_dir/hooshix-gateway${bin_suffix}"
-export HOOSHIX_AGENT_BINARY HOOSHIX_GATEWAY_BINARY
+HOOSHIX_CONNECTOR_BINARY="$runtime_dir/hooshix-connector${bin_suffix}"
+export HOOSHIX_AGENT_BINARY HOOSHIX_GATEWAY_BINARY HOOSHIX_CONNECTOR_BINARY
 
 go test -count=1 ./...
 go test -race -count=1 ./...
