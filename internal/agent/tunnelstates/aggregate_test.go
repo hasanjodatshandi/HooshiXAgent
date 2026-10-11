@@ -93,6 +93,43 @@ func TestAggregateEmptyIsInit(t *testing.T) {
 	}
 }
 
+// A Runner is built with one machine still in Init, so an all-Init aggregate is
+// the very first snapshot the supervisor publishes. Reading it as Shutdown made
+// every service start claim a terminal failure for one poll interval.
+func TestAggregateNotYetDialledIsInitNotTerminal(t *testing.T) {
+	t.Parallel()
+
+	aggregate := NewAggregate(New(), New())
+	state, terminal, healthy := aggregate.Observability()
+	if state != "init" {
+		t.Fatalf("aggregate state=%q want init", state)
+	}
+	if terminal {
+		t.Fatal("a transport that has not dialled yet must not be terminal")
+	}
+	if healthy {
+		t.Fatal("init is not a serving state")
+	}
+}
+
+func TestAggregateInitOutweighsTerminalMachines(t *testing.T) {
+	t.Parallel()
+
+	shutdown := New()
+	shutdown.MustTransition(Shutdown)
+
+	if got := NewAggregate(shutdown, New()).State(); got != Init {
+		t.Fatalf("aggregate with a not-yet-dialled transport=%v want init", got)
+	}
+
+	reconnecting := New()
+	reconnecting.MustTransition(Connecting)
+	reconnecting.MustTransition(Reconnecting)
+	if got := NewAggregate(reconnecting, New()).State(); got != Reconnecting {
+		t.Fatalf("aggregate retrying plus idle=%v want reconnecting", got)
+	}
+}
+
 func TestSelfTransitionIsIdempotent(t *testing.T) {
 	t.Parallel()
 

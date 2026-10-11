@@ -49,3 +49,23 @@ func TestHAHealthTracksRealAuthenticatedPrimary(t *testing.T) {
 	}
 	t.Fatal("primary never authenticated")
 }
+
+// The supervisor writes its first status snapshot as soon as it holds a Runner,
+// which is before any dial has been attempted. A fresh Runner must not look
+// terminal, or every service start publishes a dead-agent snapshot to the tray.
+func TestFreshRunnerHealthIsNotTerminal(t *testing.T) {
+	runner, err := NewRunner(t.TempDir(), DefaultLimits(), quietAgentLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, terminal := runner.HealthState()
+	if terminal {
+		t.Fatalf("fresh runner health state=%q is terminal", state)
+	}
+	if state != "init" {
+		t.Fatalf("fresh runner health state=%q want init", state)
+	}
+	if runner.HealthyTunnel() {
+		t.Fatal("a runner that never dialled is not a healthy tunnel")
+	}
+}

@@ -31,6 +31,8 @@ The supported Windows distribution channel is the desktop service installer `Hoo
 
 Installers preserve an existing binary as `.previous`. A packaged rollback operation restores that previous binary without deleting the Agent identity/config/state. Uninstall preserves state unless an explicit purge option is supplied.
 
+`HooshiXAgent-Setup.exe` verifies each payload twice, because a single check is only as trustworthy as the bytes it re-reads: staged files are checked against the embedded `SHA256SUMS` before anything reaches `C:\Program Files`, and the file that is *live* in the install directory is checked against the same manifest after the rename. A mismatch aborts the install rather than letting an antivirus or filter driver substitute a recognised older build while Setup prints "done". A rollback then has to take the service out of the equation before it touches files — `service stop` only posts the request, and while the Agent process is still running it holds `hooshix-agent.exe` open, so a rename back to the previous build would fail exactly when a rollback is most needed. Setup therefore waits for SCM to report the service stopped, unregisters the service when this run created that registration (a fresh install must not leave a service pointing at a binary the rollback deletes), restores the files, and restarts the previous build when the rollback is undoing an upgrade.
+
 Clean-install CI uses temporary paths plus no-service/no-persistence mode so it can exercise install/run/upgrade/rollback/uninstall deterministically without mutating the runner account.
 
 ## Gateway deployment package

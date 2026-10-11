@@ -33,8 +33,12 @@ import (
 // non-release payload_stub.go, so a clean checkout builds without the
 // gitignored payload binaries. See scripts/build-setup.ps1.
 
+// installDir is the fixed program directory. It is a var, not a const, only so
+// the payload commit/rollback sequence can be exercised against a temporary
+// directory in tests; a real install never reassigns it.
+var installDir = `C:\Program Files\HooshiXAgent`
+
 const (
-	installDir      = `C:\Program Files\HooshiXAgent`
 	arpKeyPath      = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HooshiXAgent`
 	appTitle        = "HooshiX Agent"
 	agentBinary     = "hooshix-agent.exe"
@@ -102,6 +106,10 @@ func run() error {
 		return fmt.Errorf("stage binaries: %w", err)
 	}
 	defer os.RemoveAll(stage)
+	manifest, err := embeddedPayloadManifest()
+	if err != nil {
+		return err
+	}
 	// The interactive desktop user is only needed for the tray auto-start and
 	// for the read+execute ACE that lets that user's tray read status. Neither
 	// is required by the product: the service runs under LocalSystem. An
@@ -114,15 +122,19 @@ func run() error {
 		fmt.Println("      the tray auto-start and its state grant will be skipped; the service does not need them.")
 	}
 
+	// An Agent binary already in the install directory means a service
+	// registration from an earlier run does too, and the rollback must not
+	// unregister what this run did not create.
+	replacing := previousInstallationPresent()
 	stopPreviousInstallation()
-	backups, err := commitStagedPayload(stage)
+	backups, err := commitStagedPayload(stage, manifest)
 	if err != nil {
 		return fmt.Errorf("install binaries: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			rollbackFiles(backups)
+			rollbackInstallation(backups, replacing)
 		}
 	}()
 
@@ -419,6 +431,17 @@ func openEnrollmentBrowser(target string) error {
 	return nil
 }
 
+// embeddedPayloadManifest returns the SHA-256SUMS document the distribution
+// build recorded next to the payload binaries. Staging and the post-commit
+// verification both read it through here so they can never disagree.
+func embeddedPayloadManifest() (string, error) {
+	data, err := fs.ReadFile(payload, "payload/"+payloadManifest)
+	if err != nil {
+		return "", fmt.Errorf("read embedded payload manifest: %w", err)
+	}
+	return string(data), nil
+}
+
 func stagePayload() (string, error) {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return "", err
@@ -427,10 +450,10 @@ func stagePayload() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	manifest, err := fs.ReadFile(payload, "payload/"+payloadManifest)
+	manifest, err := embeddedPayloadManifest()
 	if err != nil {
 		os.RemoveAll(stage)
-		return "", fmt.Errorf("read embedded payload manifest: %w", err)
+		return "", err
 	}
 	for _, name := range []string{agentBinary, trayBinary} {
 		data, readErr := fs.ReadFile(payload, "payload/"+name)
@@ -498,7 +521,7 @@ func manifestDigest(manifest, name string) (string, error) {
 	return "", fmt.Errorf("embedded %s manifest has no entry for %s; refusing to install", payloadManifest, name)
 }
 
-func commitStagedPayload(stage string) (map[string]string, error) {
+func commitStagedPayload(stage, manifest string) (map[string]string, error) {
 	backups := make(map[string]string)
 	for _, name := range []string{agentBinary, trayBinary, uninstallBinary} {
 		target := filepath.Join(installDir, name)
@@ -538,8 +561,59 @@ func commitStagedPayload(stage string) (map[string]string, error) {
 			rollbackFiles(backups)
 			return nil, fmt.Errorf("installed %s does not match the payload (an antivirus or policy may be reverting the file); aborting", name)
 		}
+		// The comparison above only proves Setup wrote what it staged, and a
+		// staged file that drifted from the build after staging satisfies it.
+		// The manifest is the distribution build's own record of each binary, so
+		// the file that is now live is checked against that rather than against
+		// a copy of itself. uninstall.exe is this Setup binary copied from
+		// itself, so it has no manifest entry to check against.
+		if name != uninstallBinary {
+			if err := verifyPayloadDigest(manifest, name, installed); err != nil {
+				rollbackFiles(backups)
+				return nil, fmt.Errorf("installed %s does not match the distribution manifest: %w", name, err)
+			}
+		}
 	}
 	return backups, nil
+}
+
+// previousInstallationPresent reports whether an Agent binary is already in the
+// install directory. It is the same signal stopPreviousInstallation uses to
+// decide that a service registration from an earlier run exists, and it must be
+// read before commitStagedPayload moves that binary aside.
+func previousInstallationPresent() bool {
+	_, err := os.Stat(filepath.Join(installDir, agentBinary))
+	return err == nil
+}
+
+// rollbackInstallation returns the machine to the state it was in before this
+// run. The service has to be dealt with before the files: a running Agent holds
+// hooshix-agent.exe open, and `service stop` only posts the control request, so
+// renaming the previous build back over it fails - and rollbackFiles ignores
+// that failure, which would leave the very build this run was aborting in place.
+// On a fresh install the registration created moments ago must also be removed,
+// or SCM is left with a service pointing at a binary the rollback deletes.
+func rollbackInstallation(backups map[string]string, replacing bool) {
+	if err := runAgentCommand("service", "stop"); err != nil {
+		fmt.Println("note: rollback could not ask the service to stop:", err)
+	}
+	if err := waitForServiceStopped(serviceStoppedTimeout); err != nil {
+		fmt.Println("note: rollback is continuing with the service not fully stopped:", err)
+	}
+	if !replacing {
+		if err := runAgentCommand("service", "uninstall"); err != nil {
+			fmt.Println("note: rollback could not remove the service registration:", err)
+		}
+	}
+	rollbackFiles(backups)
+	if replacing {
+		// The previous build is back in place, so put it running again: a failed
+		// upgrade must not also cost the operator their tunnel.
+		if err := runAgentCommand("service", "start"); err != nil {
+			fmt.Println("note: the previous Agent build is restored but its service did not start:", err)
+			fmt.Println("        start it with: sc start", agent.WindowsServiceName)
+		}
+	}
 }
 
 func rollbackFiles(backups map[string]string) {
@@ -559,13 +633,49 @@ func runAgentCommand(args ...string) error {
 	return nil
 }
 
+// agentCommand runs the installed Agent binary with the given arguments and
+// returns its combined output with the execution error. It is a var so the
+// rollback sequence - which service commands, in which order, relative to the
+// file renames - can be asserted without an SCM to talk to.
+var agentCommand = func(args ...string) (string, error) {
+	output, err := exec.Command(filepath.Join(installDir, agentBinary), args...).CombinedOutput()
+	return string(output), err
+}
+
 // runAgentCommandOutput runs the installed Agent binary and returns its
 // combined output together with the execution error, so callers that must
 // inspect what the Agent reported (service status) do not have to re-implement
 // the invocation.
 func runAgentCommandOutput(args ...string) (string, error) {
-	output, err := exec.Command(filepath.Join(installDir, agentBinary), args...).CombinedOutput()
-	return string(output), err
+	return agentCommand(args...)
+}
+
+// serviceStoppedTimeout bounds how long a rollback waits for SCM to report the
+// service no longer running before renaming files over it anyway.
+const serviceStoppedTimeout = 15 * time.Second
+
+// waitForServiceStopped polls the Agent's own `service status` until the service
+// can no longer be holding its executable open. An unanswerable query counts as
+// stopped: no binary, or no registration, means no handle.
+func waitForServiceStopped(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	last := "no status was observed"
+	for {
+		output, err := runAgentCommandOutput("service", "status")
+		if err != nil {
+			return nil
+		}
+		last = strings.TrimSpace(output)
+		switch last {
+		case "running", "start-pending", "continue-pending":
+		default:
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("the %s service is still %s after %s", agent.WindowsServiceName, last, timeout)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // serviceRunningTimeout bounds how long setup waits for SCM to report the
@@ -605,7 +715,7 @@ func waitForServiceRunning(timeout time.Duration) error {
 // them. It is deliberately tolerant: on a fresh machine there is no service
 // and no process to stop, which is not an error.
 func stopPreviousInstallation() {
-	if _, err := os.Stat(filepath.Join(installDir, agentBinary)); err == nil {
+	if previousInstallationPresent() {
 		if err := runAgentCommand("service", "stop"); err != nil {
 			fmt.Println("note: stopping previous service:", err)
 		}

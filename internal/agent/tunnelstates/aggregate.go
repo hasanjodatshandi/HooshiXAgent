@@ -32,7 +32,12 @@ func (aggregate *Aggregate) Attach(machine *Machine) {
 //   - Reconnecting when every transport is in Reconnecting;
 //   - Revoked when all transports are Revoked;
 //   - Shutdown when all transports are terminal without any Revoked;
-//   - Connecting while any transport is Connecting and none of the above.
+//   - Connecting while any transport is Connecting and none of the above;
+//   - Init while any transport has not attempted a connection yet.
+//
+// Init must stay distinct from Shutdown: a transport that simply has not dialled
+// yet is not a terminal failure. Collapsing the two made a freshly built Runner
+// publish a terminal health snapshot, which the tray renders as a dead agent.
 func (aggregate *Aggregate) State() State {
 	aggregate.mu.Lock()
 	defer aggregate.mu.Unlock()
@@ -40,7 +45,7 @@ func (aggregate *Aggregate) State() State {
 	if len(aggregate.machines) == 0 {
 		return Init
 	}
-	var sawConnecting, sawConnected, sawDegraded, sawReconnecting, sawRevoked bool
+	var sawConnecting, sawConnected, sawDegraded, sawReconnecting, sawRevoked, sawInit bool
 	for _, machine := range aggregate.machines {
 		switch machine.Current() {
 		case Connected:
@@ -53,7 +58,9 @@ func (aggregate *Aggregate) State() State {
 			sawReconnecting = true
 		case Revoked:
 			sawRevoked = true
-		case Shutdown, Init:
+		case Shutdown:
+		case Init:
+			sawInit = true
 		}
 	}
 	switch {
@@ -67,6 +74,8 @@ func (aggregate *Aggregate) State() State {
 		return Reconnecting
 	case sawRevoked:
 		return Revoked
+	case sawInit:
+		return Init
 	default:
 		return Shutdown
 	}

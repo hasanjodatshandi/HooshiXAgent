@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -447,6 +448,150 @@ func TestRollbackFilesRestoresPreviousBinaryAndRemovesNewOnes(t *testing.T) {
 	if _, err := os.Stat(added); !os.IsNotExist(err) {
 		t.Fatalf("a newly installed binary survived the rollback: %v", err)
 	}
+}
+
+// TestCommitStagedPayloadChecksTheLiveFileAgainstTheManifest proves the
+// post-commit verification is authoritative rather than self-referential: the
+// file that ends up in the install directory is compared with the distribution
+// manifest, so a staged copy that drifted from the build is rolled back instead
+// of being promoted because it matches itself.
+func TestCommitStagedPayloadChecksTheLiveFileAgainstTheManifest(t *testing.T) {
+	previousInstallDir := installDir
+	t.Cleanup(func() { installDir = previousInstallDir })
+
+	root := t.TempDir()
+	installDir = filepath.Join(root, "install")
+	stage := filepath.Join(root, "stage")
+	for _, dir := range []string{installDir, stage} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := map[string][]byte{
+		agentBinary:     []byte("agent-payload"),
+		trayBinary:      []byte("tray-payload"),
+		uninstallBinary: []byte("setup-copy"),
+	}
+	for name, data := range payload {
+		if err := os.WriteFile(filepath.Join(stage, name), data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestOf := func(data []byte) string {
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:])
+	}
+	manifest := manifestOf(payload[agentBinary]) + "  " + agentBinary + "\n" +
+		manifestOf(payload[trayBinary]) + "  " + trayBinary + "\n"
+
+	if _, err := commitStagedPayload(stage, manifest); err != nil {
+		t.Fatalf("a payload matching its manifest was refused: %v", err)
+	}
+
+	// A manifest that records a different build must abort the commit and put
+	// the bytes that were already installed back.
+	stale := manifestOf([]byte("some-other-build")) + "  " + agentBinary + "\n" +
+		manifestOf(payload[trayBinary]) + "  " + trayBinary + "\n"
+	replacement := filepath.Join(root, "stage2")
+	if err := os.MkdirAll(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range payload {
+		if err := os.WriteFile(filepath.Join(replacement, name), data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := commitStagedPayload(replacement, stale); err == nil {
+		t.Fatal("an installed binary disagreeing with the manifest was accepted")
+	}
+	for name, data := range payload {
+		installed, err := os.ReadFile(filepath.Join(installDir, name))
+		if err != nil {
+			t.Fatalf("read %s after the refused commit: %v", name, err)
+		}
+		if !bytes.Equal(installed, data) {
+			t.Fatalf("%s was not rolled back: %q", name, installed)
+		}
+	}
+}
+
+// TestRollbackInstallationTakesTheServiceOutOfSCMBeforeDeletingItsBinary proves
+// the rollback removes the registration this run created while the Agent binary
+// is still there to run the command, and that an upgrade rollback restores and
+// restarts the previous build instead of unregistering it.
+func TestRollbackInstallationTakesTheServiceOutOfSCMBeforeDeletingItsBinary(t *testing.T) {
+	previousCommand, previousInstallDir := agentCommand, installDir
+	t.Cleanup(func() { agentCommand, installDir = previousCommand, previousInstallDir })
+
+	var calls []string
+	var binaryPresentAtUninstall bool
+	agentCommand = func(args ...string) (string, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		if command == "service uninstall" {
+			_, err := os.Stat(filepath.Join(installDir, agentBinary))
+			binaryPresentAtUninstall = err == nil
+		}
+		return "", nil
+	}
+
+	root := t.TempDir()
+	installDir = root
+	agent := filepath.Join(root, agentBinary)
+	backup := agent + ".previous"
+
+	// A fresh install: the registration is Setup's own, so it must go away and
+	// the new binary must be deleted.
+	if err := os.WriteFile(agent, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rollbackInstallation(map[string]string{agent: ""}, false)
+	if _, err := os.Stat(agent); !os.IsNotExist(err) {
+		t.Fatalf("a freshly installed binary survived the rollback: %v", err)
+	}
+	if !binaryPresentAtUninstall {
+		t.Fatal("the service was unregistered after its binary was already deleted")
+	}
+	for _, call := range []string{"service stop", "service uninstall"} {
+		if !containsString(calls, call) {
+			t.Fatalf("rollback did not run %q, calls=%v", call, calls)
+		}
+	}
+	if containsString(calls, "service start") {
+		t.Fatal("a fresh-install rollback started a service that should no longer exist")
+	}
+
+	// An upgrade: the previous build comes back and keeps running.
+	calls = nil
+	if err := os.WriteFile(agent, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rollbackInstallation(map[string]string{agent: backup}, true)
+	restored, err := os.ReadFile(agent)
+	if err != nil {
+		t.Fatalf("the previous binary was not restored: %v", err)
+	}
+	if string(restored) != "old" {
+		t.Fatalf("restored contents %q want %q", restored, "old")
+	}
+	if containsString(calls, "service uninstall") {
+		t.Fatal("an upgrade rollback unregistered the service it did not create")
+	}
+	if !containsString(calls, "service start") {
+		t.Fatalf("an upgrade rollback left the restored service stopped, calls=%v", calls)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestXMLEscapeProtectsTheTaskDefinition proves interpolated user and path
