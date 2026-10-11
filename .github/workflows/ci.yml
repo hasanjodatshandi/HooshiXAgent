@@ -92,11 +92,14 @@ jobs:
           # tests/integration fails closed under CI=true when the product
           # binaries are absent (see scripts/ci/go-quality.sh), so this leg has
           # to export them the same way rather than turn those assertions into
-          # a red run.
+          # a red run. The connector belongs to that set as of the Executable
+          # Runtime Gate, which executes the real hooshix-connector binary.
           go build -o "$RUNNER_TEMP/hooshix-agent.exe" ./cmd/agent
           go build -o "$RUNNER_TEMP/hooshix-gateway.exe" ./cmd/gateway
+          go build -o "$RUNNER_TEMP/hooshix-connector.exe" ./cmd/hooshix-connector
           export HOOSHIX_AGENT_BINARY="$RUNNER_TEMP/hooshix-agent.exe"
           export HOOSHIX_GATEWAY_BINARY="$RUNNER_TEMP/hooshix-gateway.exe"
+          export HOOSHIX_CONNECTOR_BINARY="$RUNNER_TEMP/hooshix-connector.exe"
           go test -count=1 ./...
 
       - name: Clean Agent package install / rollback / uninstall (Unix)
