@@ -77,10 +77,11 @@ func validConfig(t *testing.T, stateDir, deviceID string) {
 func newSupervisor(t *testing.T, stateDir string, loop AgentLoop, mutate func(*Options)) *Supervisor {
 	t.Helper()
 	options := Options{
-		StateDir:             stateDir,
-		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-		TerminalRecoveryWait: 10 * time.Second,
-		ReconnectDelay:       10 * time.Millisecond,
+		StateDir:                stateDir,
+		Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		TerminalRecoveryWait:    10 * time.Second,
+		ReconnectDelay:          10 * time.Millisecond,
+		StateChangePollInterval: 25 * time.Millisecond,
 		NewAgentLoop: func(string, agent.Limits, *slog.Logger) (AgentLoop, error) {
 			return loop, nil
 		},

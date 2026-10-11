@@ -208,8 +208,21 @@ func publishRuntimeLiveGeneration(t *testing.T, root string, revision uint64, ge
 	manifestPath := filepath.Join(root, "current.json")
 	tmpPath := manifestPath + ".tmp"
 	writeJSON(t, tmpPath, manifest)
-	if err := os.Rename(tmpPath, manifestPath); err != nil {
-		t.Fatal(err)
+	// On Windows the atomic replace intermittently fails with "Access is denied"
+	// while a scanner or the running Gateway's own refresh still holds
+	// current.json open. Retry briefly instead of letting the fixture decide
+	// whether the run is green.
+	delay := 10 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := os.Rename(tmpPath, manifestPath)
+		if err == nil {
+			return
+		}
+		if attempt == 6 {
+			t.Fatalf("publish live manifest: %v", err)
+		}
+		time.Sleep(delay)
+		delay *= 2
 	}
 }
 

@@ -141,7 +141,12 @@ func TestLiveMetadataStaleFailsClosedAndNewGenerationRecoversReadiness(t *testin
 		t.Fatal(err)
 	}
 
-	waitFor(t, time.Second, func() bool { return source.Ready() != nil })
+	// Both waits bound detection LATENCY, not behaviour: once a snapshot ages out
+	// it stays stale, and a newer generation stays active. The bounds are loose
+	// because a 50ms poll against a 250ms staleness window is a real timing
+	// gamble under -race and a loaded parallel CI runner, where a scheduler stall
+	// of that order is normal.
+	waitFor(t, 5*time.Second, func() bool { return source.Ready() != nil })
 	if _, err := source.Authorization(context.Background(), identity.authorizationID, identity.deviceID, identity.tokenID, time.Now().UTC()); !errors.Is(err, ErrMetadataStale) {
 		t.Fatalf("stale authorization did not fail closed: %v", err)
 	}
@@ -155,7 +160,7 @@ func TestLiveMetadataStaleFailsClosedAndNewGenerationRecoversReadiness(t *testin
 	}
 
 	publishLiveGeneration(t, root, 2, "generation-2", time.Now().UTC(), time.Now().UTC().Add(time.Hour), []contractv1.DeviceSessionAuthorization{authorization}, []contractv1.EndpointRouteAssignment{route}, nil)
-	waitFor(t, time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		return source.Ready() == nil && source.MetadataStats(time.Now().UTC()).ActiveRevision == 2
 	})
 	ready = httptest.NewRecorder()
@@ -349,8 +354,28 @@ func writeLiveManifest(t *testing.T, root string, manifest MetadataGenerationMan
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tmp, filepath.Join(root, "current.json")); err != nil {
-		t.Fatal(err)
+	replaceLiveManifest(t, tmp, filepath.Join(root, "current.json"))
+}
+
+// replaceLiveManifest publishes the manifest with the atomic replace a real
+// publisher uses. On Windows that replace intermittently fails with "Access is
+// denied" while a scanner or the source's own refresh still holds current.json
+// open, so retry briefly: six attempts backing off 10ms..160ms wait at most
+// ~310ms, the same policy the Agent's status publish relies on. Without this the
+// fixture, not the code under test, decides whether a run is green.
+func replaceLiveManifest(t *testing.T, from, to string) {
+	t.Helper()
+	delay := 10 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := os.Rename(from, to)
+		if err == nil {
+			return
+		}
+		if attempt == 6 {
+			t.Fatalf("publish live manifest: %v", err)
+		}
+		time.Sleep(delay)
+		delay *= 2
 	}
 }
 

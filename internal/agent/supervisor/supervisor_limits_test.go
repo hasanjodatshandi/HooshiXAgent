@@ -44,9 +44,10 @@ func TestSettingsLimitsDriveTheRunner(t *testing.T) {
 	var mu sync.Mutex
 	var got agent.Limits
 	options := Options{
-		StateDir:       stateDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ReconnectDelay: 10 * time.Millisecond,
+		StateDir:                stateDir,
+		Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ReconnectDelay:          10 * time.Millisecond,
+		StateChangePollInterval: 25 * time.Millisecond,
 		NewAgentLoop: func(_ string, limits agent.Limits, _ *slog.Logger) (AgentLoop, error) {
 			mu.Lock()
 			got = limits
@@ -80,11 +81,10 @@ func TestSettingsLimitsDriveTheRunner(t *testing.T) {
 	}
 
 	// The supervisor stays alive as long as the loop it built does: this is the
-	// service process, not a one-shot run.
-	time.Sleep(200 * time.Millisecond)
-	if phase := statusPhase(stateDir); phase != "running" {
-		t.Fatalf("phase = %q, want running while the settings-tuned loop serves", phase)
-	}
+	// service process, not a one-shot run. The running phase is published only
+	// after NewAgentLoop returns, so wait for it instead of sleeping a guess.
+	waitFor(t, 5*time.Second, func() bool { return statusPhase(stateDir) == "running" },
+		"the running phase to be published while the settings-tuned loop serves")
 
 	cancel()
 	select {
@@ -107,9 +107,10 @@ func TestUnusableSettingsLimitsWaitForTheOperator(t *testing.T) {
 	var mu sync.Mutex
 	var builds []agent.Limits
 	options := Options{
-		StateDir:       stateDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ReconnectDelay: 10 * time.Millisecond,
+		StateDir:                stateDir,
+		Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ReconnectDelay:          10 * time.Millisecond,
+		StateChangePollInterval: 25 * time.Millisecond,
 		NewAgentLoop: func(_ string, limits agent.Limits, _ *slog.Logger) (AgentLoop, error) {
 			mu.Lock()
 			builds = append(builds, limits)

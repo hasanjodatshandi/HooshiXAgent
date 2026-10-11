@@ -88,6 +88,13 @@ type Options struct {
 
 	// NewAgentLoop constructs the runner. Nil means agent.NewRunner.
 	NewAgentLoop func(stateDir string, limits agent.Limits, logger *slog.Logger) (AgentLoop, error)
+
+	// StateChangePollInterval is how often a supervisor that is waiting for an
+	// operator change (pending configuration, terminal recovery) re-reads the
+	// state-directory fingerprint. Zero means defaultStateChangePollInterval; it
+	// is a seam so the wait can be observed without a test gambling on a
+	// multi-second poll.
+	StateChangePollInterval time.Duration
 }
 
 // Supervisor manages the Agent Runner lifecycle with reconnect-forever
@@ -115,6 +122,12 @@ type Supervisor struct {
 // defaultReconnectDelay is the pause between retries of a recoverable failure.
 const defaultReconnectDelay = 5 * time.Second
 
+// defaultStateChangePollInterval is how often a blocked supervisor re-reads the
+// state directory. Polling instead of watching keeps the recovery path free of
+// OS-specific watcher dependencies: two seconds is responsive for an operator
+// who has just re-paired and cheap for a device waiting out the recovery window.
+const defaultStateChangePollInterval = 2 * time.Second
+
 // New creates a supervisor. Call Run to start it.
 func New(opts Options) (*Supervisor, error) {
 	normalized, err := agent.NormalizeStateDir(opts.StateDir)
@@ -136,6 +149,9 @@ func New(opts Options) (*Supervisor, error) {
 	}
 	if opts.ReconnectDelay <= 0 {
 		opts.ReconnectDelay = defaultReconnectDelay
+	}
+	if opts.StateChangePollInterval <= 0 {
+		opts.StateChangePollInterval = defaultStateChangePollInterval
 	}
 	if opts.NewAgentLoop == nil {
 		opts.NewAgentLoop = func(stateDir string, limits agent.Limits, logger *slog.Logger) (AgentLoop, error) {
@@ -521,7 +537,7 @@ func (sup *Supervisor) watchStateChanges(ctx context.Context) (<-chan struct{}, 
 	watched := agent.RecoveryWatchPaths(sup.opts.StateDir)
 	before := stateFingerprint(watched)
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(sup.opts.StateChangePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -550,7 +566,7 @@ func (sup *Supervisor) watchStateChanges(ctx context.Context) (<-chan struct{}, 
 func (sup *Supervisor) waitForStateChange(ctx context.Context, bound time.Duration) error {
 	watched := agent.RecoveryWatchPaths(sup.opts.StateDir)
 	before := stateFingerprint(watched)
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(sup.opts.StateChangePollInterval)
 	defer ticker.Stop()
 	var deadline <-chan time.Time
 	if bound > 0 {
