@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   pull_request:
@@ -406,7 +406,7 @@ jobs:
         run: bash scripts/ci/comprehensive-tests.sh
 
       - name: Upload R-11 coverage evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: r11-coverage-${{ github.sha }}
           path: ${{ runner.temp }}/hooshix-r11-coverage
@@ -436,7 +436,7 @@ jobs:
         run: bash scripts/ci/performance-capacity.sh
 
       - name: Upload R-12 performance evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: r12-performance-${{ github.sha }}
           path: ${{ runner.temp }}/hooshix-r12-evidence
@@ -695,7 +695,7 @@ jobs:
         run: bash scripts/ci/release-gate.sh
 
       - name: Upload AG-8 release evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ag8-release-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/hooshix-ag8-evidence/AG8-EVIDENCE.txt
