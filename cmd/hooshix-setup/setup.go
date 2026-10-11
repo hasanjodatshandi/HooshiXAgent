@@ -54,8 +54,10 @@ const (
 	// does not say otherwise, and defaultPanelURL is the panel Setup enrolls
 	// the device against. Both are only defaults: Setup asks, an answer (or the
 	// matching HOOSHIX_*_URL variable) wins, and the result is re-editable in
-	// the settings file afterwards.
-	defaultTunnelURL = "wss://tunnel.hooshix-agent.ir/agent/v1/connect"
+	// the settings file afterwards. `edge` rather than `tunnel`: some networks
+	// drop the literal name `tunnel` from DNS answers, and both hostnames proxy
+	// to the same Gateway replicas.
+	defaultTunnelURL = "wss://edge.hooshix-agent.ir/agent/v1/connect"
 	defaultPanelURL  = "https://panel.hooshix-agent.ir"
 	envTunnelURL     = "HOOSHIX_TUNNEL_URL"
 	envPanelURL      = "HOOSHIX_PANEL_URL"

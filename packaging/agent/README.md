@@ -44,7 +44,7 @@ Installers preserve an existing binary as `.previous` before replacing it.
 Setup asks for the two addresses it installs with, and both are re-editable afterwards in `C:\Program Files\HooshiXAgent\config.json`:
 
 ```text
-Tunnel server URL [wss://tunnel.hooshix-agent.ir/agent/v1/connect]:
+Tunnel server URL [wss://edge.hooshix-agent.ir/agent/v1/connect]:
 Panel server URL  [https://panel.hooshix-agent.ir]:
 ```
 
