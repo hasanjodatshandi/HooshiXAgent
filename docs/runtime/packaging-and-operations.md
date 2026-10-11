@@ -127,6 +127,30 @@ The clean-checkout `Windows desktop distribution build / service install gate (s
 
 The archive `hooshix-agent_<version>_windows_<arch>.zip` with `Install-HooshiXAgent.ps1` remains published and is built, SBOM-scanned, checksummed and attested by the same release workflow. It is no longer a divergent channel: since rollout step R1 it installs the same `HooshiXAgent` service model at the same machine-wide paths, and uninstalls it the same way. What the zip still does not provide is the desktop distribution's tray binary, `uninstall.exe` and ARP entry, which is why `HooshiXAgent-Setup.exe` is the supported channel for a Windows desktop device.
 
+### Connect client distribution
+
+`hooshix-connect.exe` (from `cmd/hooshix-connect`) is the Windows GUI that turns a
+Panel connect bundle into a loopback Connector session. It is deliberately **not**
+part of `HooshiXAgent-Setup.exe` or any Agent archive: it runs on the machine that
+*connects in*, not on the paired device, so installing it with the Agent would put
+it on the wrong machine. It reaches users through the Panel's
+`/download/hooshix-connect.exe` route, which serves the same file an operator
+builds locally with `powershell -File scripts\build-connect.ps1`.
+
+That script is the gate for this binary. It regenerates the icon resource, builds
+with `-H windowsgui`, and then fails closed unless the produced image has a
+`.rsrc` section (icon plus application manifest, which is what makes the window
+DPI-aware and runs `asInvoker`) and a GUI subsystem value of 2. Both checks exist
+because the script deletes the intermediate `.syso`, so a build that silently lost
+the resources would otherwise ship a console-window app with no icon. A GUI binary
+has no stderr, so every start-up failure path in the program ends in a message box
+rather than a silent process exit.
+
+The unsigned-binary risk described in "Authenticode signing status (accepted risk)"
+applies to `hooshix-connect.exe` too. It is not in the release workflow yet, so its
+integrity today is established by the digest the build script prints and by the
+TLS-protected Panel download route.
+
 ## Signed release/provenance workflow
 
 The publication path in `.github/workflows/release.yml` runs on version tags and is fail-closed around the exact tagged commit; `workflow_dispatch` exists only for non-publishing post-merge verification on `main`. The tag is resolved to a 40-hex commit and `scripts/release/verify-release-commit.py` requires a completed successful `CI` **push** run for that exact SHA on `main`, including a successful `AG-8 final security / resilience / release gate` job. A tag pointing at an unverified commit is refused before build or publish.

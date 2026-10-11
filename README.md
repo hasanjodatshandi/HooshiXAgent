@@ -96,6 +96,7 @@ Production defaults were therefore **not raised** from synthetic results. Operat
 - `docs/engineering/current-state.md` — reconciled post-hardening current state and R-0..R-12 summary.
 - `docs/runtime/agent.md` — Agent runtime/state/security behavior.
 - `docs/runtime/gateway.md` — Gateway runtime, limits and failure semantics.
+- `docs/runtime/remote-desktop.md` — operator runbook for RDP over the private Connector path (enable, test, revoke, failure modes).
 - `docs/runtime/agent-gateway-e2e-acceptance.md` — integrated real-process acceptance.
 - `docs/runtime/packaging-and-operations.md` — packages, Compose deployment and release operations.
 - `docs/runtime/security-resilience-release-gate.md` — release security/resilience acceptance.
