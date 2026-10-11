@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -36,6 +39,11 @@ type Config struct {
 	IdleTimeout    time.Duration
 	WriteTimeout   time.Duration
 	HTTPClient     *http.Client
+	// CAFile replaces the system trust store with a private trust anchor, the
+	// way a privately-CA'd Gateway is reached over wss://. A connect bundle
+	// never carries it: the bundle says where to connect, the operator decides
+	// what to trust.
+	CAFile string
 }
 
 func DefaultConfig() Config {
@@ -76,6 +84,10 @@ func Run(ctx context.Context, config Config, logger *slog.Logger) error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
+	config, err := config.withCAClient()
+	if err != nil {
+		return err
+	}
 	if config.Protocol == "udp" {
 		listener, err := net.ListenPacket("udp", config.ListenAddress)
 		if err != nil {
@@ -88,6 +100,48 @@ func Run(ctx context.Context, config Config, logger *slog.Logger) error {
 		return fmt.Errorf("listen on private connector loopback: %w", err)
 	}
 	return Serve(ctx, listener, config, logger)
+}
+
+// maxCAFileSize matches internal/agent's trust-anchor limit: an
+// operator-supplied path must never become an unbounded read.
+const maxCAFileSize = 1 << 20
+
+// withCAClient turns CAFile into an http.Client that trusts that anchor
+// alongside the system pool. A caller that already supplied an HTTPClient owns
+// its own trust, so CAFile is ignored rather than rewritten under it.
+func (config Config) withCAClient() (Config, error) {
+	if config.CAFile == "" || config.HTTPClient != nil {
+		return config, nil
+	}
+	authority, err := os.Open(config.CAFile)
+	if err != nil {
+		return Config{}, fmt.Errorf("open CA file: %w", err)
+	}
+	defer authority.Close()
+	info, err := authority.Stat()
+	if err != nil {
+		return Config{}, fmt.Errorf("inspect CA file: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxCAFileSize {
+		return Config{}, fmt.Errorf("CA file must be a regular file of 1..%d bytes", maxCAFileSize)
+	}
+	pemData, err := io.ReadAll(io.LimitReader(authority, maxCAFileSize))
+	if err != nil {
+		return Config{}, fmt.Errorf("read CA file: %w", err)
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(pemData) {
+		return Config{}, errors.New("CA file contains no PEM certificate usable as a trust anchor")
+	}
+	config.HTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
+		},
+	}
+	return config, nil
 }
 
 func Serve(ctx context.Context, listener net.Listener, config Config, logger *slog.Logger) error {

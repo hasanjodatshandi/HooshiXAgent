@@ -36,7 +36,8 @@ func main() {
 // configFromFlags builds a connector config from command-line arguments. A
 // -bundle supplies the gateway, grant, token ID and token in one pasted string;
 // the individual flags and -token-file remain for the manual path. -listen,
-// -protocol and -max-connections always override, bundle or not.
+// -protocol, -max-connections and -ca-file always override, bundle or not —
+// -ca-file because a bundle carries no trust information at all.
 func configFromFlags(args []string) (connector.Config, error) {
 	config := connector.DefaultConfig()
 	set := flag.NewFlagSet("hooshix-connector", flag.ContinueOnError)
@@ -49,6 +50,7 @@ func configFromFlags(args []string) (connector.Config, error) {
 	listen := set.String("listen", config.ListenAddress, "local loopback listener")
 	protocol := set.String("protocol", config.Protocol, "tcp or udp")
 	maxConnections := set.Int("max-connections", config.MaxConnections, "bounded local concurrent connections (1..16)")
+	caFile := set.String("ca-file", "", "PEM trust anchor for a privately-CA'd Gateway (never part of a bundle)")
 	if err := set.Parse(args); err != nil {
 		return connector.Config{}, err
 	}
@@ -76,8 +78,8 @@ func configFromFlags(args []string) (connector.Config, error) {
 		}
 		config.Token = token
 	}
-	// These three always override, but only when the operator actually passed
-	// them: applying a flag default here would erase the bundle's own values.
+	// These always override, but only when the operator actually passed them:
+	// applying a flag default here would erase the bundle's own values.
 	if present["listen"] {
 		config.ListenAddress = *listen
 	}
@@ -86,6 +88,9 @@ func configFromFlags(args []string) (connector.Config, error) {
 	}
 	if present["max-connections"] {
 		config.MaxConnections = *maxConnections
+	}
+	if present["ca-file"] {
+		config.CAFile = *caFile
 	}
 	if err := config.Validate(); err != nil {
 		return connector.Config{}, err

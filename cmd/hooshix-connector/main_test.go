@@ -63,6 +63,26 @@ func TestConfigFromFlagsBundleReportsBadInput(t *testing.T) {
 	}
 }
 
+// -ca-file is the operator's trust decision, and a bundle deliberately carries
+// no trust information, so it combines with -bundle instead of being one of
+// the inputs -bundle replaces.
+func TestConfigFromFlagsCaFileCombinesWithBundle(t *testing.T) {
+	config, err := configFromFlags([]string{"-bundle", validBundle, "-ca-file", "/etc/hooshix/gateway-ca.pem"})
+	if err != nil {
+		t.Fatalf("bundle with -ca-file rejected: %v", err)
+	}
+	if config.CAFile != "/etc/hooshix/gateway-ca.pem" {
+		t.Fatalf("-ca-file not applied: %+v", config)
+	}
+	unset, err := configFromFlags([]string{"-bundle", validBundle})
+	if err != nil {
+		t.Fatalf("bundle without -ca-file: %v", err)
+	}
+	if unset.CAFile != "" {
+		t.Fatalf("an absent trust anchor became a default: %+v", unset)
+	}
+}
+
 func TestConfigFromFlagsManualTokenFilePath(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token.txt")

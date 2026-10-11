@@ -88,6 +88,10 @@ The accepted two-machine run is recorded in
    Passing `-bundle` together with any of those four flags is rejected as a
    contradiction. Without a bundle, `token.txt` must be a regular file no larger
    than 513 bytes containing the raw token, and you delete it when you are done.
+   `-ca-file` is the one flag a bundle never replaces: a bundle says where to
+   connect, and trusting the Gateway certificate remains the operator's
+   decision, so add `-ca-file gateway-ca.pem` only when the Gateway is served by
+   a private certificate authority instead of a publicly trusted one.
 
    Both clients listen on loopback only and open one authenticated WSS flow
    per local TCP connection. Windows presents its own locally generated RDP
@@ -131,6 +135,7 @@ proves the full path even if you do not complete a login.
 | HooshiX Connect: `listening` then `connector flow ended: … HTTP 401` on first client connection | grant expired or revoked between Connect and use | issue a new grant; the bundle's lifetime is the grant's lifetime |
 | HooshiX Connect: `listen on 127.0.0.1:13389: …` | another Connector already holds the port | press Disconnect in the other window, or use the CLI with a different `-listen` |
 | Connector exits with `gateway URL must be wss://<host>/connector/v1/connect without credentials, query, or fragment` | wrong `-gateway` scheme, path, query or userinfo | use exactly `wss://edge.hooshix-agent.ir/connector/v1/connect` |
+| Connector exits with `x509: certificate signed by unknown authority` | the Gateway is served by a private CA that this machine does not trust | pass `-ca-file gateway-ca.pem` (it combines with `-bundle`), or install the CA into the system store |
 | `connector token must be 32..512 non-whitespace characters` | pasted token with a newline or from the wrong grant | re-save the exact token; the token is shown once |
 | `token file must be a regular file no larger than 513 bytes` | token piped through a directory, symlink or oversized file | write a fresh small `token.txt` |
 | `HTTP 401` at connect time | grant revoked, expired, wrong `grant_id`/`token_id`, or endpoint disabled | issue a new grant against the enabled endpoint |
