@@ -206,10 +206,10 @@ Connection loss triggers bounded exponential reconnect attempts. The delay start
 Default Agent runtime bounds:
 
 ```text
-active streams/session       64
-queued inbound frames/stream 16
-queued inbound bytes/stream   2 MiB
+active streams/session        64
+queued inbound bytes/stream   2 MiB byte streams, 8 MiB for one admitted HTTP request
 queued inbound bytes/session  8 MiB
+queue slots/stream            16 minimum, derived from that stream's byte budget
 local dial timeout             5 s
 handshake timeout             10 s
 write timeout                 10 s
@@ -217,6 +217,12 @@ reconnect delay                1..30 s
 ```
 
 Protocol frame bounds remain governed by ADR-0007.
+
+A stream queue is a channel of frames *and* a byte budget, and the smaller of the two is what the tunnel actually buffers. `max_queue_frames` is therefore a **floor**, not the capacity: slots are derived from the stream's own byte budget divided by the smallest frame the peers put on the wire in practice (4 KiB — `http.Request.Write` and a local service's response writer both flush through a `bufio.Writer`, so frames arrive at that size rather than the 32 KiB the framing allows). Sizing them the other way round made the slot count bind first and shrank the real per-stream buffer to a fraction of the documented budget, which aborted legitimately admitted uploads with `resource_limit`.
+
+The per-stream input window depends on what the Gateway is allowed to send: an HTTP request body has an admission ceiling (`MaxRequestBytes`) and is a finite amount of input the Agent must be able to absorb while its local target drains it, so it gets the session-sized window; a `tcp`/`udp` byte stream has no admission ceiling at all, keeps the tighter 2 MiB window, and overflowing that window remains the genuine capacity breach the error describes. The session and global budgets are untouched, so the total bytes one session may buffer did not change. The slot array itself is a fixed per-stream cost (capacity × 32 bytes), bounded by `max_streams` × `max_tunnels` — 8 MiB windows at the shipped defaults reserve about 4 MiB of queue slots per tunnel session at full stream fan-out.
+
+What the Agent does *not* have is sender windowing: nothing tells the Gateway to slow down, and an overrun is resolved by terminating the stream, not by backpressure. Adding real credit/window flow control needs new Agent→Gateway control messages, which protocol v1 rejects fatally, so it is a tunnel-protocol revision plus subprotocol negotiation — the backpressure work ADR-0007 defers while requiring the v1 bounds to be preserved — not a change that can be layered onto v1.
 
 Every bound above is also an operator setting. The optional `limits` block in `config.json` overrides the fields it names and leaves the rest at these defaults:
 

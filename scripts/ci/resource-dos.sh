@@ -13,8 +13,8 @@ fail_if_no_tests() {
   fi
 }
 
-fail_if_no_tests ./internal/agent -run '^TestAgentQueue'
-fail_if_no_tests ./internal/gateway -run 'Test(DefaultResourceEnvelopeFitsDeploymentMemoryLimit|ByteBudgetAndIngressBufferFailClosedAndRelease|StreamQueueBudgetsBoundPerStreamSessionAndGlobal|StreamQueueFrameLimitReleasesRejectedReservation|GatewayRateAndConcurrencyLimitsFailClosed|GatewayResourceMetricsAreAggregateAndLowCardinality|ResourcePrimitivesStressDoNotGrowGoroutines)$'
-go test -race -count=1 ./internal/agent ./internal/gateway -run 'Test(AgentQueue|StreamQueueBudgets|GatewayRateAndConcurrencyLimitsFailClosed|ResourcePrimitivesStressDoNotGrowGoroutines)'
+fail_if_no_tests ./internal/agent -run '^(TestAgentQueue|TestStreamInputBudgetMatchesTheAdmissionEnvelope|TestStreamQueueSlotsNeverBindBeforeTheByteBudget|TestStreamQueuesBufferTheirWholeByteBudgetWithoutAConsumer)'
+fail_if_no_tests ./internal/gateway -run 'Test(DefaultResourceEnvelopeFitsDeploymentMemoryLimit|StreamQueueSlotArraysStayWithinTheDeploymentEnvelope|ByteBudgetAndIngressBufferFailClosedAndRelease|StreamQueueBudgetsBoundPerStreamSessionAndGlobal|StreamQueueFrameLimitReleasesRejectedReservation|StreamQueueSlotsFollowTheByteBudget|StreamQueueBuffersItsWholeByteBudgetWithoutAReader|GatewayRateAndConcurrencyLimitsFailClosed|GatewayResourceMetricsAreAggregateAndLowCardinality|ResourcePrimitivesStressDoNotGrowGoroutines)$'
+go test -race -count=1 ./internal/agent ./internal/gateway -run 'Test(AgentQueue|StreamQueue|StreamInputBudget|GatewayRateAndConcurrencyLimitsFailClosed|ResourcePrimitivesStressDoNotGrowGoroutines)'
 
 echo "R-3 resource/DoS gate: PASSED — byte budgets, global ingress/queue limits, rate/concurrency controls, aggregate saturation metrics and race-safe cleanup passed."

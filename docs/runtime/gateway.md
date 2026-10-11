@@ -120,7 +120,6 @@ The public request cannot provide a raw Agent-local target. The Gateway sends on
 agent sessions                        64
 pending Agent handshakes               64
 streams per Agent session              64
-queued inbound frames/stream           16
 queued Agent→Gateway bytes/stream    2 MiB
 queued Agent→Gateway bytes/session   8 MiB
 global queued Agent→Gateway bytes   32 MiB
@@ -146,6 +145,10 @@ shutdown timeout                      10 s
 ```
 
 Protocol-v1 frame bounds remain authoritative from ADR-0007: 64 KiB control payload and 1 MiB data payload.
+
+Each stream's response queue is a channel of frames *and* a byte budget. `MaxStreamQueueFrames` is a **floor**: slots are derived from `MaxStreamQueueBytes` divided by the smallest frame the Agent puts on the wire in practice (4096 — a local service writes its response through a `bufio.Writer`, so frames arrive at that flush size rather than the 32 KiB the socket read allows). Counting slots the other way round made the queue hold a fraction of its documented budget and terminated healthy tunneled responses with `resource_limit`. The byte budgets themselves are unchanged, so the bytes one session or one Gateway may retain did not grow. The slots *are* a fixed per-stream preallocation, and at maximum fan-out (64 sessions × 64 streams × 512 slots) the arrays total 64 MiB; `TestStreamQueueSlotArraysStayWithinTheDeploymentEnvelope` pins that cost to a quarter of the 256 MiB container limit so a future budget or fan-out increase has to be a deliberate memory decision.
+
+The admission envelope is a cross-component invariant: the Gateway admits a public request body up to `MaxRequestBytes` (8 MiB) and the Agent's per-stream HTTP input window is its session queue bound (8 MiB), so every admitted body is bufferable end to end while the local target drains. `tests/integration/large_request_flow_test.go` pins both the relationship and the behavior, because the two packages must never import each other.
 
 ## Session/authentication behavior
 

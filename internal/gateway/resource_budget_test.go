@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/gateway/gatewayresources"
 )
@@ -53,6 +54,25 @@ func TestDefaultResourceEnvelopeFitsDeploymentMemoryLimit(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Compose resource envelope missing %q", required)
 		}
+	}
+}
+
+// Deriving queue slots from the per-stream byte budget turns that budget into a
+// fixed per-stream preallocation (channel capacity x element size), which the
+// payload-budget envelope above does not model. This pins the worst case at
+// maximum fan-out to a quarter of the 256 MiB container limit, so raising a
+// queue budget or a fan-out bound is a deliberate decision about deployment
+// memory instead of an unmeasured side effect of a flow-control fix.
+func TestStreamQueueSlotArraysStayWithinTheDeploymentEnvelope(t *testing.T) {
+	limits := DefaultLimits()
+	slots := int64(limits.MaxStreamQueueBytes / minTunnelFrame)
+	if limits.MaxStreamQueueFrames > int(slots) {
+		slots = int64(limits.MaxStreamQueueFrames)
+	}
+	arrayBytes := int64(limits.MaxAgentSessions) * int64(limits.MaxStreamsPerSession) * slots * int64(unsafe.Sizeof(queuedPayload{}))
+	const queueArrayEnvelope = 64 << 20
+	if arrayBytes > queueArrayEnvelope {
+		t.Fatalf("stream queue slot arrays at maximum fan-out are %d bytes, above the %d byte deployment envelope", arrayBytes, queueArrayEnvelope)
 	}
 }
 

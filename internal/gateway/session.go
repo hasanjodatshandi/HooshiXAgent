@@ -869,7 +869,22 @@ func (stream *stream) halfClose() {
 	stream.finish(nil)
 }
 
+// minTunnelFrame is the smallest payload either peer puts into a data frame in
+// practice: an HTTP request body is serialized by http.Request.Write, which
+// wraps the stream writer in a bufio.Writer, and a local service writes its
+// response through one too, so both directions arrive in 4096-byte flushes even
+// though the framing allows requestStreamChunkSize. Tunnel slots are sized
+// against the small end so the documented byte budget is what bounds a stream.
+const minTunnelFrame = 4096
+
 func newStream(ctx context.Context, id uint32, queueFrames int, queueBytes int64, sessionBudget, globalBudget *byteBudget, rejectCounter *atomic.Uint64) *stream {
+	// A queue with only queueFrames slots fills its slots first and makes the
+	// real per-stream buffer far smaller than MaxStreamQueueBytes, aborting a
+	// stream that still had room to buffer. Slots therefore follow the budget;
+	// queueFrames stays as the floor.
+	if slots := int(queueBytes / minTunnelFrame); slots > queueFrames {
+		queueFrames = slots
+	}
 	return &stream{
 		id:            id,
 		ctx:           ctx,

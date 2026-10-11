@@ -356,14 +356,15 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		return sess.sendStreamError(parent, frame.StreamID, "protocol_error", "local endpoint protocol mismatch", false)
 	}
 	streamCtx, cancel := context.WithCancel(parent)
+	inputBytes := streamInputBudget(message.Mode, sess.limits)
 	stream := &agentStream{
 		id:            frame.StreamID,
 		endpoint:      endpoint,
-		incoming:      make(chan agentQueuedPayload, sess.limits.MaxQueueFrames),
+		incoming:      make(chan agentQueuedPayload, streamQueueFrames(sess.limits.MaxQueueFrames, inputBytes)),
 		space:         make(chan struct{}, 1),
 		ctx:           streamCtx,
 		cancel:        cancel,
-		streamBudget:  newAgentByteBudget(sess.limits.MaxStreamQueueBytes),
+		streamBudget:  newAgentByteBudget(inputBytes),
 		sessionBudget: sess.queueBudget,
 		logger:        sess.logger,
 		mode:          message.Mode,
@@ -886,8 +887,9 @@ func (sess *agentSession) countActiveStreams() int {
 }
 
 // countQueuedFrames returns the number of queued inbound frames across all
-// live streams. Each queue is bounded, so the total is bounded by
-// MaxStreams * MaxQueueFrames.
+// live streams. Every queue is bounded, and so is the sum: slot counts come from
+// streamQueueFrames of each stream's own byte budget, while the bytes behind
+// those slots are capped by the session queue budget.
 func (sess *agentSession) countQueuedFrames() int {
 	sess.mu.Lock()
 	streams := make([]*agentStream, 0, len(sess.streams))
