@@ -388,17 +388,23 @@ func TestWaitForStateChangeWakesOnSecretOnlyChange(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	// The result travels on a channel instead of being logged from the goroutine:
+	// waitForStateChange can wake while Save is still between its rename and its
+	// post-rename permission step, and a test that returned there would have
+	// t.TempDir delete the state directory out from under that Save.
+	saved := make(chan error, 1)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		if err := store.Save(agent.SecretState{SessionToken: "rotated_session_token_0123456789ABCDEF"}); err != nil {
-			t.Errorf("save secret: %v", err)
-		}
+		saved <- store.Save(agent.SecretState{SessionToken: "rotated_session_token_0123456789ABCDEF"})
 	}()
 	if err := sup.waitForStateChange(ctx, 12*time.Second); err != nil {
 		t.Fatalf("waitForStateChange did not wake on a secret-only change: %v", err)
 	}
 	if ctx.Err() != nil {
 		t.Fatal("the wait was cancelled before it observed the change")
+	}
+	if err := <-saved; err != nil {
+		t.Fatalf("save secret: %v", err)
 	}
 }
 
