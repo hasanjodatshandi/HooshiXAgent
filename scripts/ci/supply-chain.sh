@@ -50,7 +50,10 @@ print(f'THIRD_PARTY_NOTICES covers {len(required)} Go module dependencies')
 PY
 
 # External runtime/build image references must retain tag readability plus immutable digest identity.
-grep -Eq '^FROM golang:1\.27\.0-alpine3\.24@sha256:[0-9a-f]{64} AS build$' deploy/gateway/Dockerfile
+# The Go build image pin is a security control, not cosmetics: Syft/Trivy attribute stdlib
+# vulnerabilities to the toolchain that compiled the binary, so this patch floor is what keeps
+# released artifacts free of the fixed-stdlib findings that fail the R-6 scan.
+grep -Eq '^FROM golang:1\.27\.2-alpine3\.24@sha256:[0-9a-f]{64} AS build$' deploy/gateway/Dockerfile
 grep -Eq '^FROM alpine:3\.24\.1@sha256:[0-9a-f]{64}$' deploy/gateway/Dockerfile
 grep -Eq '^[[:space:]]*image: caddy:2\.11\.4-alpine@sha256:[0-9a-f]{64}$' deploy/gateway/docker-compose.yml
 grep -Eq "^SYFT_IMAGE='anchore/syft:v[0-9.]+@sha256:[0-9a-f]{64}'$" scripts/release/supply-chain-artifacts.sh

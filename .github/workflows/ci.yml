@@ -33,7 +33,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Install pinned Go quality tools
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Test Agent platform foundations
@@ -122,7 +122,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run architecture fitness tests
@@ -182,7 +182,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run resource and DoS budget gate
@@ -202,7 +202,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run streaming ingress gate
@@ -222,7 +222,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run HTTP and stream-isolation gate
@@ -244,7 +244,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run release and supply-chain gate
@@ -264,7 +264,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run metadata scalability and determinism gate
@@ -284,7 +284,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run observability and writer-isolation gate
@@ -304,7 +304,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run Agent state and installer hardening gate
@@ -324,7 +324,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run Agent state transaction hardening gate
@@ -348,7 +348,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run Unix filesystem / installer hardening gate
@@ -393,7 +393,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run comprehensive test expansion gate
@@ -423,7 +423,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run performance and capacity gate
@@ -453,7 +453,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run real Agent↔Gateway E2E acceptance
@@ -473,7 +473,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run live authorization lifecycle gate
@@ -493,7 +493,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run multi-host public edge gate
@@ -513,7 +513,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run packaging and operations gate
@@ -539,7 +539,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Install rsrc resource compiler
@@ -637,7 +637,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run first prototype smoke
@@ -682,7 +682,7 @@ jobs:
       - name: Set up Go 1.27
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: false
 
       - name: Run final Agent/Gateway release gate

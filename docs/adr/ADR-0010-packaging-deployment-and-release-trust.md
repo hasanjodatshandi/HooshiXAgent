@@ -43,7 +43,7 @@ The initial Gateway server deployment is Docker Compose and contains only:
 
 No Control Panel service, database, queue, Redis, Kubernetes, or unrelated infrastructure is bundled.
 
-Caddy uses the official pinned `caddy:2.11.4-alpine` image. The Gateway image builds with Go 1.27.0 and runs from a minimal pinned Alpine 3.24 base.
+Caddy uses the official pinned `caddy:2.11.4-alpine` image. The Gateway image builds with Go 1.27.2 and runs from a minimal pinned Alpine 3.24 base.
 
 Caddy owns public certificate automation. Caddy→Gateway traffic also remains TLS verified. Deployment bootstrap creates a private deployment CA and a Gateway certificate with the Docker service DNS name `gateway`; Caddy receives only the CA certificate and verifies the Gateway certificate with an explicit trust pool and TLS server name. `tls_insecure_skip_verify` is forbidden.
 
