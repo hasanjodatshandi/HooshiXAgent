@@ -248,9 +248,108 @@ func TestRotatingFileBoundsTheLogAndKeepsOneBackup(t *testing.T) {
 	}
 }
 
+// TestRotatingFileReportsAnUnavailableLogInsteadOfShrinkingToSilence proves a
+// failed open is reported and recovered. Returning (len(p), nil) made every
+// later diagnostic look written while nothing reached disk, for the whole life
+// of the service, so the operator lost the only record of the failure.
+func TestRotatingFileReportsAnUnavailableLogInsteadOfShrinkingToSilence(t *testing.T) {
+	dir := t.TempDir()
+	// A directory where the log belongs makes the open fail, and removing it
+	// later makes the same path openable again.
+	blocked := filepath.Join(dir, "agent.log")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer := &rotatingFile{path: blocked, maxBytes: 64}
+	written, err := writer.Write([]byte("first diagnostic\n"))
+	if err == nil {
+		t.Fatal("a log that could not be opened was reported as written")
+	}
+	if written != 0 {
+		t.Fatalf("Write claimed %d bytes for a log it could not open", written)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("recovered diagnostic\n")); err != nil {
+		t.Fatalf("the log did not recover once it became openable: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "recovered diagnostic") {
+		t.Fatalf("the post-failure diagnostic is missing from agent.log: %q", contents)
+	}
+}
+
+// TestRotatingFileKeepsTheBoundHonestWhenRotationFails proves that a failed
+// rotation neither drops diagnostics nor falsifies the size counter. Zeroing
+// `written` after a failed rename let the log outrun its bound unnoticed, and
+// delayed the retry that would have fixed it.
+func TestRotatingFileKeepsTheBoundHonestWhenRotationFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	writer, err := newRotatingFile(path, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	// Occupying the backup slot with a non-empty directory makes the rename
+	// fail while the active file stays perfectly writable: os.Remove cannot
+	// clear the slot, and a file cannot be renamed onto an occupied directory.
+	backup := path + ".1"
+	if err := os.Mkdir(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "occupant"), []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 8; round++ {
+		if _, err := writer.Write([]byte("0123456789abcdef\n")); err != nil {
+			t.Fatalf("write %d with rotation unavailable: %v", round, err)
+		}
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) < 8*17 {
+		t.Fatalf("diagnostics were dropped while rotation failed: %d bytes on disk", len(contents))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.written != info.Size() {
+		t.Fatalf("the size counter says %d while the log holds %d bytes", writer.written, info.Size())
+	}
+
+	// Once rotation becomes possible again the very next write must rotate: the
+	// counter already reports the truth.
+	if err := os.RemoveAll(backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("final\n")); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("the oversized log was not rotated on the write after the block cleared: %v", err)
+	}
+	if !strings.Contains(string(rotated), "0123456789abcdef") {
+		t.Fatalf("rotated log lost its history: %q", rotated)
+	}
+}
+
 // TestServiceLoggerDegradesWhenTheLogCannotBeOpened proves the service still
 // runs when its log path is unusable (a logger failure must never stop the
-// tunnel), and that a usable path receives the diagnostics.
+// tunnel), that a usable path receives the diagnostics, and that an unusable
+// path is retried rather than abandoned: the logger keeps writing as soon as
+// the path frees instead of going silent for the rest of the service's life.
 func TestServiceLoggerDegradesWhenTheLogCannotBeOpened(t *testing.T) {
 	dir := t.TempDir()
 	// Built from the same primitives newServiceLogger uses, so the test can
@@ -273,13 +372,40 @@ func TestServiceLoggerDegradesWhenTheLogCannotBeOpened(t *testing.T) {
 		t.Fatalf("diagnostic was not written to agent.log: %q", contents)
 	}
 
-	// A file where the log DIRECTORY should be makes the open fail.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+	// A log path occupied by a directory makes the open fail. The service must
+	// keep running, and it must start logging again once the path frees instead
+	// of staying silent for the rest of its life.
+	blocked := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	degraded := newServiceLogger(blocked)
-	degraded.Warn("must not panic")
+	degraded, writer := newServiceLoggerWithWriter(filepath.Dir(blocked))
+	degraded.Warn("while the log is unavailable")
+	if info, err := os.Stat(blocked); err != nil || !info.IsDir() {
+		t.Fatalf("the blocked log path changed underneath the retrying logger: err=%v", err)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	degraded.Warn("after the log freed up")
+	// The degraded logger must still be the file writer — not a sink that
+	// swallows everything — otherwise nothing below could recover.
+	if writer == nil {
+		t.Fatal("no writer was kept for the degraded service logger")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := os.ReadFile(blocked)
+	if err != nil {
+		t.Fatalf("the logger never reopened the path: %v", err)
+	}
+	if !strings.Contains(string(recovered), "after the log freed up") {
+		t.Fatalf("the post-recovery diagnostic is missing: %q", recovered)
+	}
+	if strings.Contains(string(recovered), "while the log is unavailable") {
+		t.Fatalf("a diagnostic was claimed as written while the log could not be opened: %q", recovered)
+	}
 }
 
 // TestResolveServiceStateDirPrefersTheExplicitDirectory proves an operator's

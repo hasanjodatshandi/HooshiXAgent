@@ -154,8 +154,13 @@ func TestUnusableSettingsLimitsWaitForTheOperator(t *testing.T) {
 	// Correct the file until the waiting supervisor notices: it snapshots the
 	// config fingerprint when it starts waiting, so the first write can race
 	// with that snapshot (same reason the recovery loops in supervisor_test.go
-	// rewrite state repeatedly).
-	deadline := time.Now().Add(15 * time.Second)
+	// rewrite state repeatedly). The budget is wall-clock and this loop is the
+	// one place in the package where the product's reaction is observed rather
+	// than driven, so it has to survive a `-race` run of the whole suite, where
+	// parallel packages starve the supervisor goroutine for seconds: the same
+	// test failed at 15.18s against a 15s bound while its own 25ms poll interval
+	// says the real reaction time is ~100ms.
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		pairedConfigWithLimits(t, stateDir, `{"max_streams": 7}`)
 		mu.Lock()

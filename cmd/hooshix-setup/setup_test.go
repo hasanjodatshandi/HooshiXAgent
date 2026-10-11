@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
@@ -650,4 +651,133 @@ func min(left, right int) int {
 		return left
 	}
 	return right
+}
+
+// TestRenameIntoPlaceWaitsForTheOldBinaryToBeReleased proves the install path
+// tolerates the lock `service stop` leaves behind: SCM only posts the request,
+// so the first rename onto a still-loaded executable fails. Before this, a
+// single failed rename aborted an upgrade that would have landed a moment
+// later, while the uninstall path already waited.
+func TestRenameIntoPlaceWaitsForTheOldBinaryToBeReleased(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "staged.exe")
+	if err := os.WriteFile(source, []byte("new build"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty directory in the target slot makes every rename attempt fail
+	// until it is cleared, which stands in for the handle being released.
+	target := filepath.Join(dir, "installed.exe")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "occupant"), []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = os.RemoveAll(target)
+	}()
+	started := time.Now()
+	if err := renameIntoPlace(source, target, 10*time.Second); err != nil {
+		t.Fatalf("the rename never recovered after the target cleared: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 250*time.Millisecond {
+		t.Fatalf("renameIntoPlace returned without waiting and retrying: %s", elapsed)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new build" {
+		t.Fatalf("the renamed payload is %q", data)
+	}
+}
+
+// TestRenameIntoPlaceGivesUpWithoutConsumingTheStagedPayload proves the bounded
+// retry reports the rename's own error and leaves the staged file intact, so a
+// failed commit still has its payload to roll back from.
+func TestRenameIntoPlaceGivesUpWithoutConsumingTheStagedPayload(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "staged.exe")
+	if err := os.WriteFile(source, []byte("new build"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "installed.exe")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "occupant"), []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameIntoPlace(source, target, 600*time.Millisecond); err == nil {
+		t.Fatal("renaming onto an occupied path reported success")
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("the failed rename consumed the staged payload: %v", err)
+	}
+}
+
+// TestPreserveStateConfigKeepsExactlyTheReconnectRecords proves --keep-config
+// keeps what a reinstall needs to reconnect without re-pairing and destroys the
+// rest: config, secret store and the ownership marker stay, while logs, status
+// and the regenerated pairing capability go with them.
+func TestPreserveStateConfigKeepsExactlyTheReconnectRecords(t *testing.T) {
+	dir := t.TempDir()
+	kept := []string{stateMarkerName, settingsFileName, "secrets.dpapi"}
+	dropped := []string{"status.json", "agent.log", "agent.log.1", "pairing.capability", "pairing.endpoint.json", "logs"}
+	for _, name := range append(kept, dropped...) {
+		path := filepath.Join(dir, name)
+		var err error
+		if name == "logs" {
+			// A leftover directory with content must go too, otherwise
+			// keep-config would preserve an unbounded tree of old logs.
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path = filepath.Join(path, "old.log")
+			err = os.WriteFile(path, []byte("stale"), 0o600)
+		} else if name == stateMarkerName {
+			// The guard only lets the Agent's own marker version stand in a
+			// state directory it is allowed to prune.
+			err = os.WriteFile(path, []byte(stateMarkerVersion+"\n"), 0o600)
+		} else {
+			err = os.WriteFile(path, []byte("content of "+name), 0o600)
+		}
+		if err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	if err := preserveStateConfig(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range kept {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("keep-config lost %s: %v", name, err)
+		}
+		if name != stateMarkerName && string(data) != "content of "+name {
+			t.Fatalf("%s was rewritten: %q", name, data)
+		}
+	}
+	for _, name := range dropped {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("keep-config left %q behind (err=%v)", name, err)
+		}
+	}
+
+	// A directory the Agent never marked must not be pruned, and a state
+	// directory that is simply absent is not an uninstall failure.
+	unmarked := t.TempDir()
+	if err := os.WriteFile(filepath.Join(unmarked, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveStateConfig(unmarked); err == nil {
+		t.Fatal("preserveStateConfig pruned a state directory it does not own")
+	}
+	if _, err := os.Lstat(filepath.Join(unmarked, "config.json")); err != nil {
+		t.Fatalf("the refused directory was still disturbed: %v", err)
+	}
+	if err := preserveStateConfig(filepath.Join(dir, "never-existed")); err != nil {
+		t.Fatalf("a missing state directory failed the uninstall: %v", err)
+	}
 }

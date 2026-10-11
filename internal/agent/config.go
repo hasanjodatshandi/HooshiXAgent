@@ -45,10 +45,10 @@ const (
 	// redirects the settings file into the installation directory, so the file
 	// an operator edits sits next to the program instead of under ProgramData.
 	settingsLocationName = "settings_location"
-	// maxSettingsFileBytes bounds both the pointer and the settings file it
-	// names. A settings file is a few kilobytes of JSON; the bound keeps a
-	// mistyped or hostile pointer from turning a config read into an unbounded
-	// one.
+	// maxSettingsFileBytes bounds every state-file read: the settings pointer,
+	// the settings file it names, and the records kept beside them. They are all
+	// a few kilobytes of JSON, so the bound keeps a mistyped or hostile file
+	// from turning a config read into an unbounded one.
 	maxSettingsFileBytes = 1 << 20
 )
 
@@ -152,7 +152,7 @@ func ConfigPath(stateDir string) string {
 // would let one stray file move the Agent's configuration silently.
 func redirectedSettingsPath(stateDir string) (string, bool) {
 	data, err := readStateFile(filepath.Join(stateDir, settingsLocationName))
-	if err != nil || len(data) > maxSettingsFileBytes {
+	if err != nil {
 		return "", false
 	}
 	target := strings.TrimSpace(string(data))

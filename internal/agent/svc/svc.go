@@ -222,12 +222,29 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.file == nil {
-		return len(p), nil
+		// A previous open failed. Retry instead of reporting success forever:
+		// the lock that made the open fail (an installer renaming agent.log, a
+		// scanner holding it) is transient, and silently swallowing every
+		// diagnostic for the rest of the service's life would remove the only
+		// record of why.
+		if err := r.openLocked(); err != nil {
+			return 0, fmt.Errorf("agent log unavailable: %w", err)
+		}
 	}
 	if r.written+int64(len(p)) > r.maxBytes {
 		if err := r.rotateLocked(); err != nil {
-			// Rotation failure must not drop diagnostics; keep appending.
-			r.written = 0
+			// Rotation failure must not drop diagnostics: keep appending to
+			// whatever file is open. The counter is re-synced to that file's
+			// real length rather than zeroed, so the bound stays honest and the
+			// next write retries the rotation at once. Growth past the bound is
+			// the cost of keeping the diagnostics, and it is only ever temporary
+			// — as soon as the rename becomes possible the file is rotated.
+			r.syncWrittenLocked()
+		}
+		if r.file == nil {
+			if err := r.openLocked(); err != nil {
+				return 0, fmt.Errorf("agent log unavailable: %w", err)
+			}
 		}
 	}
 	n, err := r.file.Write(p)
@@ -235,27 +252,53 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (r *rotatingFile) rotateLocked() error {
-	r.file.Close()
-	backup := r.path + ".1"
-	_ = os.Remove(backup)
-	if err := os.Rename(r.path, backup); err != nil {
-		// If rotation failed, try to reopen the original for append.
-		file, openErr := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
-		if openErr != nil {
-			r.file = nil
-			return err
-		}
-		r.file = file
-		return err
-	}
+// openLocked (re)opens the active log file for append and re-syncs the size
+// counter to what is actually on disk.
+func (r *rotatingFile) openLocked() error {
 	file, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		r.file = nil
 		return err
 	}
 	r.file = file
-	r.written = 0
+	r.syncWrittenLocked()
+	return nil
+}
+
+// syncWrittenLocked makes the counter report the active file's real length. A
+// counter that lies downwards is what lets the log outrun its bound.
+func (r *rotatingFile) syncWrittenLocked() {
+	if r.file == nil {
+		r.written = 0
+		return
+	}
+	info, err := r.file.Stat()
+	if err != nil {
+		r.written = 0
+		return
+	}
+	r.written = info.Size()
+}
+
+func (r *rotatingFile) rotateLocked() error {
+	if r.file != nil {
+		r.file.Close()
+		r.file = nil
+	}
+	backup := r.path + ".1"
+	_ = os.Remove(backup)
+	if err := os.Rename(r.path, backup); err != nil {
+		// The rename failed: reopen the original so the diagnostics keep
+		// flowing, and report the failure so Write re-syncs and retries.
+		openErr := r.openLocked()
+		if openErr != nil {
+			return fmt.Errorf("rotate agent log: %w (and reopening it failed too: %w)", err, openErr)
+		}
+		return err
+	}
+	if err := r.openLocked(); err != nil {
+		return fmt.Errorf("rotate agent log succeeded but the new active file is unavailable: %w", err)
+	}
 	return nil
 }
 
@@ -269,15 +312,26 @@ func (r *rotatingFile) Close() error {
 }
 
 // newServiceLogger writes agent diagnostics to a size-bounded agent.log in
-// the service state directory (SCM does not capture stdout/stderr). A file
-// open failure degrades to a nop logger rather than preventing the tunnel
-// from running.
+// the service state directory (SCM does not capture stdout/stderr). A log that
+// cannot be opened does not stop the tunnel, and it is not a permanent loss of
+// diagnostics either: the writer is kept with its file closed, so every later
+// log line retries the open and a directory that becomes usable mid-upgrade
+// starts logging again.
 func newServiceLogger(stateDir string) *slog.Logger {
-	writer, err := newRotatingFile(filepath.Join(stateDir, "agent.log"), agentLogMaxBytes)
+	logger, _ := newServiceLoggerWithWriter(stateDir)
+	return logger
+}
+
+// newServiceLoggerWithWriter is the same construction with the bounded writer
+// kept, for callers that must inspect or close it. The service itself never
+// closes it: it holds agent.log for the whole life of the process.
+func newServiceLoggerWithWriter(stateDir string) (*slog.Logger, *rotatingFile) {
+	path := filepath.Join(stateDir, "agent.log")
+	writer, err := newRotatingFile(path, agentLogMaxBytes)
 	if err != nil {
-		return slog.New(slog.NewTextHandler(nopWriter{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		writer = &rotatingFile{path: path, maxBytes: agentLogMaxBytes}
 	}
-	return slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})), writer
 }
 
 // IsWindowsService reports whether the current process is running as a
@@ -448,7 +502,3 @@ func waitStopped(service *mgr.Service) {
 		time.Sleep(300 * time.Millisecond)
 	}
 }
-
-type nopWriter struct{}
-
-func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }

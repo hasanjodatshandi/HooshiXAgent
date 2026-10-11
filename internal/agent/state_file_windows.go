@@ -5,7 +5,6 @@ package agent
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -60,7 +59,7 @@ func readTrustedStateFile(path string) ([]byte, os.FileMode, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	data, err := io.ReadAll(file)
+	data, err := readBoundedStateFile(file)
 	if err != nil {
 		return nil, 0, err
 	}

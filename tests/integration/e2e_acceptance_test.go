@@ -545,9 +545,17 @@ func trustedClient(roots *x509.CertPool) *http.Client {
 	}
 }
 
+// gatewayHealthTimeout bounds how long a freshly spawned TLS Gateway is allowed
+// to answer /healthz. The Gateway generates its listener certificate and warms
+// the WebSocket stack before it listens, and under a parallel test binary that
+// takes seconds rather than milliseconds: the RA-3 acceptance run failed at
+// 5.04s against the previous 5s bound, which was a measurement of CI load, not
+// of product health.
+const gatewayHealthTimeout = 20 * time.Second
+
 func waitGatewayHealth(t *testing.T, client *http.Client, baseURL string) {
 	t.Helper()
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, gatewayHealthTimeout, func() bool {
 		response, err := client.Get(baseURL + "/healthz")
 		if err != nil {
 			return false

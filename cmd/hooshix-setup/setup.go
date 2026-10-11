@@ -521,6 +521,27 @@ func manifestDigest(manifest, name string) (string, error) {
 	return "", fmt.Errorf("embedded %s manifest has no entry for %s; refusing to install", payloadManifest, name)
 }
 
+// payloadRenameTimeout bounds how long a payload file is coaxed into or out of
+// the install directory. `service stop` only asks SCM to stop the Agent, and a
+// filter driver or indexer can hold a just-replaced executable for a moment, so
+// a single rename attempt turns an upgrade that would have succeeded into a
+// failed install. Uninstall already waits this long; the install path must not
+// be stricter than the path that undoes it.
+const payloadRenameTimeout = 10 * time.Second
+
+// renameIntoPlace retries os.Rename until it succeeds or the budget runs out.
+// A failed rename leaves both operands untouched, so retrying is always safe.
+func renameIntoPlace(source, target string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := os.Rename(source, target)
+		if err == nil || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 func commitStagedPayload(stage, manifest string) (map[string]string, error) {
 	backups := make(map[string]string)
 	for _, name := range []string{agentBinary, trayBinary, uninstallBinary} {
@@ -534,13 +555,13 @@ func commitStagedPayload(stage, manifest string) (map[string]string, error) {
 		backup := target + ".previous"
 		_ = os.Remove(backup)
 		if _, err := os.Stat(target); err == nil {
-			if err := os.Rename(target, backup); err != nil {
+			if err := renameIntoPlace(target, backup, payloadRenameTimeout); err != nil {
 				rollbackFiles(backups)
 				return nil, fmt.Errorf("move aside %s (is the agent or tray still running?): %w", name, err)
 			}
 			backups[target] = backup
 		}
-		if err := os.Rename(staged, target); err != nil {
+		if err := renameIntoPlace(staged, target, payloadRenameTimeout); err != nil {
 			rollbackFiles(backups)
 			return nil, fmt.Errorf("move %s into place: %w", name, err)
 		}
@@ -718,6 +739,12 @@ func stopPreviousInstallation() {
 	if previousInstallationPresent() {
 		if err := runAgentCommand("service", "stop"); err != nil {
 			fmt.Println("note: stopping previous service:", err)
+		}
+		// The rename below cannot land while the service still holds
+		// hooshix-agent.exe, and `service stop` only posts the request, so wait
+		// for the state SCM reports instead of guessing a duration.
+		if err := waitForServiceStopped(serviceStoppedTimeout); err != nil {
+			fmt.Println("note: the previous service is still running:", err)
 		}
 	}
 	_ = exec.Command("schtasks.exe", "/End", "/TN", trayTaskName).Run()

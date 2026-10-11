@@ -5,7 +5,6 @@ package agent
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,7 +32,7 @@ func readTrustedStateFile(path string) ([]byte, os.FileMode, error) {
 	if !info.Mode().IsRegular() {
 		return nil, 0, fmt.Errorf("state file is not a regular non-symlink file: %s", path)
 	}
-	data, err := io.ReadAll(file)
+	data, err := readBoundedStateFile(file)
 	if err != nil {
 		return nil, 0, err
 	}

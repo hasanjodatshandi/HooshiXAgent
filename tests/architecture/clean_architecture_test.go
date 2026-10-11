@@ -3,6 +3,7 @@ package architecture_test
 import (
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,23 @@ var domainPackages = []string{
 	"internal/gateway/gatewayresources",
 }
 
+// applicationPackages are the declared application/adapter packages: the
+// layer allowed to import infrastructure and reach outward. The classification
+// gate below forces every package under internal/ to appear in exactly one of
+// the two lists, which is what stops a newly added package from escaping the
+// layering rules by being unknown to them.
+var applicationPackages = []string{
+	"internal/agent",
+	"internal/agent/supervisor",
+	"internal/agent/svc",
+	"internal/agent/webapp",
+	"internal/connectgui",
+	"internal/connector",
+	"internal/enrollment",
+	"internal/gateway",
+	"internal/tray",
+}
+
 // infrastructureImportPrefixes are Go standard-library/external packages
 // that represent network, OS, or transport-adapter implementation details a
 // pure domain package must not depend on. Pure crypto/encoding logic stays
@@ -37,28 +55,7 @@ var infrastructureImportPrefixes = []string{
 func TestDomainPackagesHaveNoInfrastructureImports(t *testing.T) {
 	t.Parallel()
 
-	violations := []string{}
-	root := repositoryRoot(t)
-	for _, domain := range domainPackages {
-		domainRoot := filepath.Join(root, filepath.FromSlash(domain))
-		entries, err := os.ReadDir(domainRoot)
-		if err != nil {
-			t.Fatalf("read domain package %s: %v", domain, err)
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
-				continue
-			}
-			path := filepath.Join(domainRoot, entry.Name())
-			rel := domain + "/" + entry.Name()
-			if err := inspectDomainImports(path, rel, &violations); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if len(violations) != 0 {
-		t.Fatalf("domain layer imports infrastructure:\n- %s", strings.Join(violations, "\n- "))
-	}
+	forEachDomainFile(t, inspectDomainImports, "domain layer imports infrastructure")
 }
 
 func inspectDomainImports(path, rel string, violations *[]string) error {
@@ -83,28 +80,122 @@ func inspectDomainImports(path, rel string, violations *[]string) error {
 func TestDomainImportsPointInwardOnly(t *testing.T) {
 	t.Parallel()
 
-	violations := []string{}
+	forEachDomainFile(t, inspectOutwardImports, "domain layer depends on outer layers")
+}
+
+// forEachDomainFile applies one rule to every non-test Go file of every
+// declared domain package. The walk is recursive, so a package nested inside a
+// domain directory is covered by the rule instead of silently sitting outside
+// it.
+func forEachDomainFile(t *testing.T, rule func(path, rel string, violations *[]string) error, failure string) {
+	t.Helper()
+
 	root := repositoryRoot(t)
+	violations := []string{}
 	for _, domain := range domainPackages {
 		domainRoot := filepath.Join(root, filepath.FromSlash(domain))
-		entries, err := os.ReadDir(domainRoot)
-		if err != nil {
-			t.Fatalf("read domain package %s: %v", domain, err)
-		}
-		for _, entry := range entries {
+		err := filepath.WalkDir(domainRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
 			if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
-				continue
+				return nil
 			}
-			path := filepath.Join(domainRoot, entry.Name())
-			rel := domain + "/" + entry.Name()
-			if err := inspectOutwardImports(path, rel, &violations); err != nil {
-				t.Fatal(err)
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
 			}
+			return rule(path, filepath.ToSlash(rel), &violations)
+		})
+		if err != nil {
+			t.Fatalf("walk domain package %s: %v", domain, err)
 		}
 	}
 	if len(violations) != 0 {
-		t.Fatalf("domain layer depends on outer layers:\n- %s", strings.Join(violations, "\n- "))
+		t.Fatalf("%s:\n- %s", failure, strings.Join(violations, "\n- "))
 	}
+}
+
+// TestEveryInternalPackageIsClassifiedByTheLayeringGate proves the gate knows
+// the repository it is guarding: each package under internal/ must be declared
+// either domain or application, and each declared package must still exist.
+// Without this, adding a package — or deleting one and leaving its entry behind
+// — would quietly narrow what the layering rules look at.
+func TestEveryInternalPackageIsClassifiedByTheLayeringGate(t *testing.T) {
+	t.Parallel()
+
+	root := repositoryRoot(t)
+	domain := declaredPackages(domainPackages)
+	application := declaredPackages(applicationPackages)
+	for _, declared := range domainPackages {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(declared))); err != nil {
+			t.Fatalf("declared domain package %s is unreadable: %v", declared, err)
+		}
+	}
+	for _, declared := range applicationPackages {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(declared))); err != nil {
+			t.Fatalf("declared application package %s is unreadable: %v", declared, err)
+		}
+	}
+
+	var unclassified []string
+	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Name() == "testdata" {
+			return fs.SkipDir
+		}
+		isPackage, err := directoryHasGoFiles(path)
+		if err != nil {
+			return err
+		}
+		if !isPackage {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+		switch {
+		case domain[name] && application[name]:
+			unclassified = append(unclassified, name+" (declared both domain and application)")
+		case !domain[name] && !application[name]:
+			unclassified = append(unclassified, name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unclassified) != 0 {
+		t.Fatalf("packages under internal/ that the layering gate does not classify:\n- %s\nAdd each one to domainPackages or applicationPackages in this file so the ADR-0013 rules cover it.", strings.Join(unclassified, "\n- "))
+	}
+}
+
+func declaredPackages(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+func directoryHasGoFiles(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // domainSubpackages lists the pure-domain package prefixes that live under a

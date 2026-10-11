@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,22 @@ func ensureStateMarker(stateDir string) error {
 func readStateFile(path string) ([]byte, error) {
 	data, _, err := readTrustedStateFile(path)
 	return data, err
+}
+
+// readBoundedStateFile reads a state handle through the shared size bound while
+// copying, not afterwards. State files are a small JSON record or a path
+// pointer, so an oversized one is corruption or an attack; refusing it has to
+// cost the Agent the bound and nothing more, otherwise a single read path can be
+// turned into a memory-exhaustion one by whoever wrote the file.
+func readBoundedStateFile(file io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(file, maxSettingsFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSettingsFileBytes {
+		return nil, fmt.Errorf("state file exceeds the %d byte limit", int64(maxSettingsFileBytes))
+	}
+	return data, nil
 }
 
 func writePrivateFile(stateDir, path string, data []byte) error {

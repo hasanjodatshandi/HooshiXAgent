@@ -15,6 +15,8 @@ This document maps the implemented Agent/Gateway engineering requirements to cur
 | Secret/static security | `scripts/ci/security.sh` | Gitleaks / Semgrep | Yes |
 | Architecture/scope boundaries | architecture tests | Architecture fitness | Yes |
 | Windows Agent delivery docs vs accepted ADR-0014 | `tests/architecture/windows_delivery_test.go` | Architecture fitness | Yes |
+| Every package under `internal/` classified as domain or application, so a new package cannot escape the ADR-0013 rules by being unknown to them | `TestEveryInternalPackageIsClassifiedByTheLayeringGate` in `tests/architecture/clean_architecture_test.go` (recursive domain walk) | Architecture fitness | Yes |
+| `THIRD_PARTY_NOTICES` discloses the images the Gateway deployment actually pins | `tests/architecture/container_pin_notices_test.go` compares the notices against `deploy/gateway/Dockerfile` and `docker-compose.yml`; `scripts/ci/supply-chain.sh` proves the pins themselves are immutable | Architecture fitness, R-6 release / supply-chain gate | Yes |
 | Real executable behavior | `scripts/ci/runtime-gate.sh` | Executable runtime gate guard | Yes |
 | Real Agent↔Gateway integration | `scripts/ci/e2e-acceptance.sh` | Agent↔Gateway E2E acceptance | Yes |
 | Cross-platform Agent/package behavior | platform tests/package smoke | Ubuntu/Windows/macOS Agent platform jobs | Yes |
