@@ -1,10 +1,11 @@
 // Package webapp implements the local, loopback-only Agent pairing UI.
 //
 // The UI is intentionally minimal: a single page served on 127.0.0.1 that
-// shows the device public key for panel registration and accepts a pasted
-// pairing JSON (device_id, authorization_id, token_id, token, gateway_url,
-// optional aliases, optional ca_file) plus an optional CA file path typed into
-// the form, all applied atomically to the Agent state.
+// drives the device-code enrollment exchange (request a pairing code from the
+// panel, show it for approval, claim the issued credentials), manages the
+// local service exposure mappings, and offers the same unpair operation as
+// the CLI — all behind the installer-written pairing capability and the
+// per-process CSRF token.
 package webapp
 
 import (
@@ -69,6 +70,7 @@ type App struct {
 
 type pendingEnrollment struct {
 	serverURL string
+	caFile    string
 	session   enrollment.Session
 }
 
@@ -118,7 +120,6 @@ func (app *App) StateDir() string { return app.stateDir }
 func (app *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.handleRoot)
-	mux.HandleFunc("/pair", app.handlePair)
 	mux.HandleFunc("/pairing/rotate", app.handleRotateCapability)
 	mux.HandleFunc("/pairing/identity", app.handlePairingIdentity)
 	mux.HandleFunc("/unpair", app.handleUnpair)
@@ -351,21 +352,16 @@ func (app *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// The notice text may echo attacker-controlled payload fragments from
 	// validation failures, so it is HTML-escaped at the single render site.
 	fmt.Fprintf(w, pageTemplate,
-		htmlEscape(publicKey),
-		keyErrText(keyErr),
-		pairedText(paired, config.GatewayURL, config.DeviceID, config.CAFile),
-		htmlEscape(url.QueryEscape(capability)),
-		htmlEscape(csrf),
-		htmlEscape(config.CAFile),
 		htmlEscape(notice),
+		connectSectionHTML(paired, config, app.pendingEnrollmentSnapshot(), csrf, capability),
+		tunnelHealthHTML(loadTunnelHealth(app.stateDir)),
 		htmlEscape(url.QueryEscape(capability)),
 		htmlEscape(csrf),
 		exposeRowsHTML(config.Endpoints, csrf, capability),
 		exposeOptionsHTML(config.Endpoints),
+		unpairSectionHTML(capability, csrf, publicKey, keyErr),
 		htmlEscape(url.QueryEscape(capability)),
 		htmlEscape(csrf),
-		tunnelHealthHTML(loadTunnelHealth(app.stateDir)),
-		unpairSectionHTML(capability, csrf),
 	)
 }
 
@@ -394,12 +390,12 @@ func loadTunnelHealth(stateDir string) TunnelHealth {
 	return health
 }
 
-// tunnelHealthHTML renders the tunnel health block for the pairing page.
-// Every interpolated value is HTML-escaped: status fields can embed
-// error strings derived from remote input.
+// tunnelHealthHTML renders the tunnel health table for the pairing page; the
+// template owns the section heading. Every interpolated value is HTML-escaped:
+// status fields can embed error strings derived from remote input.
 func tunnelHealthHTML(health TunnelHealth) string {
 	var builder strings.Builder
-	builder.WriteString("<h2>Tunnel status</h2>\n<table>")
+	builder.WriteString("<table>")
 	builder.WriteString("<tr><th>connection</th><th>reconnects</th><th>last error</th></tr>")
 	connection := htmlEscape(displayConnection(health))
 	lastError := strings.TrimSpace(health.LastError)
@@ -434,22 +430,68 @@ func displayConnection(health TunnelHealth) string {
 	}
 }
 
-func keyErrText(err error) string {
-	if err != nil {
-		return "<p class=\"error\">public key unavailable: " + htmlEscape(err.Error()) + "</p>"
+// defaultEnrollmentPanelURL matches the address the Setup wizard installs
+// with; the operator can point the form at a self-hosted panel instead.
+const defaultEnrollmentPanelURL = "https://panel.hooshix-agent.ir"
+
+// connectSectionHTML renders exactly one of three states: a live pending
+// enrollment (show the code and poll for the claim), a paired agent (status
+// line), or an unpaired agent (the enrollment form). Enrollment never runs
+// concurrently with a pairing, and a paired agent has nothing to enroll.
+func connectSectionHTML(paired bool, config agent.Config, pending *pendingEnrollmentView, csrfToken, capability string) string {
+	switch {
+	case pending != nil:
+		return pendingEnrollmentHTML(pending, csrfToken)
+	case paired:
+		return pairedStatusHTML(config)
+	default:
+		return enrollmentFormHTML(config, csrfToken, capability)
 	}
-	return ""
 }
 
-func pairedText(paired bool, gateway, device, caFile string) string {
-	if paired {
-		trust := "system trust store"
-		if caFile != "" {
-			trust = "configured CA file " + htmlEscape(caFile)
-		}
-		return "<p class=\"ok\">Paired with " + htmlEscape(device) + " via " + htmlEscape(gateway) + ". Trust anchor: " + trust + ". This page can be closed.</p>"
+// pendingEnrollmentHTML renders the code block the operator types into the
+// panel plus the polling mount. The CSRF token and expiry ride data
+// attributes so the script can poll /enrollment/claim without any secret
+// interpolated into JavaScript.
+func pendingEnrollmentHTML(pending *pendingEnrollmentView, csrfToken string) string {
+	expires := pending.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	return "<p class=\"info\">Finish pairing in the panel: open <a href=\"" + htmlEscape(pending.VerificationURI) + "\">" +
+		htmlEscape(pending.VerificationURI) + "</a> and enter this code:</p>\n" +
+		"<div class=\"code\" id=\"enroll-code\">" + htmlEscape(pending.UserCode) + "</div>\n" +
+		"<p class=\"info\">This page claims the enrollment automatically as soon as the panel approves it.</p>\n" +
+		"<div id=\"pending-block\" data-csrf=\"" + htmlEscape(csrfToken) + "\" data-expires=\"" + htmlEscape(expires) + "\"></div>\n"
+}
+
+func pairedStatusHTML(config agent.Config) string {
+	trust := "system trust store"
+	if config.CAFile != "" {
+		trust = "configured CA file " + htmlEscape(config.CAFile)
 	}
-	return "<p class=\"info\">Paste the pairing text from the panel below.</p>"
+	return "<p class=\"ok\">Paired with " + htmlEscape(config.DeviceID) + " via " + htmlEscape(config.GatewayURL) +
+		". Trust anchor: " + trust + ". This page can be closed.</p>\n"
+}
+
+// enrollmentFormHTML renders the device-code enrollment form shown when the
+// agent is unpaired. The panel address, device name and CA file all sit behind
+// the same capability and CSRF gates as every other pairing field.
+func enrollmentFormHTML(config agent.Config, csrfToken, capability string) string {
+	deviceName, err := os.Hostname()
+	if err != nil || strings.TrimSpace(deviceName) == "" {
+		deviceName = "hooshix-agent"
+	}
+	return "<p class=\"info\">This agent is not paired yet. Enter the panel address to receive a pairing code, approve the code in the panel, and the agent connects by itself.</p>\n" +
+		"<form id=\"enroll-form\" method=\"post\" action=\"/enrollment/start?cap=" + htmlEscape(url.QueryEscape(capability)) + "\">\n" +
+		"<input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\">\n" +
+		"<label for=\"enroll-panel-url\">Panel address:</label>\n" +
+		"<input id=\"enroll-panel-url\" name=\"server_url\" value=\"" + htmlEscape(defaultEnrollmentPanelURL) + "\" autocomplete=\"off\" spellcheck=\"false\" required>\n" +
+		"<br><label for=\"enroll-device-name\">Device name:</label>\n" +
+		"<input id=\"enroll-device-name\" name=\"device_name\" value=\"" + htmlEscape(deviceName) + "\" maxlength=\"64\" required>\n" +
+		"<br><label for=\"enroll-ca-file\">CA file (optional):</label>\n" +
+		"<input id=\"enroll-ca-file\" name=\"ca_file\" value=\"" + htmlEscape(config.CAFile) + "\" placeholder=\"C:\\certs\\private-ca.pem\" autocomplete=\"off\" spellcheck=\"false\">\n" +
+		"<p class=\"info\">Self-hosted/test deployments only. A supplied path must be a readable PEM certificate and replaces the trust anchor; leaving it empty keeps the configured one.</p>\n" +
+		"<br><button type=\"submit\">Get pairing code</button>\n" +
+		"<div id=\"enroll-error\" class=\"error\"></div>\n" +
+		"</form>\n"
 }
 
 func exposeRowsHTML(endpoints []agent.Endpoint, csrfToken, capability string) string {
@@ -478,20 +520,29 @@ func exposeOptionsHTML(endpoints []agent.Endpoint) string {
 	return options
 }
 
-// unpairSectionHTML renders the clear-pairing form: the same operation the
-// `unpair` CLI command performs, behind the same capability and CSRF gates as
-// every other mutating form on the page.
-func unpairSectionHTML(capability, csrfToken string) string {
-	return "<h2>5. Unpair this device</h2>\n" +
-		"<p class=\"info\">Clears the pairing record (gateway, device/authorization/token IDs, trust anchor) and the session token, and returns the agent to <em>waiting for pairing</em>. " +
-		"The device identity above and the local service mappings are kept, so this device can be re-paired as itself without re-registering the key.</p>\n" +
-		"<form method=\"post\" action=\"/unpair?cap=" + htmlEscape(url.QueryEscape(capability)) + "\">\n" +
-		"<input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\">\n" +
-		"<label for=\"reset-identity\" style=\"width:auto\">" +
+// unpairSectionHTML renders the device-identity block and the clear-pairing
+// form: the same operation the `unpair` CLI command performs, behind the same
+// capability and CSRF gates as every other mutating form on the page. The key
+// sits next to the action that can replace it, so the operator always has the
+// value the panel must authorize before a re-pairing.
+func unpairSectionHTML(capability, csrfToken, publicKey string, keyErr error) string {
+	var builder strings.Builder
+	builder.WriteString("<h2>4. Unpair this device</h2>\n")
+	builder.WriteString("<p>Copy this public key into your panel (Devices → Register a device) before re-pairing if you replace the identity:</p>\n")
+	builder.WriteString("<div class=\"key\">" + htmlEscape(publicKey) + "</div>\n")
+	if keyErr != nil {
+		builder.WriteString("<p class=\"error\">public key unavailable: " + htmlEscape(keyErr.Error()) + "</p>\n")
+	}
+	builder.WriteString("<p class=\"info\">Clears the pairing record (gateway, device/authorization/token IDs, trust anchor) and the session token, and returns the agent to <em>waiting for pairing</em>. " +
+		"The device identity above and the local service mappings are kept, so this device can be re-paired as itself without re-registering the key.</p>\n")
+	builder.WriteString("<form method=\"post\" action=\"/unpair?cap=" + htmlEscape(url.QueryEscape(capability)) + "\">\n")
+	builder.WriteString("<input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\">\n")
+	builder.WriteString("<label for=\"reset-identity\" style=\"width:auto\">" +
 		"<input type=\"checkbox\" id=\"reset-identity\" name=\"reset_identity\" value=\"true\" style=\"width:auto\"> " +
-		"Also replace the device identity (mints a NEW public key that must be registered in the panel before re-pairing)</label>\n" +
-		"<br><button type=\"submit\">Unpair</button>\n" +
-		"</form>\n"
+		"Also replace the device identity (mints a NEW public key that must be registered in the panel before re-pairing)</label>\n")
+	builder.WriteString("<br><button type=\"submit\">Unpair</button>\n")
+	builder.WriteString("</form>\n")
+	return builder.String()
 }
 
 // ensureCSRFToken returns the per-process pairing-UI CSRF token, creating
@@ -538,71 +589,6 @@ func (app *App) requireCSRF(w http.ResponseWriter, r *http.Request) bool {
 	}
 	http.Error(w, "invalid or missing CSRF token", http.StatusForbidden)
 	return false
-}
-
-// handlePair applies the pasted pairing payload.
-func (app *App) handlePair(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseMultipartForm(16 * 1024); err != nil {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "parse form failed", http.StatusBadRequest)
-			return
-		}
-	}
-	if !app.requireCSRF(w, r) {
-		return
-	}
-	contentType := r.Header.Get("Content-Type")
-	var raw []byte
-	if strings.HasPrefix(contentType, "application/json") {
-		body := io.LimitReader(r.Body, 16*1024)
-		data, err := io.ReadAll(body)
-		if err != nil {
-			http.Error(w, "read body failed", http.StatusBadRequest)
-			return
-		}
-		raw = data
-	} else {
-		// HTML form submit: pairing text arrives as the "pairing" field.
-		raw = []byte(r.PostFormValue("pairing"))
-	}
-	var payload PairingPayload
-	text := htmlUnescape(strings.TrimSpace(string(raw)))
-	if err := json.Unmarshal([]byte(text), &payload); err != nil {
-		// Also accept the panel's fenced-block copy format.
-		fenced := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "```"), "```"))
-		if jsonErr := json.Unmarshal([]byte(htmlUnescape(fenced)), &payload); jsonErr != nil {
-			app.setNotice("invalid pairing text")
-			app.redirectHome(w, r)
-			return
-		}
-	}
-	// The CA file is the only pairing field the operator types directly rather
-	// than pasting inside the JSON block, so the form field overrides the
-	// payload value when it is present. Both live behind the same capability
-	// and CSRF gates as every other field.
-	if typed := strings.TrimSpace(r.PostFormValue("ca_file")); typed != "" {
-		payload.CAFile = typed
-	}
-	if err := app.ApplyPairing(payload); err != nil {
-		app.setNotice("pairing failed: " + err.Error())
-		app.logger.Warn("pairing failed")
-	} else {
-		// The capability has now been used for its one purpose. Rotating it
-		// invalidates every copy of the old value (browser history, tray
-		// command line, screenshots) while the freshly paired device keeps
-		// working, since the session credential — not the capability — is what
-		// the tunnel authenticates with.
-		if err := app.rotateCapability(); err != nil {
-			app.logger.Warn("rotate pairing capability failed", "error", err)
-		}
-		app.setNotice("paired successfully; the agent service will connect automatically")
-		app.logger.Info("agent paired", "device", payload.DeviceID, "gateway", payload.GatewayURL, "ca_file", payload.CAFile)
-	}
-	app.redirectHome(w, r)
 }
 
 // rotateCapability replaces the on-disk and in-memory pairing capability with
@@ -924,13 +910,6 @@ func htmlEscape(value string) string {
 	return replacer.Replace(value)
 }
 
-// htmlUnescape reverses the common HTML entities the panel uses (esc), so
-// copy-pasted pairing blocks that went through HTML rendering still parse.
-func htmlUnescape(value string) string {
-	replacer := strings.NewReplacer("&quot;", `"`, "&#34;", `"`, "&amp;", "&", "&lt;", "<", "&gt;", ">", "&#39;", "'")
-	return replacer.Replace(value)
-}
-
 var pageTemplate = `<!doctype html>
 <html lang="en">
 <head>
@@ -940,7 +919,7 @@ var pageTemplate = `<!doctype html>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }
   .key { background: #f4f4f8; border: 1px solid #ccc; padding: .8rem; font-family: monospace; word-break: break-all; user-select: all; }
-  textarea { width: 100%%; height: 8rem; font-family: monospace; }
+  .code { background: #f4f4f8; border: 1px solid #ccc; padding: .8rem; font-family: monospace; font-size: 1.6rem; letter-spacing: .2rem; text-align: center; user-select: all; }
   .ok { color: #0a7a2e; } .error { color: #b00020; } .info { color: #555; }
   button { padding: .5rem 1.2rem; }
   h1 { font-size: 1.3rem; } h2 { margin-top: 2rem; }
@@ -948,48 +927,140 @@ var pageTemplate = `<!doctype html>
   th, td { border: 1px solid #ddd; padding: .4rem .6rem; font-size: .9rem; }
   input { font: inherit; padding: .35rem .5rem; width: 200px; }
   #target { width: 260px; }
-  #ca-file { width: 320px; }
+  #enroll-panel-url, #enroll-ca-file { width: 320px; }
+  #enroll-device-name { width: 260px; }
 </style>
 </head>
 <body>
 <h1>HooshiX Agent Setup</h1>
-<h2>1. Register this device</h2>
-<p>Copy this public key into your panel (Devices → Register a device):</p>
-<div class="key">%s</div>
-%s
-<h2>2. Paste your pairing text</h2>
-%s
-<form method="post" action="/pair?cap=%s">
-<input type="hidden" name="hooshix_csrf" value="%s">
-<textarea name="pairing" placeholder='{"gateway_url":"wss://...","device_id":"device-...","authorization_id":"auth-...","token_id":"token-...","token":"..."}'></textarea>
-<br>
-<label for="ca-file">CA file (optional):</label>
-<input id="ca-file" name="ca_file" value="%s" placeholder="C:\certs\private-ca.pem" autocomplete="off" spellcheck="false">
-<p class="info">Self-hosted/test deployments only. A supplied path must be a readable PEM certificate and replaces the trust anchor; leaving it empty keeps the configured one.</p>
-<br><button type="submit">Pair</button>
-</form>
 <p class="info">%s</p>
+<h2>1. Connect this device</h2>
+%s
+<h2>2. Tunnel status</h2>
+%s
 <h2>3. Local services</h2>
-<p class="info">Map a local port, then reserve a subdomain in the panel with the same endpoint id.</p>
+<p class="info">Map a local port, then reserve an endpoint in the panel with the same endpoint id.</p>
 <form method="post" action="/expose/add?cap=%s">
 <input type="hidden" name="hooshix_csrf" value="%s">
-<input name="id" placeholder="web-001" required pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,63}" title="endpoint id: letters, digits, . _ : -">
-<select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP / QUIC</option></select>
+<input id="expose-id" name="id" placeholder="web-001" required pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,63}" title="endpoint id: letters, digits, . _ : -">
+<select id="expose-protocol" name="protocol"><option value="tcp">TCP</option><option value="udp">UDP / QUIC</option></select>
 <input id="target" name="target" placeholder="127.0.0.1:4000" required>
 <button type="submit">Add service</button>
+<button type="button" id="preset-rdp">Remote Desktop</button>
 </form>
+<p class="info" id="preset-rdp-hint"></p>
 <table><tr><th>endpoint id</th><th>protocol</th><th>local target</th><th></th></tr>
 %s
 </table>
 <datalist id="expose-ids">%s</datalist>
-<h2>4. Pairing authorization</h2>
-<p class="info">The pairing authorization is rotated automatically after a successful pairing. Rotate it manually if this page's URL may have been seen by someone else; the tray's "Open pairing page" reads the new value.</p>
+%s
+<h2>5. Pairing authorization</h2>
+<p class="info">The pairing authorization is rotated automatically after a successful enrollment. Rotate it manually if this page's URL may have been seen by someone else; the tray's "Open pairing page" reads the new value.</p>
 <form method="post" action="/pairing/rotate?cap=%s">
 <input type="hidden" name="hooshix_csrf" value="%s">
 <button type="submit">Rotate pairing authorization</button>
 </form>
-%s
-%s
+<script>
+(function () {
+	var match = /[?&]cap=([^&]*)/.exec(location.search);
+	var cap = match ? decodeURIComponent(match[1].replace(/\+/g, " ")) : "";
+
+	function showError(id, message) {
+		var box = document.getElementById(id);
+		if (box) { box.textContent = message; }
+	}
+
+	var form = document.getElementById("enroll-form");
+	if (form) {
+		form.addEventListener("submit", function (event) {
+			event.preventDefault();
+			var payload = {
+				server_url: form.server_url.value,
+				device_name: form.device_name.value,
+				ca_file: form.ca_file.value
+			};
+			var xhr = new XMLHttpRequest();
+			xhr.open("POST", "/enrollment/start?cap=" + encodeURIComponent(cap));
+			xhr.setRequestHeader("Content-Type", "application/json");
+			xhr.setRequestHeader("X-HooshiX-CSRF", form.hooshix_csrf.value);
+			xhr.onreadystatechange = function () {
+				if (xhr.readyState !== 4) { return; }
+				if (xhr.status === 201 || xhr.status === 409) {
+					// 201 renders the new pending block; 409 means another
+					// enrollment is already pending, which the render picks up.
+					location.reload();
+					return;
+				}
+				if (xhr.status >= 500) {
+					showError("enroll-error", "the enrollment server is unavailable; try again");
+					return;
+				}
+				showError("enroll-error", "could not start the enrollment: " + (xhr.responseText || ("HTTP " + xhr.status)));
+			};
+			xhr.send(JSON.stringify(payload));
+		});
+	}
+
+	var rdpPreset = document.getElementById("preset-rdp");
+	if (rdpPreset) {
+		rdpPreset.addEventListener("click", function () {
+			document.getElementById("expose-id").value = "rdp-001";
+			document.getElementById("expose-protocol").value = "tcp";
+			document.getElementById("target").value = "127.0.0.1:3389";
+			showError("preset-rdp-hint",
+				"Windows itself must allow remote connections first (System Properties → Remote) — this agent never changes that setting. Then create a private TCP endpoint in the panel with local endpoint id rdp-001 and application protocol RDP, issue a Connector grant, and run hooshix-connector on the machine you connect from.");
+		});
+	}
+
+	var pending = document.getElementById("pending-block");
+	if (pending) {
+		var csrf = pending.getAttribute("data-csrf");
+		var deadline = Date.parse(pending.getAttribute("data-expires")) || 0;
+		var delay = 2000;
+		function poll() {
+			if (Date.now() >= deadline) {
+				pending.textContent = "The pairing code expired. Reload this page to request a new one.";
+				pending.className = "error";
+				return;
+			}
+			var xhr = new XMLHttpRequest();
+			xhr.open("POST", "/enrollment/claim?cap=" + encodeURIComponent(cap));
+			xhr.setRequestHeader("X-HooshiX-CSRF", csrf);
+			xhr.onreadystatechange = function () {
+				if (xhr.readyState !== 4) { return; }
+				if (xhr.status === 200) {
+					var data = {};
+					try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
+					if (data.state === "claimed") {
+						// The claim rotated the pairing capability, so the URL
+						// must carry the fresh value: reloading with the old one
+						// would land on the bootstrap page.
+						location.replace("/?cap=" + encodeURIComponent(data.capability || cap));
+						return;
+					}
+					delay = 2000;
+					setTimeout(poll, delay);
+					return;
+				}
+				if (xhr.status === 404) {
+					pending.textContent = "The enrollment is no longer pending (the service restarted or the code expired). Reload this page to start over.";
+					pending.className = "error";
+					return;
+				}
+				if (xhr.status >= 500 && delay <= 16000) {
+					delay = delay * 2;
+					setTimeout(poll, delay);
+					return;
+				}
+				pending.textContent = "Claiming failed (HTTP " + xhr.status + "). Reload this page to retry.";
+				pending.className = "error";
+			};
+			xhr.send(null);
+		}
+		setTimeout(poll, 1500);
+	}
+})();
+</script>
 </body>
 </html>
 `

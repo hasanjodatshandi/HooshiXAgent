@@ -61,12 +61,11 @@ func newTestApp(t *testing.T) (*App, string) {
 	return app, capability
 }
 
-func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing.T) {
-	app, capability := newTestApp(t)
-	store := agent.NewPlatformSecretStore(app.StateDir())
-	if _, _, err := agent.LoadOrCreateIdentity(store); err != nil {
-		t.Fatal(err)
-	}
+// newEnrollmentPanel serves the panel API the enrollment client speaks to:
+// create → 201 with a fixed user code, proof → 204, claim → claimed
+// credentials bound to a fixed gateway.
+func newEnrollmentPanel(t *testing.T) *httptest.Server {
+	t.Helper()
 	panel := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		switch {
@@ -93,7 +92,17 @@ func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing
 			http.NotFound(response, request)
 		}
 	}))
-	defer panel.Close()
+	t.Cleanup(panel.Close)
+	return panel
+}
+
+func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing.T) {
+	app, capability := newTestApp(t)
+	store := agent.NewPlatformSecretStore(app.StateDir())
+	if _, _, err := agent.LoadOrCreateIdentity(store); err != nil {
+		t.Fatal(err)
+	}
+	panel := newEnrollmentPanel(t)
 	app.enrollmentClient = enrollment.NewClient(panel.Client())
 	listener, err := app.Listen("127.0.0.1:0")
 	if err != nil {
@@ -127,8 +136,29 @@ func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing
 	if token, err := agent.LoadSessionToken(store); err != nil || token != strings.Repeat("t", 43) {
 		t.Fatalf("stored token = %q, %v", token, err)
 	}
-	if app.currentCapability() == capability {
+	// A successful claim rotates the pairing capability; the claim response
+	// must carry the fresh value because the page URL embeds it.
+	rotated := app.currentCapability()
+	if rotated == capability {
 		t.Fatal("successful enrollment did not rotate the pairing capability")
+	}
+	if claimed.Capability != rotated {
+		t.Fatalf("claim response capability=%q does not match the live capability %q", claimed.Capability, rotated)
+	}
+	onDisk, err := agent.LoadPairingCapability(app.StateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk != rotated {
+		t.Fatalf("in-memory capability %q != on-disk %q", rotated, onDisk)
+	}
+	// The old capability must no longer authenticate.
+	csrf := app.ensureCSRFToken()
+	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if strings.Contains(recorder.Body.String(), csrf) {
+		t.Fatal("the rotated-away capability still authenticated")
 	}
 }
 
@@ -176,26 +206,65 @@ func writeTestECKeyPEM(t *testing.T, path string) {
 	}
 }
 
-func pairingJSON(device, authorization, tokenID string) string {
-	return `{"gateway_url":"wss://gateway.example/agent/v1/connect","device_id":"` + device +
-		`","authorization_id":"` + authorization + `","token_id":"` + tokenID +
-		`","token":"test_session_token_0123456789ABCDEF"}`
+func enrollmentStartBody(t *testing.T, serverURL, deviceName, caFile string) string {
+	t.Helper()
+	payload := map[string]string{"server_url": serverURL, "device_name": deviceName}
+	if caFile != "" {
+		payload["ca_file"] = caFile
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
-// postPair submits the pairing form exactly as the page renders it, optionally
-// with the CA file field the operator types into.
-func postPair(t *testing.T, app *App, capability, csrf, pairing, caFile string) *httptest.ResponseRecorder {
+// postEnrollmentStart submits the enrollment start request exactly as the
+// page's script does: JSON body, CSRF header, capability in the query.
+func postEnrollmentStart(t *testing.T, app *App, capability, csrf, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	form := "hooshix_csrf=" + url.QueryEscape(csrf) + "&pairing=" + url.QueryEscape(pairing)
-	if caFile != "" {
-		form += "&ca_file=" + url.QueryEscape(caFile)
+	request := newLoopbackRequest(http.MethodPost, "/enrollment/start?cap="+capability, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	if csrf != "" {
+		request.Header.Set("X-HooshiX-CSRF", csrf)
 	}
-	request := newLoopbackRequest(http.MethodPost, "/pair?cap="+capability, strings.NewReader(form))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Origin", "http://127.0.0.1:8799")
 	recorder := httptest.NewRecorder()
 	app.Handler().ServeHTTP(recorder, request)
 	return recorder
+}
+
+// postEnrollmentClaim polls the claim endpoint the same way the page's
+// polling script does.
+func postEnrollmentClaim(t *testing.T, app *App, capability, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := newLoopbackRequest(http.MethodPost, "/enrollment/claim?cap="+capability, strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	if csrf != "" {
+		request.Header.Set("X-HooshiX-CSRF", csrf)
+	}
+	request.Header.Set("Origin", "http://127.0.0.1:8799")
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+// enrollWithPanel wires the app to a fresh mock panel and runs start+claim,
+// returning the claim recorder. It creates the device identity because Begin
+// signs the enrollment proof with the device key.
+func enrollWithPanel(t *testing.T, app *App, capability, csrf, caFile string) *httptest.ResponseRecorder {
+	t.Helper()
+	store := agent.NewPlatformSecretStore(app.StateDir())
+	if _, _, err := agent.LoadOrCreateIdentity(store); err != nil {
+		t.Fatal(err)
+	}
+	panel := newEnrollmentPanel(t)
+	app.enrollmentClient = enrollment.NewClient(panel.Client())
+	started := postEnrollmentStart(t, app, capability, csrf, enrollmentStartBody(t, panel.URL, "office PC", caFile))
+	if started.Code != http.StatusCreated {
+		t.Fatalf("enrollment start status=%d want=201: %s", started.Code, started.Body.String())
+	}
+	return postEnrollmentClaim(t, app, capability, csrf)
 }
 
 func getPage(t *testing.T, app *App, capability string) string {
@@ -210,27 +279,29 @@ func getPage(t *testing.T, app *App, capability string) string {
 }
 
 // TestPairingRejectsCrossSiteFormPosts proves the LocalSystem pairing UI
-// cannot be mutated by a cross-site form POST. The request carries a VALID
+// cannot be mutated by a cross-site POST. The request carries a VALID
 // capability and a VALID CSRF token, so it can only be rejected by the
 // origin control — which is exactly the DNS-rebinding case (Host header set
 // by the attacker's own name, Origin naming the attacker's site).
 func TestPairingRejectsCrossSiteFormPosts(t *testing.T) {
-	const gateway = "wss://attacker.example/agent/v1/connect"
 	app, capability := newTestApp(t)
 	handler := app.Handler()
 	csrf := app.ensureCSRFToken()
-	payload := `{"gateway_url":"` + gateway + `","device_id":"device-evil-000001","authorization_id":"auth-evil-000001","token_id":"token-evil-000001","token":"test_session_token_0123456789ABCDEF"}`
-	forms := map[string]string{
-		"/pair":           "hooshix_csrf=" + csrf + "&pairing=" + url.QueryEscape(payload),
-		"/pairing/rotate": "hooshix_csrf=" + csrf,
-		"/unpair":         "hooshix_csrf=" + csrf + "&reset_identity=true",
-		"/expose/add":     "hooshix_csrf=" + csrf + "&id=evil&target=127.0.0.1:9999",
-		"/expose/remove":  "hooshix_csrf=" + csrf + "&id=web-001",
+	forms := map[string]struct {
+		contentType string
+		body        string
+	}{
+		"/enrollment/start": {"application/json", `{"server_url":"https://panel.hooshix-agent.ir","device_name":"evil"}`},
+		"/enrollment/claim": {"application/json", `{}`},
+		"/pairing/rotate":   {"application/x-www-form-urlencoded", "hooshix_csrf=" + csrf},
+		"/unpair":           {"application/x-www-form-urlencoded", "hooshix_csrf=" + csrf + "&reset_identity=true"},
+		"/expose/add":       {"application/x-www-form-urlencoded", "hooshix_csrf=" + csrf + "&id=evil&target=127.0.0.1:9999"},
+		"/expose/remove":    {"application/x-www-form-urlencoded", "hooshix_csrf=" + csrf + "&id=web-001"},
 	}
-	for path, body := range forms {
+	for path, form := range forms {
 		for _, host := range []string{"127.0.0.1:8799", "attacker.example:8799"} {
-			request := newLoopbackRequest(http.MethodPost, path+"?cap="+capability, strings.NewReader(body))
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request := newLoopbackRequest(http.MethodPost, path+"?cap="+capability, strings.NewReader(form.body))
+			request.Header.Set("Content-Type", form.contentType)
 			request.Header.Set("Origin", "https://attacker.example")
 			request.Host = host
 			recorder := httptest.NewRecorder()
@@ -240,13 +311,13 @@ func TestPairingRejectsCrossSiteFormPosts(t *testing.T) {
 			}
 		}
 	}
-	// The rejected pairing must not have replaced the configured gateway.
+	// None of the rejected requests may have written pairing material.
 	config, err := agent.LoadConfig(app.StateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.GatewayURL == gateway {
-		t.Fatalf("cross-site POST replaced the gateway with %s", gateway)
+	if config.GatewayURL != "" || config.DeviceID != "" {
+		t.Fatalf("cross-site POST wrote pairing material: %+v", config)
 	}
 }
 
@@ -346,41 +417,6 @@ func TestRootPageDoesNotCreateState(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			t.Fatalf("GET / created %s", name)
 		}
-	}
-}
-
-// TestCapabilityRotatesAfterPairing proves a successful pairing invalidates
-// the old capability (and the URL that carried it) and issues a new one.
-func TestCapabilityRotatesAfterPairing(t *testing.T) {
-	app, capability := newTestApp(t)
-	csrf := app.ensureCSRFToken()
-	payload := `{"gateway_url":"wss://gateway.example/agent/v1/connect","device_id":"device-test-000001","authorization_id":"auth-test-000001","token_id":"token-test-000001","token":"test_session_token_0123456789ABCDEF"}`
-	request := newLoopbackRequest(http.MethodPost, "/pair?cap="+capability,
-		strings.NewReader("hooshix_csrf="+csrf+"&pairing="+url.QueryEscape(payload)))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Origin", "http://127.0.0.1:8799")
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("pairing status=%d want=303: %s", recorder.Code, recorder.Body.String())
-	}
-	rotated := app.currentCapability()
-	if rotated == capability {
-		t.Fatal("capability was not rotated after a successful pairing")
-	}
-	onDisk, err := agent.LoadPairingCapability(app.StateDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if onDisk != rotated {
-		t.Fatalf("in-memory capability %q != on-disk %q", rotated, onDisk)
-	}
-	// The old capability must no longer authenticate.
-	request = newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
-	recorder = httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if strings.Contains(recorder.Body.String(), csrf) {
-		t.Fatal("the rotated-away capability still authenticated")
 	}
 }
 
@@ -619,8 +655,9 @@ func TestTunnelHealthRendersStatusSnapshot(t *testing.T) {
 			t.Fatalf("page missing %q in body:\n%s", want, body)
 		}
 	}
-	// Error text must be escaped, never rendered as markup.
-	if strings.Contains(body, "<script>") {
+	// Error text must be escaped, never rendered as markup. (The page carries
+	// its own legitimate <script> block, so match the error text itself.)
+	if strings.Contains(body, `failed dial <script>`) {
 		t.Fatalf("last error rendered unescaped:\n%s", body)
 	}
 	if !strings.Contains(body, "&lt;script&gt;") {
@@ -686,20 +723,6 @@ func TestPairingNoticeEscapesHTML(t *testing.T) {
 	}
 }
 
-func TestJSONPairingAcceptsCapabilityAndCSRFHeaders(t *testing.T) {
-	app, capability := newTestApp(t)
-	body := `{"gateway_url":"wss://gateway.example/agent/v1/connect","device_id":"device-test-000001","authorization_id":"auth-test-000001","token_id":"token-test-000001","token":"test_session_token_0123456789ABCDEF"}`
-	request := newLoopbackRequest(http.MethodPost, "/pair", strings.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-HooshiX-Pairing-Capability", capability)
-	request.Header.Set("X-HooshiX-CSRF", app.ensureCSRFToken())
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("authenticated JSON pairing status=%d want=303: %s", recorder.Code, recorder.Body.String())
-	}
-}
-
 // TestPairingLegacyTokenCopyIsNotWritten proves ApplyPairing never writes
 // the plaintext token.txt record: the credential lives only in the secret
 // store.
@@ -732,9 +755,8 @@ func TestPairingLegacyTokenCopyIsNotWritten(t *testing.T) {
 }
 
 // TestPairingStoresSuppliedCAFile proves a CA file supplied through the
-// pairing UI is validated and stored, so a self-hosted deployment can trust a
-// private CA without installing it into the machine trust store. Before this
-// the payload had no CA field at all and the UI could not express it.
+// enrollment form is validated and stored, so a self-hosted deployment can
+// trust a private CA without installing it into the machine trust store.
 func TestPairingStoresSuppliedCAFile(t *testing.T) {
 	app, capability := newTestApp(t)
 	caPath := filepath.Join(t.TempDir(), "private-ca.crt")
@@ -743,9 +765,9 @@ func TestPairingStoresSuppliedCAFile(t *testing.T) {
 
 	// The CA file is trust material: it must not be settable without the CSRF
 	// token, even with a valid capability.
-	recorder := postPair(t, app, capability, "", pairingJSON("device-test-000001", "auth-test-000001", "token-test-000001"), caPath)
+	recorder := postEnrollmentStart(t, app, capability, "", enrollmentStartBody(t, "https://panel.hooshix.test", "office PC", caPath))
 	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("CA file pairing without CSRF status=%d want=403", recorder.Code)
+		t.Fatalf("enrollment start without CSRF status=%d want=403", recorder.Code)
 	}
 	config, err := agent.LoadConfig(app.StateDir())
 	if err != nil {
@@ -755,9 +777,9 @@ func TestPairingStoresSuppliedCAFile(t *testing.T) {
 		t.Fatalf("CA file was stored without the CSRF gate: %q", config.CAFile)
 	}
 
-	recorder = postPair(t, app, capability, csrf, pairingJSON("device-test-000001", "auth-test-000001", "token-test-000001"), caPath)
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("pairing with CA file status=%d want=303: %s", recorder.Code, recorder.Body.String())
+	recorder = enrollWithPanel(t, app, capability, csrf, caPath)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enrollment claim status=%d want=200: %s", recorder.Code, recorder.Body.String())
 	}
 	config, err = agent.LoadConfig(app.StateDir())
 	if err != nil {
@@ -767,17 +789,14 @@ func TestPairingStoresSuppliedCAFile(t *testing.T) {
 		t.Fatalf("configured CA file=%q want=%q", config.CAFile, caPath)
 	}
 	page := getPage(t, app, app.currentCapability())
-	if !strings.Contains(page, `name="ca_file"`) {
-		t.Fatalf("pairing form does not render the CA file field:\n%s", page)
-	}
 	if !strings.Contains(page, caPath) {
 		t.Fatalf("the page does not report the configured CA file %q:\n%s", caPath, page)
 	}
 }
 
-// TestPairingWithoutCAFilePreservesConfiguredOne proves pairing never silently
-// drops a configured trust anchor: a request that carries no CA file keeps the
-// existing value, while an explicitly supplied one wins.
+// TestPairingWithoutCAFilePreservesConfiguredOne proves an enrollment never
+// silently drops a configured trust anchor: a start that carries no CA file
+// keeps the existing value, while an explicitly supplied one wins.
 func TestPairingWithoutCAFilePreservesConfiguredOne(t *testing.T) {
 	app, capability := newTestApp(t)
 	caDir := t.TempDir()
@@ -796,27 +815,27 @@ func TestPairingWithoutCAFilePreservesConfiguredOne(t *testing.T) {
 	}
 	csrf := app.ensureCSRFToken()
 
-	recorder := postPair(t, app, capability, csrf, pairingJSON("device-test-000001", "auth-test-000001", "token-test-000001"), "")
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("pairing without CA file status=%d want=303: %s", recorder.Code, recorder.Body.String())
+	recorder := enrollWithPanel(t, app, capability, csrf, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enrollment claim status=%d want=200: %s", recorder.Code, recorder.Body.String())
 	}
 	config, err := agent.LoadConfig(app.StateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if config.CAFile != configuredPath {
-		t.Fatalf("pairing without a CA file dropped the configured trust anchor: ca_file=%q want=%q", config.CAFile, configuredPath)
+		t.Fatalf("enrollment without a CA file dropped the configured trust anchor: ca_file=%q want=%q", config.CAFile, configuredPath)
 	}
 	if !strings.Contains(getPage(t, app, app.currentCapability()), configuredPath) {
 		t.Fatal("the page does not report the preserved CA file")
 	}
 
 	// An explicitly supplied value wins over the preserved one. The capability
-	// rotated on the successful pairing above, so the second form uses the live
+	// rotated on the successful claim above, so the second round uses the live
 	// value the tray would have handed the operator.
-	recorder = postPair(t, app, app.currentCapability(), csrf, pairingJSON("device-test-000002", "auth-test-000002", "token-test-000002"), replacementPath)
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("pairing with replacement CA status=%d want=303: %s", recorder.Code, recorder.Body.String())
+	recorder = enrollWithPanel(t, app, app.currentCapability(), csrf, replacementPath)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enrollment claim with replacement CA status=%d want=200: %s", recorder.Code, recorder.Body.String())
 	}
 	config, err = agent.LoadConfig(app.StateDir())
 	if err != nil {
@@ -828,10 +847,10 @@ func TestPairingWithoutCAFilePreservesConfiguredOne(t *testing.T) {
 }
 
 // TestPairingRejectsInvalidCAFile proves a path that is not an existing,
-// readable file holding a PEM trust anchor is rejected with a clear error and
-// leaves the Agent state unpaired and unchanged. The supplied path is read by
-// the service account, so this is what keeps a pairing request from becoming
-// an arbitrary file-read primitive.
+// readable file holding a PEM trust anchor is rejected at enrollment start
+// with a clear error and leaves the Agent state unpaired and unchanged. The
+// supplied path is read by the service account, so this is what keeps an
+// enrollment request from becoming an arbitrary file-read primitive.
 func TestPairingRejectsInvalidCAFile(t *testing.T) {
 	app, capability := newTestApp(t)
 	scratch := t.TempDir()
@@ -865,38 +884,200 @@ func TestPairingRejectsInvalidCAFile(t *testing.T) {
 		{"not PEM", textPath, []string{"no PEM certificate"}},
 		{"PEM private key only", privateKeyPath, []string{"no PEM certificate"}},
 	}
-	config := agent.Config{}
 	for _, testCase := range cases {
-		recorder := postPair(t, app, capability, app.ensureCSRFToken(),
-			pairingJSON("device-test-000001", "auth-test-000001", "token-test-000001"), testCase.path)
-		if recorder.Code != http.StatusSeeOther {
-			t.Fatalf("%s: status=%d want=303", testCase.name, recorder.Code)
+		recorder := postEnrollmentStart(t, app, capability, app.ensureCSRFToken(),
+			enrollmentStartBody(t, "https://panel.hooshix.test", "office PC", testCase.path))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d want=400", testCase.name, recorder.Code)
 		}
-		page := getPage(t, app, capability)
-		if !strings.Contains(page, "ca_file") {
-			t.Fatalf("%s: rejection was not reported as a CA file error:\n%s", testCase.name, page)
+		body := recorder.Body.String()
+		if !strings.Contains(body, "ca_file") {
+			t.Fatalf("%s: rejection was not reported as a CA file error:\n%s", testCase.name, body)
 		}
 		matched := false
 		for _, want := range testCase.want {
-			if strings.Contains(page, want) {
+			if strings.Contains(body, want) {
 				matched = true
 				break
 			}
 		}
 		if !matched {
-			t.Fatalf("%s: page does not explain the rejection (want one of %q):\n%s", testCase.name, testCase.want, page)
+			t.Fatalf("%s: response does not explain the rejection (want one of %q):\n%s", testCase.name, testCase.want, body)
 		}
-		// Nothing may be stored: the rejected pairing leaves the device unpaired
-		// with its previous trust anchor untouched.
-		var err error
-		config, err = agent.LoadConfig(app.StateDir())
+		// Nothing may be stored: the rejected start leaves no pending session
+		// and the device unpaired with its previous trust anchor untouched.
+		if app.pendingEnrollmentSnapshot() != nil {
+			t.Fatalf("%s: rejected start left a pending enrollment behind", testCase.name)
+		}
+		config, err := agent.LoadConfig(app.StateDir())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if config.CAFile != "" || config.GatewayURL != "" || config.DeviceID != "" {
-			t.Fatalf("%s: rejected pairing mutated state: %+v", testCase.name, config)
+			t.Fatalf("%s: rejected enrollment mutated state: %+v", testCase.name, config)
 		}
 	}
+}
+
+// TestConnectSectionRendersEnrollmentForm proves the unpaired page offers the
+// device-code enrollment form — not the removed paste-a-pairing-text flow.
+func TestConnectSectionRendersEnrollmentForm(t *testing.T) {
+	app, capability := newTestApp(t)
+	page := getPage(t, app, capability)
+	for _, want := range []string{
+		`id="enroll-form"`,
+		defaultEnrollmentPanelURL,
+		`name="server_url"`,
+		`name="device_name"`,
+		`name="ca_file"`,
+		`action="/enrollment/start?cap=`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("unpaired page missing %q:\n%s", want, page)
+		}
+	}
+	for _, gone := range []string{`action="/pair"`, "Paste your pairing text", "Register this device"} {
+		if strings.Contains(page, gone) {
+			t.Fatalf("unpaired page still renders the removed pairing-text flow (%q):\n%s", gone, page)
+		}
+	}
+}
+
+// TestConnectSectionRendersPendingEnrollment proves a live pending session
+// renders the user code, the verification link and the polling mount instead
+// of the form.
+func TestConnectSectionRendersPendingEnrollment(t *testing.T) {
+	app, capability := newTestApp(t)
+	csrf := app.ensureCSRFToken()
+	store := agent.NewPlatformSecretStore(app.StateDir())
+	if _, _, err := agent.LoadOrCreateIdentity(store); err != nil {
+		t.Fatal(err)
+	}
+	panel := newEnrollmentPanel(t)
+	app.enrollmentClient = enrollment.NewClient(panel.Client())
+	recorder := postEnrollmentStart(t, app, capability, csrf, enrollmentStartBody(t, panel.URL, "office PC", ""))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("enrollment start status=%d want=201: %s", recorder.Code, recorder.Body.String())
+	}
+	page := getPage(t, app, capability)
+	for _, want := range []string{
+		"ABCD-EFGH",
+		`id="pending-block"`,
+		"data-csrf=",
+		"data-expires=",
+		"https://panel.hooshix.test/enroll",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("pending page missing %q:\n%s", want, page)
+		}
+	}
+	if strings.Contains(page, `id="enroll-form"`) {
+		t.Fatalf("pending page still renders the enrollment form:\n%s", page)
+	}
+}
+
+// TestConnectSectionRendersPairedStatus proves a paired agent sees its
+// pairing status instead of any enrollment flow.
+func TestConnectSectionRendersPairedStatus(t *testing.T) {
+	app, capability, _, _ := pairedApp(t)
+	page := getPage(t, app, capability)
+	for _, want := range []string{
+		"Paired with device-unpair-000001",
+		"wss://gateway.example/agent/v1/connect",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("paired page missing %q:\n%s", want, page)
+		}
+	}
+	if strings.Contains(page, `id="enroll-form"`) || strings.Contains(page, `id="pending-block"`) {
+		t.Fatalf("paired page renders an enrollment flow:\n%s", page)
+	}
+}
+
+// TestRemoteDesktopPresetIsClientSideOnly proves the Remote Desktop convenience
+// is a pure page-level form prefill: it names the RDP loopback target and the
+// panel-side follow-up, and it never reaches the Agent to change Windows' own
+// remote-connections setting. The pairing page must not grow any enable or
+// disable control, because RDP admission is a Windows + Panel + Connector
+// decision (ADR-0017), not an Agent one.
+func TestRemoteDesktopPresetIsClientSideOnly(t *testing.T) {
+	app, capability := newTestApp(t)
+	page := getPage(t, app, capability)
+	for _, want := range []string{
+		`id="preset-rdp"`,
+		`type="button"`,
+		`"rdp-001"`,
+		`"127.0.0.1:3389"`,
+		`getElementById("expose-id")`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing Remote Desktop preset part %q:\n%s", want, page)
+		}
+	}
+	for _, forbidden := range []string{
+		`action="/rdp`,
+		`name="rdp`,
+		"Enable Remote Desktop",
+		"Disable Remote Desktop",
+		"fDenyTSConnections",
+		"TSEnable",
+	} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("page must not offer an Agent-side RDP control %q:\n%s", forbidden, page)
+		}
+	}
+}
+
+// TestRemoteDesktopPresetValuesCommit proves the three values the Remote
+// Desktop button prefills are the values /expose/add actually commits for a
+// paired Agent, and that the same submit stays capability + CSRF gated. The
+// button only fills form fields: an unauthenticated submit must persist
+// nothing.
+func TestRemoteDesktopPresetValuesCommit(t *testing.T) {
+	app, capability, csrf, _ := pairedApp(t)
+	const preset = "id=rdp-001&protocol=tcp&target=127.0.0.1%3A3389"
+
+	request := newLoopbackRequest(http.MethodPost, "/expose/add?cap="+capability, strings.NewReader(preset))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://127.0.0.1:8799")
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("preset submit without CSRF status=%d want=403", recorder.Code)
+	}
+	config, err := agent.LoadConfig(app.StateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range config.Endpoints {
+		if endpoint.ID == "rdp-001" {
+			t.Fatalf("CSRF-less preset submit persisted %q", endpoint.ID)
+		}
+	}
+
+	request = newLoopbackRequest(http.MethodPost, "/expose/add?cap="+capability,
+		strings.NewReader(preset+"&hooshix_csrf="+url.QueryEscape(csrf)))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://127.0.0.1:8799")
+	recorder = httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("preset submit status=%d want=303: %s", recorder.Code, recorder.Body.String())
+	}
+	config, err = agent.LoadConfig(app.StateDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range config.Endpoints {
+		if endpoint.ID != "rdp-001" {
+			continue
+		}
+		if endpoint.Target != "127.0.0.1:3389" || endpoint.Protocol != "tcp" {
+			t.Fatalf("preset committed %+v want 127.0.0.1:3389/tcp", endpoint)
+		}
+		return
+	}
+	t.Fatalf("preset did not commit rdp-001: %+v", config.Endpoints)
 }
 
 // pairedApp returns an app whose state directory holds a complete pairing,

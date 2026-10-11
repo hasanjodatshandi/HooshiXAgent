@@ -22,8 +22,9 @@ type ServiceEnrollmentStart struct {
 }
 
 type ServiceEnrollmentClaim struct {
-	State    string `json:"state"`
-	DeviceID string `json:"device_id,omitempty"`
+	State      string `json:"state"`
+	DeviceID   string `json:"device_id,omitempty"`
+	Capability string `json:"capability,omitempty"`
 }
 
 // StartServiceEnrollment delegates enrollment to the running service so the
