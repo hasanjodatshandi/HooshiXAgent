@@ -10,6 +10,10 @@ cmd/hooshix-setup/payload/
 /hooshix-agent-tray.exe
 /hooshix-setup.exe
 /cmd/hooshix-agent-tray/hooshix.ico
+# scripts/build-connect.ps1 regenerates this icon next to the package before
+# linking it, so an unignored copy makes every connect build report
+# vcs.modified=true and hides the provenance stamp operators verify.
+/cmd/hooshix-connect/hooshix.ico
 /cmd/hooshix-agent-tray/rsrc_windows_*.syso
 /cmd/hooshix-setup/rsrc_windows_*.syso
 
