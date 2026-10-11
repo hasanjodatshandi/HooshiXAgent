@@ -346,7 +346,7 @@ $arpDisplayName = $arp.PSObject.Properties['DisplayName']
 $arpDisplayVersion = $arp.PSObject.Properties['DisplayVersion']
 $arpUninstallString = $arp.PSObject.Properties['UninstallString']
 $arpInstallLocation = $arp.PSObject.Properties['InstallLocation']
-Assert-True ($arpDisplayName) 'the ARP entry has no DisplayName'
+Assert-True ($null -ne $arpDisplayName) 'the ARP entry has no DisplayName'
 Assert-True ($arpDisplayName.Value -eq 'HooshiX Agent') "the ARP DisplayName is '$($arpDisplayName.Value)'"
 Assert-True ($arpUninstallString -and $arpUninstallString.Value -match 'uninstall\.exe') "the ARP UninstallString does not point at the installed uninstaller: $($arpUninstallString.Value)"
 Assert-True ($arpInstallLocation -and $arpInstallLocation.Value -eq $InstallDir) "the ARP InstallLocation is '$($arpInstallLocation.Value)', want '$InstallDir'"
@@ -361,7 +361,7 @@ Write-Section 'Assert the desktop tray auto-start registration'
 $interactiveUserResolved = $install.StdOut -notmatch 'note: no interactive desktop user resolved'
 if ($interactiveUserResolved) {
     $task = Get-ScheduledTask -TaskName $TrayTaskName -ErrorAction SilentlyContinue
-    Assert-True ($task) "an interactive desktop user was resolved but the $TrayTaskName auto-start task was not registered"
+    Assert-True ($null -ne $task) "an interactive desktop user was resolved but the $TrayTaskName auto-start task was not registered"
     Write-Host "tray auto-start task registered: $TrayTaskName ($($task.State))"
 }
 else {
