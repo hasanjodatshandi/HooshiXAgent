@@ -943,16 +943,16 @@ func (host *menuHost) startFlash() {
 		for {
 			select {
 			case <-stop:
-				setTrayIcon(target)
+				host.setHostIcon(target)
 				return
 			case <-deadline:
-				setTrayIcon(target)
+				host.setHostIcon(target)
 				return
 			case <-ticker.C:
 				if showAlternate {
-					setTrayIcon(alternate)
+					host.setHostIcon(alternate)
 				} else {
-					setTrayIcon(target)
+					host.setHostIcon(target)
 				}
 				showAlternate = !showAlternate
 			}
@@ -974,22 +974,32 @@ func (host *menuHost) stopFlashLocked() {
 	if host.flashStop != nil {
 		close(host.flashStop)
 		host.flashStop = nil
-		setTrayIcon(statusIcon(readinessFromState(host.app.currentState())))
+		host.setHostIcon(statusIcon(readinessFromState(host.app.currentState())))
 	}
 }
 
-// setTrayIcon swaps only the icon portion of the tray entry.
+// setTrayIcon swaps only the icon portion of the current tray entry.
 func setTrayIcon(icon windows.Handle) {
-	if icon == 0 || currentHost == nil {
+	if currentHost == nil {
+		return
+	}
+	currentHost.setHostIcon(icon)
+}
+
+// setHostIcon swaps the icon on this host's own entry. A blink goroutine and the
+// stop path use it instead of the package-level host, which a tray rebuild or a
+// test can be replacing while they are still running.
+func (host *menuHost) setHostIcon(icon windows.Handle) {
+	if icon == 0 || host == nil {
 		return
 	}
 	var data notifyIconData
-	data.Window = currentHost.window
-	data.ID = currentHost.iconToken
+	data.Window = host.window
+	data.ID = host.iconToken
 	data.Flags = nifIcon
 	data.Icon = icon
 	data.Size = uint32(unsafe.Sizeof(data))
-	_ = currentHost.shellNotifyIcon(nimModify, &data)
+	_ = host.shellNotifyIcon(nimModify, &data)
 }
 
 // refreshMenu applies state to the tray icon, tooltip, and menu so tunnel
