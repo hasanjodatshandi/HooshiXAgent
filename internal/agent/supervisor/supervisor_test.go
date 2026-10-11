@@ -474,6 +474,73 @@ func TestWriteStatusFileIsSerialisedAndAtomic(t *testing.T) {
 	}
 }
 
+// TestRetryRenameSucceedsAfterTransientDenial pins the Windows behaviour the
+// status publish depends on: a denied replace is retried, and the publish wins
+// as soon as the denial clears instead of dropping the snapshot.
+func TestRetryRenameSucceedsAfterTransientDenial(t *testing.T) {
+	calls := 0
+	err := retryRename(func(string, string) error {
+		calls++
+		if calls < 3 {
+			return errors.New(`rename C:\ProgramData\HooshiXAgent\.status-1.tmp C:\ProgramData\HooshiXAgent\status.json: Access is denied.`)
+		}
+		return nil
+	}, "from", "to", statusRenameAttempts, time.Millisecond)
+	if err != nil {
+		t.Fatalf("retry gave up on a transient denial: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("denial should have cleared on the third attempt, got %d calls", calls)
+	}
+}
+
+// TestRetryRenameStopsAtItsBudget proves a permanently blocked target cannot
+// spin: the loop spends exactly its attempts and still surfaces the last error.
+func TestRetryRenameStopsAtItsBudget(t *testing.T) {
+	last := errors.New("still denied")
+	calls := 0
+	err := retryRename(func(string, string) error {
+		calls++
+		return last
+	}, "from", "to", 4, time.Millisecond)
+	if !errors.Is(err, last) {
+		t.Fatalf("retry must surface the final rename error, got %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("retry spent %d attempts, want the budget of 4", calls)
+	}
+}
+
+// TestWriteStatusFileSurvivesRenameDenial drives the real publish through the
+// rename seam with the exact Windows denial observed in a running Agent, so a
+// regression that drops the retry cannot pass.
+func TestWriteStatusFileSurvivesRenameDenial(t *testing.T) {
+	stateDir := t.TempDir()
+	sup := newSupervisor(t, stateDir, &fakeLoop{}, nil)
+	original := statusRename
+	denials := 0
+	statusRename = func(from, to string) error {
+		denials++
+		if denials <= 2 {
+			return errors.New("Access is denied.")
+		}
+		return original(from, to)
+	}
+	t.Cleanup(func() { statusRename = original })
+
+	sup.setLastError("status must still publish")
+	if err := sup.WriteStatusFile(); err != nil {
+		t.Fatalf("WriteStatusFile failed on a transient rename denial: %v", err)
+	}
+	if denials != 3 {
+		t.Fatalf("publish attempted the rename %d times, want the denial to clear on 3", denials)
+	}
+	status := readStatus(t, stateDir)
+	if status.LastError != "status must still publish" {
+		t.Fatalf("published status is stale: %+v", status)
+	}
+}
+
 // TestPersistStatusLogsFirstFailure proves a status write failure is reported
 // rather than discarded: a silently failing writer is what makes the tray and
 // the pairing UI show "status unavailable" with no cause anywhere.

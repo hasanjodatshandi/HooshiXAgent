@@ -368,7 +368,48 @@ func (sup *Supervisor) WriteStatusFile() error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, path)
+	return renameStatusFile(tempName, path)
+}
+
+// statusRenameAttempts and statusRenameFirstDelay bound how long a blocked
+// status.json may delay a write: six attempts backing off 10ms..160ms wait at
+// most 310ms per publish, which is far below the status tick and short enough
+// that a permanently unwritable path cannot stall the supervisor.
+const (
+	statusRenameAttempts   = 6
+	statusRenameFirstDelay = 10 * time.Millisecond
+)
+
+// statusRename is the publish rename, kept as a seam so a test can reproduce the
+// transient Windows denial without racing an antivirus.
+var statusRename = os.Rename
+
+// renameStatusFile publishes the temp document over status.json. Windows can
+// deny that replace for a few milliseconds while another handle still holds the
+// published file — a real-time antivirus scan on a freshly created file, or a
+// status reader that opened it without delete sharing — and the denial clears by
+// itself, so the rename is retried with a bounded backoff instead of failing the
+// publish and leaving the tray and pairing UI on a stale document.
+func renameStatusFile(from, to string) error {
+	return retryRename(statusRename, from, to, statusRenameAttempts, statusRenameFirstDelay)
+}
+
+// retryRename runs rename until it succeeds or attempts are spent, doubling the
+// wait between attempts, and returns the last error.
+func retryRename(rename func(from, to string) error, from, to string, attempts int, firstDelay time.Duration) error {
+	delay := firstDelay
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err = rename(from, to); err == nil {
+			return nil
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		time.Sleep(delay)
+		delay *= 2
+	}
+	return err
 }
 
 // StatusPath returns the status.json location for UIs.
