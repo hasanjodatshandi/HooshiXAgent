@@ -2,6 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,13 +18,15 @@ import (
 // the gateway's ValidateControlPayload. A regression here (an out-of-enum
 // code like local_target_read_error) makes the gateway close the whole
 // session with a policy violation, terminating the Windows service.
+//
+// The code list is SCANNED OUT OF THE PACKAGE SOURCE rather than hand-written,
+// because the hand-written list silently fell behind the code it was meant to
+// cover. A call site that passes a variable instead of a literal is checked by
+// the enum test below, which validates every value the contract allows.
 func TestAgentStreamErrorCodesAreContractValid(t *testing.T) {
-	// The codes the agent emits, from session.go (terminal error paths) —
-	// keep this list in sync with the sendStreamTerminalError call sites.
-	agentEmittedCodes := []string{
-		"resource_limit",           // stream input budget exhausted or stalled
-		"local_target_unavailable", // dial failed + mid-stream read failure/timeout
-		"route_revoked",            // local endpoint not configured
+	agentEmittedCodes := emittedStreamErrorCodes(t)
+	if len(agentEmittedCodes) < 3 {
+		t.Fatalf("the source scan found only %d stream_error literals (%v); the scanner is broken", len(agentEmittedCodes), agentEmittedCodes)
 	}
 
 	for _, code := range agentEmittedCodes {
@@ -40,6 +46,61 @@ func TestAgentStreamErrorCodesAreContractValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEveryContractStreamErrorCodeIsValid walks the full enum from
+// contracts/v1/tunnel-control.schema.json, including the codes no call site
+// uses today (protocol_error, route_revoked), so the agent can adopt any
+// contract-approved code without a hidden validator surprise.
+func TestEveryContractStreamErrorCodeIsValid(t *testing.T) {
+	for _, code := range []string{"local_target_unavailable", "route_revoked", "protocol_error", "resource_limit", "internal_error"} {
+		t.Run(code, func(t *testing.T) {
+			payload, err := json.Marshal(contractv1.StreamError{
+				ContractVersion: contractv1.ProtocolVersion,
+				MessageType:     "stream_error",
+				Code:            code,
+				Message:         "bounded diagnostic detail",
+				Retryable:       false,
+			})
+			if err != nil {
+				t.Fatalf("marshal stream_error: %v", err)
+			}
+			if err := contractv1.ValidateControlPayload(payload, 7, time.Now().UTC()); err != nil {
+				t.Fatalf("contract code %q rejected by the gateway validator: %v", code, err)
+			}
+		})
+	}
+}
+
+// emittedStreamErrorCodes collects the literal codes handed to the terminal
+// error senders anywhere in this package.
+func emittedStreamErrorCodes(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read agent package: %v", err)
+	}
+	literal := regexp.MustCompile(`sendStream(?:Terminal)?Error\(\s*[^\s,]+(?:,\s*[^\s,]+)?,\s*"([a-z_]+)"`)
+	seen := map[string]bool{}
+	var codes []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, match := range literal.FindAllStringSubmatch(string(source), -1) {
+			if !seen[match[1]] {
+				seen[match[1]] = true
+				codes = append(codes, match[1])
+			}
+		}
+	}
+	sort.Strings(codes)
+	return codes
 }
 
 // TestPermanentPolicyViolationClassification pins the reconnect-vs-terminal
@@ -135,6 +196,17 @@ func TestAgentEmittedControlPayloadsPassGatewayValidation(t *testing.T) {
 				Code:            "local_target_unavailable",
 				Message:         "approved local target read failed",
 				Retryable:       true,
+			},
+		},
+		{
+			name:     "stream_error internal_error",
+			streamID: 7,
+			payload: contractv1.StreamError{
+				ContractVersion: contractv1.ProtocolVersion,
+				MessageType:     "stream_error",
+				Code:            "internal_error",
+				Message:         "tunneled stream send failed",
+				Retryable:       false,
 			},
 		},
 	}

@@ -299,6 +299,11 @@ func writeSettingsOutsideState(path string, data []byte) error {
 	if !info.IsDir() {
 		return fmt.Errorf("settings directory %s is not a directory", filepath.Base(path))
 	}
+	// Advisory, not atomic: a symlink or directory placed here after this check
+	// cannot be used to redirect the write, because rename replaces the
+	// destination ENTRY rather than following it. The check exists to refuse a
+	// link or directory that is already in the way, not to make this pair
+	// indivisible.
 	if existing, err := os.Lstat(path); err == nil {
 		if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
 			return errors.New("refusing to replace a non-regular settings file")
@@ -332,6 +337,13 @@ func writeSettingsOutsideState(path string, data []byte) error {
 	}
 	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("replace settings file: %w", err)
+	}
+	// Flush the directory entry so the rename itself survives a crash, exactly
+	// as writePrivateFile does for state files. On Windows syncDirectory is a
+	// documented no-op (NTFS journals metadata) and the data was already
+	// flushed by temp.Sync above.
+	if err := syncDirectory(directory); err != nil {
+		return fmt.Errorf("sync settings directory: %w", err)
 	}
 	return nil
 }

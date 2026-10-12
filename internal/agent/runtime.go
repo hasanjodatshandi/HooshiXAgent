@@ -207,6 +207,13 @@ func (runner *Runner) Run(ctx context.Context) error {
 		index := index
 		health := runner.health
 		if index != 0 {
+			// A standby worker gets its own machine, attached once for the life of
+			// this Runner and never detached: runPinnedWorker leaves its machine in
+			// a terminal state on every exit path, so a worker that has ended can
+			// never be credited as live capacity, while a real revocation stays
+			// visible after the worker that saw it is gone. The supervisor builds a
+			// fresh Runner per attempt, so this list is bounded by MaxTunnels and
+			// cannot grow across restarts (see TestPinnedWorkerExitLeavesNoLiveHealthCredit).
 			health = tunnelstates.New()
 			runner.aggregate.Attach(health)
 		}

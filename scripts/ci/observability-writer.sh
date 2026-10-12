@@ -21,4 +21,4 @@ fail_if_no_tests ./internal/gateway ./internal/agent \
 go test -race -count=10 ./internal/gateway ./internal/agent \
   -run 'Test(StatusExporterBackpressureDoesNotBlockCriticalCaller|GatewayWriterPrioritizesControlAndPreservesSingleWriter|AgentWriterPrioritizesControlAndPreservesSingleWriter)$'
 
-echo "R-8 observability/writer-isolation gate: PASSED — blocked exporter load remained non-blocking with bounded drop/failure accounting; control frames preempt queued data at frame boundaries while one WebSocket writer preserves exact sequence order."
+echo "R-8 observability/writer-isolation gate: PASSED — blocked exporter load remained non-blocking with bounded drop/failure accounting; one WebSocket writer per side preserves exact sequence order, with the Agent emitting in acceptance order (a queued data frame is never postponed behind a later control frame) and the Gateway preferring control while never postponing its one held data chunk."

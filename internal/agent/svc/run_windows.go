@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 
 	"golang.org/x/sys/windows/svc"
@@ -29,7 +28,7 @@ func RunService(stateDir string) error {
 // PairingUI runs the loopback pairing UI in the foreground (diagnostics and
 // tray fallback when the service is not installed).
 func PairingUI(stateDir string, stdout, stderr io.Writer) error {
-	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := newForegroundLogger(stderr)
 	resolvedStateDir := resolveServiceStateDir(stateDir)
 	if _, err := agent.EnsurePairingCapability(resolvedStateDir); err != nil {
 		return err
@@ -54,7 +53,7 @@ func PairingUI(stateDir string, stdout, stderr io.Writer) error {
 func runSupervisorForeground(stateDir string) error {
 	sup, err := supervisor.New(supervisor.Options{
 		StateDir: stateDir,
-		Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Logger:   newForegroundLogger(os.Stderr),
 	})
 	if err != nil {
 		return err

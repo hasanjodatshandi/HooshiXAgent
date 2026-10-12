@@ -496,6 +496,10 @@ func (sess *agentSession) serveStream(stream *agentStream) {
 	sent := 0
 	chunks := 0
 	var localReadErr error
+	// sendErr records a failed tunnel write while the local target still had
+	// bytes to deliver. It MUST stay distinct from localReadErr: the response
+	// is truncated here, and serveUDPStream already treats it that way.
+	var sendErr error
 readLoop:
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(sess.limits.IdleTimeout)); err != nil {
@@ -507,6 +511,7 @@ readLoop:
 			sent += n
 			chunks++
 			if err := sess.sendBytes(stream.ctx, stream.id, buffer[:n]); err != nil {
+				sendErr = err
 				sess.logger.Warn("stream send failed mid-response", "stream_id", stream.id, "sent", sent, "error", err)
 				break
 			}
@@ -525,7 +530,7 @@ readLoop:
 		}
 	}
 	peerClosed := stream.ctx.Err() != nil
-	if stream.mode == "tcp" && localReadErr == nil && !peerClosed {
+	if stream.mode == "tcp" && localReadErr == nil && sendErr == nil && !peerClosed {
 		if err := sess.sendControl(context.Background(), stream.id, contractv1.StreamHalfClose{
 			ContractVersion: contractv1.ProtocolVersion,
 			MessageType:     "stream_half_close",
@@ -554,9 +559,18 @@ readLoop:
 		}
 	}
 	if !peerClosed {
-		if localReadErr == nil {
+		switch {
+		case sendErr != nil:
+			// A failed tunnel write means the response was truncated, so this
+			// stream must NOT be reported as stream_close "completed": the
+			// Gateway would serve the short body as a complete one and the
+			// public client would never learn the response ended early. The
+			// code stays inside the contract enum (see the note below), and
+			// retryable is false because part of the body was already delivered.
+			_ = sess.sendStreamTerminalError(stream, "internal_error", "tunneled stream send failed", false)
+		case localReadErr == nil:
 			_ = sess.sendStreamTerminalClose(stream, "completed")
-		} else {
+		default:
 			// The contract restricts stream_error codes to a fixed enum
 			// (contracts/v1/tunnel-control.schema.json): local_target_unavailable,
 			// route_revoked, protocol_error, resource_limit, internal_error. The
@@ -731,11 +745,14 @@ func (sess *agentSession) sendFrame(parent context.Context, kind contractv1.Kind
 }
 
 func (sess *agentSession) writeLoop() {
-	// Two FIFO queues merged per arrival; cross-queue order is randomized
-	// ONLY between queues. Per-stream ordering (data before terminal close)
-	// is guaranteed by the senders: every stream sender awaits sendFrame's
-	// result before issuing the next frame for that stream, so a stream can
-	// never have a data frame queued behind its own terminal close.
+	// Two bounded queues (control, data) merged by acceptance order: sendFrame
+	// stamps each request with a monotonic order under writeMu, and the loop
+	// below always writes the lowest pending order first, so cross-queue order
+	// is deterministic rather than decided by goroutine wakeup luck. Per-stream
+	// ordering (data before terminal close) is guaranteed by the senders: every
+	// stream sender awaits sendFrame's result before issuing the next frame for
+	// that stream, so a stream can never have a data frame queued behind its own
+	// terminal close.
 	// INVARIANT: never add fire-and-forget sends for per-stream frames; a
 	// close overtaking queued data reintroduces the gateway 502 truncation.
 	pending := make([]agentWriteRequest, 0, 64)

@@ -34,7 +34,7 @@ Each Agent install owns a unique Ed25519 identity whose private key remains on t
 | R-5 | Safe per-stream resource failures are isolated; hop-by-hop headers, response-header/body limits and terminal ordering are explicit. |
 | R-6 | Exact-commit release eligibility, immutable Action/image pins, privilege separation, SBOM, vulnerability scanning and provenance checks. |
 | R-7 | Typed/indexed deterministic metadata snapshots, duplicate rejection, indexed revocations and fail-closed readiness. |
-| R-8 | Bounded asynchronous telemetry and single-writer control-priority scheduling for Agent/Gateway WebSockets. |
+| R-8 | Bounded asynchronous telemetry and single-writer WebSocket scheduling — acceptance order on the Agent, control preference on the Gateway. |
 | R-9 | Strict config/secret JSON EOF, concurrent mutation lock, state ownership/destructive path guards, CA bootstrap and entropy error hardening. |
 | R-10 | Non-root/read-only/capability-minimal/resource-bounded two-service Compose runtime. |
 | R-11 | Expanded fuzz, race, reconnect/slow-path/load-oriented scenarios and informational coverage artifacts. |

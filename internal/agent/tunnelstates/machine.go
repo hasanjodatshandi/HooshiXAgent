@@ -105,11 +105,13 @@ func (machine *Machine) Current() State {
 	return machine.state
 }
 
-// Transition applies a state change. Re-entering the current state is an
+// Transition applies a state change. Re-entering a NON-TERMINAL state is an
 // idempotent success so composite views can re-assert an unchanged health
-// level. All other illegal transitions return ErrIllegalTransition and leave
-// the machine unchanged, mirroring the fail-closed policy used across the
-// runtime.
+// level. A terminal state accepts nothing at all, not even its own repeat:
+// Revoked and Shutdown are the end of the record, and re-asserting them would
+// let a stale writer keep a stopped tunnel looking alive. Every other illegal
+// transition returns ErrIllegalTransition and leaves the machine unchanged,
+// mirroring the fail-closed policy used across the runtime.
 func (machine *Machine) Transition(to State) error {
 	machine.mu.Lock()
 	defer machine.mu.Unlock()

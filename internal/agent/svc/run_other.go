@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
+	"os"
 
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent"
 	"github.com/hasanjodatshandi/HooshiXAgent/internal/agent/supervisor"
@@ -29,13 +29,15 @@ func StateDir() string {
 const PairingListenAddr = "127.0.0.1:8799"
 
 // RunService runs the supervisor in the foreground on non-Windows platforms.
+// systemd --user and LaunchAgent capture stderr, so diagnostics go there: a
+// discard sink would erase the only record of why a tunnel stopped.
 func RunService(stateDir string) error {
 	if stateDir == "" {
 		stateDir = StateDir()
 	}
 	sup, err := supervisor.New(supervisor.Options{
 		StateDir: stateDir,
-		Logger:   slog.New(slog.NewTextHandler(logOutput{}, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Logger:   newForegroundLogger(os.Stderr),
 	})
 	if err != nil {
 		return err
@@ -48,7 +50,7 @@ func RunService(stateDir string) error {
 
 // PairingUI serves the pairing UI on the loopback listener.
 func PairingUI(stateDir string, stdout, stderr io.Writer) error {
-	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := newForegroundLogger(stderr)
 	if _, err := agent.EnsurePairingCapability(stateDir); err != nil {
 		return err
 	}
@@ -69,7 +71,3 @@ func Start() error                 { return errors.New("service start requires W
 func Stop() error                  { return errors.New("service stop requires Windows") }
 func QueryStatus() (string, error) { return "", errors.New("service status requires Windows") }
 func IsWindowsService() bool       { return false }
-
-type logOutput struct{}
-
-func (logOutput) Write(p []byte) (int, error) { return len(p), nil }

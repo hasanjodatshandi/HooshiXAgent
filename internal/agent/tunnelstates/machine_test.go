@@ -32,6 +32,9 @@ func TestTerminalStatesStopTransitions(t *testing.T) {
 		if err := machine.Transition(Connected); err != ErrIllegalTransition {
 			t.Fatalf("terminal state accepted transition: err=%v", err)
 		}
+		if err := machine.Transition(terminal); err != ErrIllegalTransition {
+			t.Fatalf("terminal state %v accepted its own repeat: err=%v", terminal, err)
+		}
 		if machine.Current() != terminal {
 			t.Fatalf("terminal transition changed state to %v", machine.Current())
 		}

@@ -80,7 +80,10 @@ func (store *dpapiSecretStore) Save(state SecretState) error {
 }
 
 func dpapiProtect(plain []byte) ([]byte, error) {
-	input := blobFromBytes(plain)
+	input, err := blobFromBytes(plain)
+	if err != nil {
+		return nil, err
+	}
 	var output dataBlob
 	result, _, callErr := cryptProtectData.Call(
 		uintptr(unsafe.Pointer(&input)),
@@ -98,7 +101,10 @@ func dpapiProtect(plain []byte) ([]byte, error) {
 }
 
 func dpapiUnprotect(protected []byte) ([]byte, error) {
-	input := blobFromBytes(protected)
+	input, err := blobFromBytes(protected)
+	if err != nil {
+		return nil, err
+	}
 	var output dataBlob
 	result, _, callErr := cryptUnprotectData.Call(
 		uintptr(unsafe.Pointer(&input)),
@@ -115,11 +121,31 @@ func dpapiUnprotect(protected []byte) ([]byte, error) {
 	return copyAndFreeBlob(output), nil
 }
 
-func blobFromBytes(data []byte) dataBlob {
+func blobFromBytes(data []byte) (dataBlob, error) {
 	if len(data) == 0 {
-		return dataBlob{}
+		return dataBlob{}, nil
 	}
-	return dataBlob{cbData: uint32(len(data)), pbData: &data[0]}
+	length, err := dpapiBlobLength(len(data))
+	if err != nil {
+		return dataBlob{}, err
+	}
+	return dataBlob{cbData: length, pbData: &data[0]}, nil
+}
+
+// maxDPAPIBlobBytes is the largest buffer the Win32 CRYPT_DATA_BLOB cbData
+// field can describe.
+const maxDPAPIBlobBytes = uint64(^uint32(0))
+
+// dpapiBlobLength converts a Go byte count into the 32-bit cbData field. A
+// longer buffer must be refused instead of wrapped: silently truncating the
+// length would hand CryptProtectData only the first part of a secret and write
+// a blob that later decrypts into corrupt state. The conversion lives apart
+// from blobFromBytes so the bound is testable without a 4 GiB allocation.
+func dpapiBlobLength(length int) (uint32, error) {
+	if uint64(length) > maxDPAPIBlobBytes {
+		return 0, fmt.Errorf("DPAPI input of %d bytes exceeds the %d byte Win32 blob limit", length, maxDPAPIBlobBytes)
+	}
+	return uint32(length), nil
 }
 
 func copyAndFreeBlob(blob dataBlob) []byte {

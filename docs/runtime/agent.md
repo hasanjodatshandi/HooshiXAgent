@@ -38,6 +38,8 @@ The non-secret `config.json` contains the versioned Gateway/identifier/endpoint/
 
 On a packaged Windows install `config.json` does not live in the state directory: Setup writes a `settings_location` pointer there and puts the settings file next to the program, at `C:\Program Files\HooshiXAgent\config.json`, where an operator can find and edit it. `ConfigPath()` follows that pointer only when it names an absolute path ending in `config.json` whose directory passes the same state-path validation as the state directory itself; anything else (relative, renamed, escaping through a reparse point, or pointing back into the state directory) is ignored and the state directory's own copy is used. A portable, container or development install that never had a pointer therefore behaves exactly as before. `agent`/`hooshix-agent` commands, the tray and the service all resolve the same file.
 
+Replacing that outside-state settings file uses the same durability contract as a state file: the new bytes are flushed before the temporary file is renamed over the target, and the directory is flushed after the rename so the replacement itself survives a crash (on Windows `syncDirectory` is the documented no-op — NTFS journals metadata — and the data was already flushed). The guard that refuses a target the Agent may not own runs before the rename, so it is advisory rather than atomic: closing that window would need an open-with-no-follow-and-verify step on the target itself, which the settings path does not do, and the cost of racing it is bounded by the fact that the only writer of that file is Setup or the operator.
+
 ## Secret storage
 
 Secret state contains only:
@@ -199,6 +201,15 @@ For each session the Agent:
 9. dials only the loopback policy and proxies stream bytes;
 10. tears down all active streams when the session ends.
 
+Every stream ends with exactly one terminal frame, and that frame has to describe what actually happened to the response bytes:
+
+- the whole response reached the tunnel and the local side then closed: `stream_close` with reason `completed`;
+- the Gateway half-closed or cancelled first: no terminal frame at all — the peer already ended the stream, and answering its close with a second terminal would contradict it. `peer_closed` and `cancelled` are reason codes the contract reserves for the closing side;
+- the local target could not be dialled or failed mid-read: `stream_error` with one of the contract's enum values (`local_target_unavailable`, `route_revoked`, `protocol_error`, `resource_limit`, `internal_error`). Sending a code outside that set is a policy violation and the Gateway kills the whole session, so the list of codes the Agent emits is pinned by a source-scanning test against `internal/contractv1`;
+- the **tunnel** write failed while the local target still had bytes to deliver: the response is truncated, so the Agent sends `stream_error` with `internal_error` and `retryable=false`, never `stream_close completed`. `retryable` stays false because part of the body was already delivered. The same rule covers the HTTP-relay, raw TCP and UDP paths.
+
+Reporting `completed` for a truncated body is the failure this rule exists to prevent: the Gateway would then serve a short body as a complete one, and the client would see a silently cut-off download or RDP stream instead of an error. When the failing write is a transport error the session is torn down instead, which the Gateway also treats as a failed response — either way the Agent never claims a partial response finished.
+
 Connection loss triggers bounded exponential reconnect attempts. The delay starts at 1 second and is capped at 30 seconds with bounded jitter. Cancellation or an explicit session-revoked signal stops the loop. Both bounds, and the supervisor's own retry pause, come from the `limits` block documented under [Resource bounds](#resource-bounds).
 
 ## Resource bounds
@@ -266,6 +277,8 @@ The Agent binary's own Windows `service-spec` output and the archive installer `
 
 State and identity survive normal process restart. AG-8 release acceptance additionally verifies native persistence definitions on Linux/macOS/Windows plus fresh-process recovery of the same persisted identity/config/credentials. GitHub-hosted CI does not claim a literal physical runner reboot.
 
+A supervisor that runs in the foreground instead of under the SCM — the `systemd --user` and LaunchAgent paths, and the Windows console debug path — writes its diagnostics to the process's own stderr, because that is the stream the host captures. The shared `newForegroundLogger` builds that writer; nothing in the service package may route diagnostics to a discarding sink, and a test over the package's files fails if one appears, since a discard writer erases every diagnostic for the entire service run and leaves the operator with a silent, broken tunnel.
+
 ## Update foundation
 
 `update-info` exposes current version/platform/channel information. The Agent package also validates update candidates for:
@@ -293,7 +306,11 @@ This runtime gate remains the base real-process check. The integrated determinis
 
 ## R-8 outbound writer isolation
 
-After session authentication the Agent sends protocol frames through one outbound WebSocket writer goroutine. Control/heartbeat frames use a bounded 32-entry control queue and stream data uses a bounded 2-entry data queue. The writer assigns sequence numbers immediately before encoding and performs every post-authentication WebSocket write, so concurrent stream goroutines cannot create concurrent socket writers or sequence races. Control is preferred whenever both queues have work at a frame boundary; an already-running bounded data-frame write is allowed to finish first and remains subject to the existing write timeout. Authentication handshake frames are still direct single-threaded writes before the session writer starts.
+After session authentication the Agent sends protocol frames through one outbound WebSocket writer goroutine. Control/heartbeat frames use a bounded 32-entry control queue and stream data uses a bounded 2-entry data queue. The writer assigns sequence numbers immediately before encoding and performs every post-authentication WebSocket write, so concurrent stream goroutines cannot create concurrent socket writers or sequence races.
+
+Cross-queue order is decided by acceptance, not by which queue the writer happens to poll. `sendFrame` stamps each request with a monotonic order under the write lock, and the writer drains both queues and always emits the lowest pending order first, so the two goroutines feeding the queues cannot determine on-the-wire order by wakeup luck. Control keeps its own larger queue, so a stalled data queue cannot starve heartbeats, and an already-running bounded data-frame write is allowed to finish first while remaining subject to the write timeout. A data frame is never dropped because its enqueue context expired — only a session shutdown or a real transport error may drop it, and it is written under a fresh bounded deadline so a slow enqueue cannot truncate the tunnel stream. Authentication handshake frames are still direct single-threaded writes before the session writer starts.
+
+Every per-stream sender awaits its own send result before issuing the next frame for that stream. That is what keeps a stream's data ahead of its own terminal close, and it is an invariant rather than an optimisation: a fire-and-forget send for a per-stream frame would let a close overtake queued data and reintroduce the Gateway-side 502 truncation.
 
 These queues are scheduling bounds, not additional bulk buffering or a capacity claim. Existing stream/session byte budgets, frame-size limits, reconnect behavior, local-target policy, and protocol-v1 semantics remain unchanged.
 

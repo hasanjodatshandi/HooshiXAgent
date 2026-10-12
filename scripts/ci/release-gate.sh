@@ -46,7 +46,7 @@ bash scripts/ci/metadata-scalability.sh
 # RA-3 live metadata gate proves generation publication, bounded staleness/recovery and live revocation without restart.
 bash scripts/ci/live-metadata-lifecycle.sh
 
-# R-8 observability/writer gate proves bounded telemetry and control-priority single-writer scheduling.
+# R-8 observability/writer gate proves bounded telemetry and single-writer scheduling (Agent acceptance order, Gateway control preference).
 bash scripts/ci/observability-writer.sh
 
 # R-9 Agent state/installer gate proves strict state parsing, locking and destructive-path safety.
