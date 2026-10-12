@@ -61,7 +61,11 @@ The accepted two-machine run is recorded in
    **RDP (TCP only)**. RDP is private by contract: `public` and `both` are
    rejected by the Panel and the Gateway.
 3. **Panel — issue a grant and copy the bundle.** On that endpoint's row, set
-   `ttl_minutes` (1–60) and `max_connections` (the form defaults to 4 for RDP)
+   `ttl_minutes` (1–60) and `max_connections` (the form defaults to 4 for RDP;
+   do not set it to 1 — an RDP client commonly opens a companion TCP connection
+   while it negotiates, and the Connector opens one grant slot per local
+   connection, so a single-connection grant answers the second one with
+   `HTTP 503 connector capacity reached`)
    and press *Issue Connector grant*. The page shows `grant_id`, `token_id`, the
    raw token **once**, and below them the **connect bundle** — one `hx1.…` string
    that carries the gateway, grant, token and protocol together. Only the token's
@@ -136,9 +140,44 @@ What to do:
   `query user`: it must show no active session before the remote client connects.
 - Connecting with the *same* account as the console user does not help either —
   arbitration still returns the session to `LOCAL` while the console is logged on.
+- **Disconnect every other attached RDP client first.** The same wall has a
+  second shape: if the account already has a session that is *connected* to
+  another client — typically the operator's own VPN/Tailscale RDP window — the
+  listener refuses every other incoming connection, HooshiX included. `query
+  session` shows it: the account sits on `rdp-tcp#N` in state `Active` while
+  `console` has no user. Only one client can be attached at a time, so the
+  second client's reconnect also steals the session back from the first.
 - Genuine concurrent remote + local sessions require Windows Server with RDS
   CALs. Do **not** patch `termsrv.dll`: it voids the licence, breaks servicing,
   and HooshiX does not support or troubleshoot patched hosts.
+
+### Telling "the tunnel failed" from "Windows refused"
+
+`Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational`
+distinguishes the two without any HooshiX tooling. Every connection the tunnel
+delivers is logged as id `261 Listener RDP-Tcp received a connection`; a login
+Windows then accepts is followed by id `1149 User authentication succeeded`.
+
+| Log shape | Meaning |
+| --- | --- |
+| `261` then `1149` | the tunnel carried the negotiation and Windows admitted the login |
+| `261` with no following `1149` | the bytes reached port 3389 — the failure is Windows refusing the session (single-session arbitration), not the tunnel |
+| no `261` at all | the flow never reached the target: check the grant, the Agent mapping, and whether the Connector reported an HTTP error |
+
+To reproduce the middle row without HooshiX in the path, send a bare X.224
+Connection Request straight at the listener from the Agent machine itself:
+
+```powershell
+$cr = [byte[]]@(3,0,0,19,14,224,0,0,0,0,0,1,0,0,0,0,0,0,0)
+$c = New-Object System.Net.Sockets.TcpClient; $c.ReceiveTimeout = 5000
+$c.Connect('127.0.0.1', 3389); $s = $c.GetStream(); $s.Write($cr, 0, $cr.Length)
+$b = New-Object byte[] 64
+try { "reply $($s.Read($b, 0, 64)) bytes" } catch { "refused: $($_.Exception.Message)" }
+```
+
+If that probe is refused while a VPN/Tailscale RDP client is attached, the
+single-session wall is the cause and the tunnel is innocent — fix the session,
+not the Agent.
 
 This page's own scope explains why nothing in the product fixes it: the Agent
 never touches `fDenyTSConnections` or session arbitration
@@ -191,6 +230,7 @@ proves the full path even if you do not complete a login.
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
 | Login screen appears, credentials pass, then Windows refuses with "another user is already connected" | the Agent machine has a console user signed in and its Windows client SKU allows only one interactive session — arbitration keeps the `LOCAL` session | sign the console user **out** (lock is not enough), verify with `query user`; see *One interactive session at a time* |
+| `mstsc` never shows a login prompt: "This computer can't connect to the remote computer", error `0x904` extended `0x7`, while HooshiX Connect still reads `tunnel ready` | the target's listener took the connection (`261`) and refused it before authentication (`1149` missing) because another RDP client is already attached to that account's session | close/disconnect the other RDP client (VPN or Tailscale window), then reconnect through HooshiX; confirm with the `261`/`1149` table in *Telling "the tunnel failed" from "Windows refused"* |
 | Flow drops mid-session | TTL expiry, revoke, endpoint remap, service restart, or the per-grant/device/global budgets | re-issue a grant; a lost flow is re-established as a new connection, never resumed |
 | TLS failure to the Gateway host | `edge` not published yet on that network, or an expired public certificate | confirm `Resolve-DnsName edge.hooshix-agent.ir` returns the Gateway IP, then let Caddy renew |
 
