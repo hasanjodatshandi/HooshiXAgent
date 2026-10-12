@@ -163,6 +163,18 @@ applies to `hooshix-connect.exe` too. It is not in the release workflow yet, so 
 integrity today is established by the digest the build script prints and by the
 TLS-protected Panel download route.
 
+The GUI writes exactly one file of its own: `hooshix-connect.cfg`, beside the
+executable, holding the last bundle that opened a tunnel. A connect bundle carries
+the grant's bearer token, so it is a credential and is never stored as readable
+text: the bundle is sealed with Windows DPAPI for the current user before it
+reaches the file, which also makes the file inert on another account or machine.
+It is written by rename from a temporary file in the same directory, so an
+interrupted save leaves either the old bundle or the new one, never a half-written
+credential, and reads are bounded to 8 KiB for the same reason the Agent's state
+file is. It is not part of any archive and nothing reads it except this GUI: the
+setup, the Agent and the Panel never touch it. Deleting it is the supported way to
+forget a saved bundle.
+
 ## Signed release/provenance workflow
 
 The publication path in `.github/workflows/release.yml` runs on version tags and is fail-closed around the exact tagged commit; `workflow_dispatch` exists only for non-publishing post-merge verification on `main`. The tag is resolved to a 40-hex commit and `scripts/release/verify-release-commit.py` requires a completed successful `CI` **push** run for that exact SHA on `main`, including a successful `AG-8 final security / resilience / release gate` job. A tag pointing at an unverified commit is refused before build or publish.

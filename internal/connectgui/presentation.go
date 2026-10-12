@@ -44,6 +44,18 @@ func StatusLabel(status Status, disconnecting bool) string {
 	}
 }
 
+// IdleMessage is the instruction line for a tunnel that has never been started.
+// There are two because the window has two shapes: an operator who arrived with
+// nothing has to paste a bundle, while one whose saved bundle opened has no text
+// box on screen, and telling them to paste into it would describe a control they
+// cannot see.
+func IdleMessage(hasSaved bool) string {
+	if hasSaved {
+		return "press Connect to open the tunnel with the saved bundle"
+	}
+	return "paste a connect bundle and press Connect"
+}
+
 // RDPTarget returns the address mstsc should dial for the active session. It
 // re-checks loopback rather than trusting the snapshot: the string is handed to
 // an external program, and only the local tunnel endpoint is safe to dial.

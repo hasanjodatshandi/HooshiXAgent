@@ -65,7 +65,7 @@ func New() *App {
 	return &App{
 		listenTCP: net.Listen,
 		listenUDP: net.ListenPacket,
-		status:    Status{State: StateIdle, Message: "paste a connect bundle and press Connect"},
+		status:    Status{State: StateIdle, Message: IdleMessage(false)},
 	}
 }
 

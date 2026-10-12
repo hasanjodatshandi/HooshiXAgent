@@ -1,6 +1,9 @@
 package connectgui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestButtonsFor(t *testing.T) {
 	cases := []struct {
@@ -74,6 +77,24 @@ func TestStatusLabel(t *testing.T) {
 	}
 	if got := StatusLabel(Status{State: StateIdle}, false); got != "idle" {
 		t.Fatalf("idle label = %q", got)
+	}
+}
+
+// TestIdleMessageMatchesTheWindowThatShowsIt pins the sentence that made the
+// saved-bundle window tell the operator to paste a bundle it had hidden.
+func TestIdleMessageMatchesTheWindowThatShowsIt(t *testing.T) {
+	saved := IdleMessage(true)
+	if strings.Contains(saved, "paste") {
+		t.Errorf("the window with no paste area still asks for one: %q", saved)
+	}
+	if !strings.Contains(IdleMessage(false), "paste") {
+		t.Errorf("the first-run window does not say what to do: %q", IdleMessage(false))
+	}
+	if saved == IdleMessage(false) {
+		t.Error("both shapes give the same instruction")
+	}
+	if !strings.Contains(saved, "Connect") {
+		t.Errorf("the saved-bundle instruction does not name the button to press: %q", saved)
 	}
 }
 

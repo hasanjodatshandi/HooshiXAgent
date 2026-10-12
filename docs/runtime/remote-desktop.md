@@ -85,6 +85,18 @@ The accepted two-machine run is recorded in
    one-time credential and the window is often shared or screenshotted — but the
    app keeps it in memory, so **Disconnect → Connect** needs no re-paste. A
    Connect that fails leaves the pasted bundle in place so you can correct it.
+   A successful Connect also stores the bundle in `hooshix-connect.cfg`, written
+   beside `hooshix-connect.exe`. The next run reads it and opens **without the
+   paste area at all**: the window is shorter, and its only bundle control is the
+   **Use a different bundle (last saved YYYY-MM-DD)** button, which brings the
+   input back when you want to paste a new grant. The file holds the bundle
+   protected with the current Windows user's credential (DPAPI), so it is not a
+   readable secret and it does not open on another account or machine — copying
+   it next to another user's `hooshix-connect.exe` saves nothing. Delete
+   `hooshix-connect.cfg` to forget the saved bundle; the paste area returns on
+   the next run. A file the app cannot open (a copied or corrupt cfg) never
+   hides the input: the window opens normally, says why once after it paints,
+   and the next successful Connect overwrites the file.
    The message line follows the tunnel: it appends `— 1 client connected` while
    a client is attached, and `Last client ended: …` after one drops. That is the
    difference between a port nobody dialed and a session that died, which the
@@ -272,6 +284,8 @@ proves the full path even if you do not complete a login.
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
 | Connect succeeds but no Remote Desktop window ever appears — no taskbar button, Alt+Tab does not list it, and it flashes into view only after Disconnect | a `hooshix-connect.exe` built before this fix started `mstsc` with `SW_HIDE`, which the client honours for its main window | rebuild or re-download `hooshix-connect.exe`; the window is now created normally |
+| HooshiX Connect opens with no *Connect bundle* input at all | an earlier Connect saved `hooshix-connect.cfg` beside the exe, for this Windows account | press **Use a different bundle** to paste another, or delete the cfg to forget the saved one |
+| HooshiX Connect says the saved bundle was written for a different Windows account or machine | `hooshix-connect.cfg` was copied from another profile or computer, so DPAPI cannot open it | paste the bundle once more; the next successful Connect rewrites the cfg for this account, and the paste area stays available until then |
 | **Open Remote Desktop** is greyed out while the status still says `listening` | a client is already attached to this tunnel, and a second window would steal the machine's one interactive session | work in the window you have; press Disconnect to free the tunnel and start a single new client |
 | The session connects, then dies and reconnects every few seconds | two RDP clients competing for one session — the target's event log shows two `261` events about a second apart per attempt | keep exactly one client attached, including VPN/Tailscale windows |
 | Login screen appears, credentials pass, then Windows refuses with "another user is already connected" | the Agent machine has a console user signed in and its Windows client SKU allows only one interactive session — arbitration keeps the `LOCAL` session | sign the console user **out** (lock is not enough), verify with `query user`; see *One interactive session at a time* |
