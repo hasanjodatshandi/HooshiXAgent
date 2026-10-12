@@ -38,6 +38,8 @@ The accepted two-machine run is recorded in
   (System Properties → Remote → *Allow remote connections to this computer*),
   and the account you log in with has RDP permission. Until this is true the
   tunnel works and RDP does not.
+- **Nobody is signed in at that machine's console.** Windows client SKUs permit
+  only one interactive session; see *One interactive session at a time* below.
 - `hooshix-connect.exe` on the machine you connect **from**. It is not installed
   by `Setup.exe`; download it from the Panel (`/download/hooshix-connect.exe`) or
   build it with `powershell -File scripts\build-connect.ps1`. The command-line
@@ -99,6 +101,53 @@ The accepted two-machine run is recorded in
    an enterprise-trusted RDP certificate is a deployment policy task, not part
    of the tunnel.
 
+## One interactive session at a time
+
+HooshiX delivers the login; Windows decides whether it wins a session. On a
+**Windows client SKU** (Home, Pro, Pro for Workstations) the licence allows one
+interactive session on the machine at a time, console or Remote Desktop, and
+`fSingleSessionPerUser=1` additionally allows that account only one session. So
+when somebody is signed in at the console of the Agent machine, a remote user who
+passes the credential prompt is still refused, and Windows words it as *another
+user is already connected* — the message is misleading: it is the **console**
+user on that machine, not another remote client.
+
+The target's own event log records it exactly. In
+`Microsoft-Windows-TerminalServices-LocalSessionManager` the attempt shows the
+arbitration for the new session, its immediate loss, and the console restored:
+
+```
+id 41  Begin session arbitration:  User: <account>  Session ID: 3
+id 40  Session 3 has been disconnected, reason code 0
+id 40  Session 1 has been disconnected, reason code 5
+id 25  Session reconnection succeeded: User: <account> Session ID: 1  Source Network Address: LOCAL
+id 42  End session arbitration:      User: <account>  Session ID: 3
+```
+
+`Source Network Address: LOCAL` on the winner is the tell — the console kept the
+single slot. The tunnel did its job: `RemoteConnectionManager` id `1149 User
+authentication succeeded` on an earlier attempt from the same bundle proves the
+bytes reached `127.0.0.1:3389` and Windows authenticated them.
+
+What to do:
+
+- **Sign the console user out** on the Agent machine (account → *Sign out*).
+  Locking or disconnecting does **not** free the slot. Check first with
+  `query user`: it must show no active session before the remote client connects.
+- Connecting with the *same* account as the console user does not help either —
+  arbitration still returns the session to `LOCAL` while the console is logged on.
+- Genuine concurrent remote + local sessions require Windows Server with RDS
+  CALs. Do **not** patch `termsrv.dll`: it voids the licence, breaks servicing,
+  and HooshiX does not support or troubleshoot patched hosts.
+
+This page's own scope explains why nothing in the product fixes it: the Agent
+never touches `fDenyTSConnections` or session arbitration
+(`docs/adr/ADR-0017-private-connector-tcp-and-rdp.md`). Known gap, reported not
+fixed: the Panel's *Remote Desktop ready* affordance checks that remote
+connections are enabled and the mapping exists — it cannot see whether the single
+interactive slot is occupied, so it can read green while Windows refuses the
+login.
+
 ## Test without a second machine
 
 The in-process acceptance test exercises Connector → Gateway → Agent with an
@@ -141,6 +190,7 @@ proves the full path even if you do not complete a login.
 | `HTTP 401` at connect time | grant revoked, expired, wrong `grant_id`/`token_id`, or endpoint disabled | issue a new grant against the enabled endpoint |
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
+| Login screen appears, credentials pass, then Windows refuses with "another user is already connected" | the Agent machine has a console user signed in and its Windows client SKU allows only one interactive session — arbitration keeps the `LOCAL` session | sign the console user **out** (lock is not enough), verify with `query user`; see *One interactive session at a time* |
 | Flow drops mid-session | TTL expiry, revoke, endpoint remap, service restart, or the per-grant/device/global budgets | re-issue a grant; a lost flow is re-established as a new connection, never resumed |
 | TLS failure to the Gateway host | `edge` not published yet on that network, or an expired public certificate | confirm `Resolve-DnsName edge.hooshix-agent.ir` returns the Gateway IP, then let Caddy renew |
 
