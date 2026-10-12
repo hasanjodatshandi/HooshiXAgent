@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -593,6 +594,62 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestRollbackInstallationReregistersAServiceTheFailedInstallRemoved covers the
+// shape an upgrade actually hit: `service install` deletes the old registration
+// before creating the new one, so when the create is refused by SCM the rollback
+// has nothing left to start. Starting alone would have left the machine with no
+// Agent service at all — a device that can never be reached again.
+func TestRollbackInstallationReregistersAServiceTheFailedInstallRemoved(t *testing.T) {
+	previousCommand, previousInstallDir := agentCommand, installDir
+	t.Cleanup(func() { agentCommand, installDir = previousCommand, previousInstallDir })
+
+	var calls []string
+	binaryAtInstall := ""
+	agentCommand = func(args ...string) (string, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "service status":
+			// The registration this run deleted is gone from SCM.
+			return "", errors.New("exit status 1")
+		case "service install":
+			stored, err := os.ReadFile(filepath.Join(installDir, agentBinary))
+			if err != nil {
+				return "", err
+			}
+			binaryAtInstall = string(stored)
+		}
+		return "", nil
+	}
+
+	root := t.TempDir()
+	installDir = root
+	agent := filepath.Join(root, agentBinary)
+	backup := agent + ".previous"
+	if err := os.WriteFile(agent, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollbackInstallation(map[string]string{agent: backup}, true)
+	if binaryAtInstall != "old" {
+		t.Fatalf("the service was re-registered against %q, want the restored previous build", binaryAtInstall)
+	}
+	for index, command := range calls {
+		if command == "service start" && !containsString(calls[:index], "service install") {
+			t.Fatalf("rollback started a service that was never registered, calls=%v", calls)
+		}
+	}
+	if !containsString(calls, "service install") || !containsString(calls, "service start") {
+		t.Fatalf("rollback did not re-register and restart, calls=%v", calls)
+	}
+	if containsString(calls, "service uninstall") {
+		t.Fatal("rollback removed a registration the restored build still needs")
+	}
 }
 
 // TestXMLEscapeProtectsTheTaskDefinition proves interpolated user and path

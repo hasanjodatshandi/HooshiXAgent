@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -421,5 +422,67 @@ func TestResolveServiceStateDirPrefersTheExplicitDirectory(t *testing.T) {
 		if got := resolveServiceStateDir(blank); !strings.HasPrefix(got, StateDir()) {
 			t.Fatalf("resolveServiceStateDir(%q)=%q want the service directory %q", blank, got, StateDir())
 		}
+	}
+}
+
+// TestServiceRemovedOnlyAcceptsTheGoneRecord proves the recreate decision is
+// driven by the record being absent, not by OpenService failing at all. A
+// service SCM has marked for deletion also fails to open, and that is exactly
+// the moment CreateService would be refused.
+func TestServiceRemovedOnlyAcceptsTheGoneRecord(t *testing.T) {
+	if serviceRemoved(nil) {
+		t.Fatal("an openable service was reported as removed")
+	}
+	if serviceRemoved(windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+		t.Fatal("a service still being deleted was reported as removed")
+	}
+	if !serviceRemoved(windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		t.Fatal("a dropped registration was not reported as removed")
+	}
+	if serviceRemoved(windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("an unrelated failure was reported as removed")
+	}
+}
+
+// TestAwaitRemovedWaitsForTheOldProcessToReleaseTheRecord covers the real
+// upgrade race: the stopped Agent still holds its SCM handle for a moment, so
+// the first probes fail, and the name only frees once that process is gone.
+func TestAwaitRemovedWaitsForTheOldProcessToReleaseTheRecord(t *testing.T) {
+	budget, pause := scmRemovalBudget, scmRemovalPause
+	scmRemovalBudget, scmRemovalPause = 2*time.Second, 10*time.Millisecond
+	t.Cleanup(func() { scmRemovalBudget, scmRemovalPause = budget, pause })
+
+	probes := []error{windows.ERROR_SERVICE_MARKED_FOR_DELETE, nil, windows.ERROR_SERVICE_MARKED_FOR_DELETE, windows.ERROR_SERVICE_DOES_NOT_EXIST}
+	calls := 0
+	if err := awaitRemoved(func() error {
+		err := probes[calls]
+		calls++
+		return err
+	}); err != nil {
+		t.Fatalf("awaitRemoved gave up on a removal that completes: %v", err)
+	}
+	if calls != len(probes) {
+		t.Fatalf("probes=%d want %d — the wait must not stop at the first failure", calls, len(probes))
+	}
+}
+
+// TestAwaitRemovedReportsAStuckRemovalHonestly keeps a deletion that never
+// finishes from being mistaken for a free name.
+func TestAwaitRemovedReportsAStuckRemovalHonestly(t *testing.T) {
+	budget, pause := scmRemovalBudget, scmRemovalPause
+	scmRemovalBudget, scmRemovalPause = 120*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { scmRemovalBudget, scmRemovalPause = budget, pause })
+
+	err := awaitRemoved(func() error { return windows.ERROR_SERVICE_MARKED_FOR_DELETE })
+	if err == nil {
+		t.Fatal("a removal that never finished was reported as done")
+	}
+	if !strings.Contains(err.Error(), "still being removed by SCM") {
+		t.Fatalf("error does not name the real condition: %q", err)
+	}
+
+	stillOpen := awaitRemoved(func() error { return nil })
+	if stillOpen == nil || !strings.Contains(stillOpen.Error(), "still registered") {
+		t.Fatalf("a service that stayed openable was not reported as still registered: %v", stillOpen)
 	}
 }

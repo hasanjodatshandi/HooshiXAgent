@@ -628,6 +628,18 @@ func rollbackInstallation(backups map[string]string, replacing bool) {
 	}
 	rollbackFiles(backups)
 	if replacing {
+		// `service install` removes the previous registration before it creates
+		// the replacement, so a failure inside that step leaves a restored
+		// binary and no service at all: re-register it. Starting alone would
+		// have failed with "does not exist" and cost the operator their tunnel.
+		if !serviceRegistrationPresent() {
+			if err := runAgentCommand("service", "install"); err != nil {
+				fmt.Println("note: rollback could not re-register the previous Agent service:", err)
+				fmt.Println("        re-run HooshiXAgent-Setup.exe, or register it with:",
+					filepath.Join(installDir, agentBinary), "service install")
+				return
+			}
+		}
 		// The previous build is back in place, so put it running again: a failed
 		// upgrade must not also cost the operator their tunnel.
 		if err := runAgentCommand("service", "start"); err != nil {
@@ -635,6 +647,15 @@ func rollbackInstallation(backups map[string]string, replacing bool) {
 			fmt.Println("        start it with: sc start", agent.WindowsServiceName)
 		}
 	}
+}
+
+// serviceRegistrationPresent asks the installed binary for the service state,
+// which it can only read from SCM when the registration exists. A rollback uses
+// it to tell "still registered, just failing" from "this run destroyed the
+// registration and must put it back".
+func serviceRegistrationPresent() bool {
+	_, err := runAgentCommandOutput("service", "status")
+	return err == nil
 }
 
 func rollbackFiles(backups map[string]string) {

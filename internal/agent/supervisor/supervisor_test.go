@@ -166,11 +166,29 @@ func TestTerminalFailureWaitsForStateRecovery(t *testing.T) {
 	// Re-pair: rewrite the configuration until the supervisor notices. The
 	// writes are repeated because the supervisor snapshots the fingerprint
 	// right after publishing the terminal status; every write differs from any
-	// snapshot, so one of them is observed.
+	// snapshot, so one of them is observed. The writer is stopped and joined
+	// before this test returns: it otherwise keeps writing for the rest of its
+	// forty rounds, and t.TempDir removes the directory underneath it.
+	stopRepairs := make(chan struct{})
+	repairsDone := make(chan struct{})
+	t.Cleanup(func() {
+		close(stopRepairs)
+		<-repairsDone
+	})
 	go func() {
+		defer close(repairsDone)
 		for attempt := 0; attempt < 40; attempt++ {
+			select {
+			case <-stopRepairs:
+				return
+			default:
+			}
 			validConfig(t, stateDir, fmt.Sprintf("device-after-%06d", attempt))
-			time.Sleep(400 * time.Millisecond)
+			select {
+			case <-stopRepairs:
+				return
+			case <-time.After(400 * time.Millisecond):
+			}
 		}
 	}()
 	waitFor(t, 10*time.Second, func() bool { return loop.callCount() >= 2 },

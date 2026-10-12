@@ -352,6 +352,15 @@ func Install(execPath string) error {
 	}
 	defer manager.Disconnect()
 
+	openRegistered := func() error {
+		service, err := manager.OpenService(ServiceName)
+		if err != nil {
+			return err
+		}
+		service.Close()
+		return nil
+	}
+
 	if existing, openErr := manager.OpenService(ServiceName); openErr == nil {
 		if status, queryErr := existing.Query(); queryErr == nil && status.State != svc.Stopped {
 			_, _ = existing.Control(svc.Stop)
@@ -362,13 +371,9 @@ func Install(execPath string) error {
 			return fmt.Errorf("replace existing service: delete: %w", deleteErr)
 		}
 		existing.Close()
-		// Wait for SCM to fully release the mark before recreating.
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, openErr := manager.OpenService(ServiceName); openErr != nil {
-				break
-			}
-			time.Sleep(300 * time.Millisecond)
+		// Wait for SCM to actually drop the record before recreating.
+		if err := awaitRemoved(openRegistered); err != nil {
+			return fmt.Errorf("replace existing service: %w", err)
 		}
 	}
 
@@ -391,6 +396,46 @@ func Install(execPath string) error {
 		return fmt.Errorf("grant start/stop rights: %w", err)
 	}
 	return nil
+}
+
+// SCM removes a deleted service only once the last handle to it closes, and the
+// process that has one is the service itself: an in-place upgrade stops it and
+// then races its exit. Budget is how long a replacement waits for that, and
+// pause how often it asks. They are vars so a test can watch a whole timeout
+// elapse without waiting for one.
+var (
+	scmRemovalBudget = 10 * time.Second
+	scmRemovalPause  = 200 * time.Millisecond
+)
+
+// serviceRemoved reports whether an OpenService result means the name is free
+// again. Every other error means the opposite: a service marked for deletion
+// still fails to open, with ERROR_SERVICE_MARKED_FOR_DELETE, and creating the
+// replacement at that moment is refused with the same code. Treating any open
+// failure as "gone" is what made an upgrade recreate a service that SCM had not
+// finished removing, fail, and roll back onto a registration it had already
+// destroyed.
+func serviceRemoved(err error) bool {
+	return err != nil && errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST)
+}
+
+// awaitRemoved polls open until SCM has really dropped the registration or the
+// budget runs out, reporting the last state it saw.
+func awaitRemoved(open func() error) error {
+	deadline := time.Now().Add(scmRemovalBudget)
+	for {
+		err := open()
+		if serviceRemoved(err) {
+			return nil
+		}
+		if !time.Now().Add(scmRemovalPause).Before(deadline) {
+			if err == nil {
+				return fmt.Errorf("%s is still registered while being replaced — close the process holding it and run setup again", ServiceName)
+			}
+			return fmt.Errorf("%s is still being removed by SCM: %w — close the process holding it and run setup again", ServiceName, err)
+		}
+		time.Sleep(scmRemovalPause)
+	}
 }
 
 // Uninstall stops and removes the service. It is idempotent: a service that is
