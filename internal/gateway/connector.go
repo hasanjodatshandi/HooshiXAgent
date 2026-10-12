@@ -97,29 +97,97 @@ func (gateway *Gateway) handleConnector(response http.ResponseWriter, request *h
 	}
 	defer stream.discardRetained()
 	defer sess.closeStream(stream.id, "cancelled")
+	audit := connectorFlowAudit{
+		gateway: gateway, grantID: grant.GrantID, endpointID: endpoint.EndpointID,
+		deviceID: sess.deviceID, protocol: string(endpoint.Protocol), streamID: stream.id,
+		started: time.Now(),
+	}
+	audit.open()
 	if endpoint.Protocol == contractv2.ProtocolUDP {
 		toConnector := make(chan error, 1)
 		go func() { toConnector <- gateway.writeConnectorUDP(ctx, conn, stream) }()
-		_ = gateway.readConnectorUDP(ctx, conn, sess, stream.id)
+		readErr := gateway.readConnectorUDP(ctx, conn, sess, stream.id)
 		cancel()
-		<-toConnector
+		writeErr := <-toConnector
 		_ = conn.Close(websocket.StatusNormalClosure, "connector UDP flow complete")
+		audit.finish(firstConnectorError(readErr, writeErr))
 		return
 	}
 
 	toConnector := make(chan error, 1)
 	go func() { toConnector <- gateway.writeConnector(ctx, conn, stream) }()
 	readErr := gateway.readConnector(ctx, conn, sess, stream.id)
+	writeErr := error(nil)
 	if readErr == nil {
 		select {
-		case <-toConnector:
+		case writeErr = <-toConnector:
 		case <-time.After(gateway.limits.IdleTimeout):
+			// The read side finished but the writer never came back, which is a
+			// stalled gateway leg, not a completed flow. Saying so is the only way
+			// this shows up in the journal at all.
+			writeErr = errors.New("connector writer still open after the idle timeout")
 		}
 	} else {
 		cancel()
-		<-toConnector
+		writeErr = <-toConnector
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "connector flow complete")
+	audit.finish(firstConnectorError(readErr, writeErr))
+}
+
+// connectorFlowAudit is the Gateway-side record of one tunnelled flow. During an
+// RDP incident the question is whether the flow ever reached the Gateway, how
+// long it carried data, and which side ended it; before this pair the Gateway
+// journal was silent about connector traffic. Grant and endpoint IDs identify a
+// purpose, and the bearer token never reaches a log line.
+type connectorFlowAudit struct {
+	gateway    *Gateway
+	grantID    string
+	endpointID string
+	deviceID   string
+	protocol   string
+	streamID   uint32
+	started    time.Time
+}
+
+func (audit connectorFlowAudit) open() {
+	audit.gateway.logger.Info("connector flow open",
+		"grant_id", audit.grantID, "endpoint_id", audit.endpointID, "device_id", audit.deviceID,
+		"protocol", audit.protocol, "stream_id", audit.streamID,
+	)
+}
+
+func (audit connectorFlowAudit) finish(cause error) {
+	fields := []any{
+		"grant_id", audit.grantID, "endpoint_id", audit.endpointID, "device_id", audit.deviceID,
+		"protocol", audit.protocol, "stream_id", audit.streamID,
+		"duration", time.Since(audit.started).Round(time.Millisecond),
+	}
+	if endedNormally(cause) {
+		audit.gateway.logger.Info("connector flow closed", fields...)
+		return
+	}
+	audit.gateway.logger.Warn("connector flow closed", append(fields, "error", cause)...)
+}
+
+// endedNormally separates a flow that finished its purpose from one that broke:
+// a public client hanging up arrives as a normal close or a cancellation, and
+// only that.
+func endedNormally(cause error) bool {
+	if cause == nil || errors.Is(cause, io.EOF) || errors.Is(cause, context.Canceled) {
+		return true
+	}
+	return websocket.CloseStatus(cause) == websocket.StatusNormalClosure
+}
+
+// firstConnectorError reports the cause a two-sided copy ended with. The read
+// side is the honest one: a write failure usually follows the peer going away
+// rather than causing it.
+func firstConnectorError(readErr, writeErr error) error {
+	if readErr != nil {
+		return readErr
+	}
+	return writeErr
 }
 
 func (gateway *Gateway) readConnectorUDP(parent context.Context, conn *websocket.Conn, sess *session, streamID uint32) error {

@@ -470,11 +470,16 @@ func (stream *agentStream) finishStream() {
 }
 
 func (sess *agentSession) serveStream(stream *agentStream) {
+	// The open/finished pair is what an operator reads to tell "the Gateway never
+	// routed a flow here" apart from "a flow arrived and the local target refused
+	// or dropped it". At Debug the Agent's own log level hides both, and an RDP
+	// complaint has nothing to check the local side against.
+	started := time.Now()
+	sess.logger.Info("stream open", "stream_id", stream.id, "endpoint_id", stream.endpoint.ID, "target", stream.endpoint.Target, "mode", stream.mode)
 	if stream.mode == "udp" {
-		sess.serveUDPStream(stream)
+		sess.serveUDPStream(stream, started)
 		return
 	}
-	sess.logger.Debug("stream open", "stream_id", stream.id, "endpoint_id", stream.endpoint.ID, "target", stream.endpoint.Target)
 	conn, err := DialLocalTarget(stream.ctx, stream.endpoint.Target, sess.limits.DialTimeout)
 	if err != nil {
 		sess.logger.Warn("stream dial failed", "stream_id", stream.id, "error", err)
@@ -558,9 +563,11 @@ readLoop:
 		case <-time.After(sess.limits.WriteTimeout):
 		}
 	}
+	outcome := "peer_closed"
 	if !peerClosed {
 		switch {
 		case sendErr != nil:
+			outcome = "send_failed"
 			// A failed tunnel write means the response was truncated, so this
 			// stream must NOT be reported as stream_close "completed": the
 			// Gateway would serve the short body as a complete one and the
@@ -569,8 +576,10 @@ readLoop:
 			// retryable is false because part of the body was already delivered.
 			_ = sess.sendStreamTerminalError(stream, "internal_error", "tunneled stream send failed", false)
 		case localReadErr == nil:
+			outcome = "completed"
 			_ = sess.sendStreamTerminalClose(stream, "completed")
 		default:
+			outcome = "local_error"
 			// The contract restricts stream_error codes to a fixed enum
 			// (contracts/v1/tunnel-control.schema.json): local_target_unavailable,
 			// route_revoked, protocol_error, resource_limit, internal_error. The
@@ -587,7 +596,14 @@ readLoop:
 			_ = sess.sendStreamTerminalError(stream, code, message, true)
 		}
 	}
-	sess.logger.Debug("stream finished", "stream_id", stream.id, "peer_closed", peerClosed, "bytes_sent", sent, "chunks", chunks)
+	sess.logger.Info("stream finished",
+		"stream_id", stream.id,
+		"endpoint_id", stream.endpoint.ID,
+		"outcome", outcome,
+		"duration", time.Since(started).Round(time.Millisecond),
+		"bytes_sent", sent,
+		"chunks", chunks,
+	)
 	sess.finishStream(stream.id)
 }
 

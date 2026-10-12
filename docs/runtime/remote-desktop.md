@@ -73,12 +73,22 @@ The accepted two-machine run is recorded in
    again. Copy the bundle.
 4. **Client — HooshiX Connect.** Start `hooshix-connect.exe`, paste the bundle
    into *Connect bundle*, press **Connect**. The status line becomes
-   `listening on 127.0.0.1:13389 (tcp)` and **Open Remote Desktop** turns on;
-   press it to start `mstsc /v:127.0.0.1:13389`. **Disconnect** closes the
-   listener, and closing the window disconnects first and then exits, so no
-   background process is left holding the port.
+   `listening on 127.0.0.1:13389 (tcp)` and the message line reads
+   `tunnel ready — open your client against 127.0.0.1:13389`; **Open Remote
+   Desktop** turns on. Press it **once** — it starts `mstsc /v:127.0.0.1:13389`
+   as a normal, visible window. **Disconnect** closes the listener, and closing
+   the window disconnects first and then exits, so no background process is left
+   holding the port.
    The bundle deliberately carries no local listen address, so the app always
    picks `127.0.0.1:13389`; use the CLI below when you want a different port.
+   A successful Connect erases the bundle from the edit control — it is a
+   one-time credential and the window is often shared or screenshotted — but the
+   app keeps it in memory, so **Disconnect → Connect** needs no re-paste. A
+   Connect that fails leaves the pasted bundle in place so you can correct it.
+   The message line follows the tunnel: it appends `— 1 client connected` while
+   a client is attached, and `Last client ended: …` after one drops. That is the
+   difference between a port nobody dialed and a session that died, which the
+   listener state alone cannot show.
    `Status: listening` means the loopback socket is ready — the Gateway checks
    the grant on the first client connection, so an expired or revoked bundle
    shows up as `connector flow ended: … HTTP 401` in the message line when you
@@ -147,6 +157,14 @@ What to do:
   session` shows it: the account sits on `rdp-tcp#N` in state `Active` while
   `console` has no user. Only one client can be attached at a time, so the
   second client's reconnect also steals the session back from the first.
+- **Open one Remote Desktop window per tunnel, not two.** A third shape of the
+  same wall: two `mstsc` windows against the same loopback listener make Windows
+  arbitrate the single session back and forth, which looks like a session that
+  dies and reconnects every few seconds. `HooshiX Connect` now disables **Open
+  Remote Desktop** while a client is attached, precisely so this cannot be
+  reached by clicking twice. Count the `261` events of one attempt to tell it
+  apart: one `Listener RDP-Tcp received a connection` per attempt is stable, a
+  pair about a second apart means two clients are fighting over the session.
 - Genuine concurrent remote + local sessions require Windows Server with RDS
   CALs. Do **not** patch `termsrv.dll`: it voids the licence, breaks servicing,
   and HooshiX does not support or troubleshoot patched hosts.
@@ -186,6 +204,30 @@ fixed: the Panel's *Remote Desktop ready* affordance checks that remote
 connections are enabled and the mapping exists — it cannot see whether the single
 interactive slot is occupied, so it can read green while Windows refuses the
 login.
+
+## Where a flow is recorded
+
+Both ends log every tunnelled flow, so an RDP complaint can be settled without
+guessing which side dropped it.
+
+- **Gateway** (`journalctl -u hooshix-gateway`): `connector flow open`, then
+  `connector flow closed` with `grant_id`, `endpoint_id`, `device_id`,
+  `protocol`, `stream_id` and the flow `duration`. A closed flow logged at
+  `Warn` carries the `error` that ended it; a normal hang-up is `Info`.
+- **Agent machine** (`C:\ProgramData\HooshiXAgent\agent.log`): `stream open`
+  with `endpoint_id` and `target`, then `stream finished` with `outcome`
+  (`completed`, `peer_closed`, `local_error`, `send_failed`), `duration`,
+  `bytes_sent` and `chunks`. These lines are `Info`, so they reach the file —
+  while they were `Debug` the Agent's own log could not answer "did a flow ever
+  arrive".
+- **Client window**: the message line of `HooshiX Connect`, described in step 4.
+
+Read them in that order. No `connector flow open` on the Gateway means the
+Connector was never admitted — check the grant and the bundle. A `stream open`
+on the Agent whose next line is `stream dial failed` means the mapping could not
+reach its target at all, and one that ends `outcome=local_error` means the flow
+reached the machine and `127.0.0.1:3389` refused it: Windows, not the tunnel.
+Neither log writes a token; only grant and endpoint IDs appear.
 
 ## Test without a second machine
 
@@ -229,6 +271,9 @@ proves the full path even if you do not complete a login.
 | `HTTP 401` at connect time | grant revoked, expired, wrong `grant_id`/`token_id`, or endpoint disabled | issue a new grant against the enabled endpoint |
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
+| Connect succeeds but no Remote Desktop window ever appears — no taskbar button, Alt+Tab does not list it, and it flashes into view only after Disconnect | a `hooshix-connect.exe` built before this fix started `mstsc` with `SW_HIDE`, which the client honours for its main window | rebuild or re-download `hooshix-connect.exe`; the window is now created normally |
+| **Open Remote Desktop** is greyed out while the status still says `listening` | a client is already attached to this tunnel, and a second window would steal the machine's one interactive session | work in the window you have; press Disconnect to free the tunnel and start a single new client |
+| The session connects, then dies and reconnects every few seconds | two RDP clients competing for one session — the target's event log shows two `261` events about a second apart per attempt | keep exactly one client attached, including VPN/Tailscale windows |
 | Login screen appears, credentials pass, then Windows refuses with "another user is already connected" | the Agent machine has a console user signed in and its Windows client SKU allows only one interactive session — arbitration keeps the `LOCAL` session | sign the console user **out** (lock is not enough), verify with `query user`; see *One interactive session at a time* |
 | `mstsc` never shows a login prompt: "This computer can't connect to the remote computer", error `0x904` extended `0x7`, while HooshiX Connect still reads `tunnel ready` | the target's listener took the connection (`261`) and refused it before authentication (`1149` missing) because another RDP client is already attached to that account's session | close/disconnect the other RDP client (VPN or Tailscale window), then reconnect through HooshiX; confirm with the `261`/`1149` table in *Telling "the tunnel failed" from "Windows refused"* |
 | Flow drops mid-session | TTL expiry, revoke, endpoint remap, service restart, or the per-grant/device/global budgets | re-issue a grant; a lost flow is re-established as a new connection, never resumed |

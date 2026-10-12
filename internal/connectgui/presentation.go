@@ -18,12 +18,17 @@ type Buttons struct {
 //
 // UDP never enables the Remote Desktop button: mstsc speaks TCP, and a tunnel
 // that cannot carry the client the button launches must not offer it.
+//
+// The button also goes away while a client is already attached. A second
+// Remote Desktop window against the same tunnel makes Windows arbitrate its one
+// interactive session away from the first, which the operator experiences as a
+// session that dies and reconnects every few seconds.
 func ButtonsFor(status Status, disconnecting bool) Buttons {
 	live := status.State == StateListening && !disconnecting
 	return Buttons{
 		Connect:    status.State != StateListening && !disconnecting,
 		Disconnect: live,
-		OpenClient: live && status.Protocol == "tcp",
+		OpenClient: live && status.Protocol == "tcp" && status.Flows == 0,
 	}
 }
 

@@ -185,7 +185,7 @@ func TestFlowWarningUpdatesMessageWithoutEndingSession(t *testing.T) {
 	}
 	defer app.Disconnect()
 
-	slog.New(&statusHandler{app: app}).
+	slog.New(&statusHandler{app: app, session: app.sessionID()}).
 		Warn("connector flow ended", "error", "connector gateway rejected connection: HTTP 401")
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -201,6 +201,82 @@ func TestFlowWarningUpdatesMessageWithoutEndingSession(t *testing.T) {
 			t.Fatalf("flow warning never reached the status: %+v", status)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestFlowCountSeparatesAnIdleTunnelFromAnAttachedClient: before this count
+// existed, "nobody dialed the port" and "a client dialed and dropped" looked
+// identical in the window, which is what sent an operator clicking Connect again.
+func TestFlowCountSeparatesAnIdleTunnelFromAnAttachedClient(t *testing.T) {
+	app := newEphemeralApp()
+	if err := app.Connect(bundleFor(t, "tcp")); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Disconnect()
+	session := app.sessionID()
+
+	status := app.Status()
+	if status.Flows != 0 || !strings.Contains(status.Message, "tunnel ready") {
+		t.Fatalf("idle tunnel: %+v", status)
+	}
+	if strings.Contains(status.Message, "connected") {
+		t.Fatalf("an idle tunnel claims a client: %+v", status.Message)
+	}
+
+	app.noteFlows(session, 1)
+	status = app.Status()
+	if status.Flows != 1 || !strings.Contains(status.Message, "1 client connected") {
+		t.Fatalf("one client: %+v", status)
+	}
+	if ButtonsFor(status, false).OpenClient {
+		t.Error("the second-client button stayed live while one was attached")
+	}
+
+	app.noteFlows(session, 3)
+	if status := app.Status(); !strings.Contains(status.Message, "3 clients connected") {
+		t.Fatalf("three clients: %+v", status.Message)
+	}
+
+	app.noteFlows(session, 0)
+	if status := app.Status(); status.Flows != 0 || strings.Contains(status.Message, "connected") {
+		t.Fatalf("detached clients: %+v", status)
+	}
+
+	app.recordFlowEvent(session, "connection reset by peer")
+	if status := app.Status(); !strings.Contains(status.Message, "Last client ended: connection reset by peer") {
+		t.Fatalf("flow failure lost from the message: %+v", status.Message)
+	}
+	app.noteFlows(session, 1)
+	if status := app.Status(); strings.Contains(status.Message, "Last client ended") {
+		t.Fatalf("a live client still reports the previous one's failure: %+v", status.Message)
+	}
+}
+
+// TestFlowReportsFromAReplacedSessionAreDropped: Serve returns while its flow
+// goroutines are still finishing, so their counts belong to a listener that no
+// longer exists and must not be painted onto the next session.
+func TestFlowReportsFromAReplacedSessionAreDropped(t *testing.T) {
+	app := newEphemeralApp()
+	if err := app.Connect(bundleFor(t, "tcp")); err != nil {
+		t.Fatal(err)
+	}
+	stale := app.sessionID()
+	app.Disconnect()
+
+	if err := app.Connect(bundleFor(t, "tcp")); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Disconnect()
+
+	app.noteFlows(stale, 2)
+	app.recordFlowEvent(stale, "connector flow ended: stale session")
+	status := app.Status()
+	if status.Flows != 0 || strings.Contains(status.Message, "stale") {
+		t.Fatalf("a replaced session rewrote the live status: %+v", status)
+	}
+	app.noteFlows(app.sessionID(), 1)
+	if status := app.Status(); status.Flows != 1 {
+		t.Fatalf("the live session stopped being reported: %+v", status)
 	}
 }
 

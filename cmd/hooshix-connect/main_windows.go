@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -57,7 +58,7 @@ const (
 
 	// The layout is authored at 96 DPI and scaled by the window DPI.
 	clientWidth   = 560
-	clientHeight  = 316
+	clientHeight  = 336
 	fontHeightDIP = 9 // Segoe UI point size
 )
 
@@ -120,7 +121,7 @@ func specs() []spec {
 		{idOpenRDP, "BUTTON", "Open Remote Desktop", wsChild | wsVisible, 276, 164, 190, 30},
 		{idStatusLabel, "STATIC", "Status: idle", wsChild | wsVisible, 16, 212, clientWidth - 32, 20},
 		{idMessageLabel, "STATIC", "", wsChild | wsVisible, 16, 236, clientWidth - 32, 44},
-		{idHint, "STATIC", "The grant's own lifetime controls this tunnel. Closing this window ends it.", wsChild | wsVisible, 16, 286, clientWidth - 32, 20},
+		{idHint, "STATIC", "One Remote Desktop client at a time: a second window steals the session, and Windows then reconnects the first. The grant's own lifetime controls this tunnel. Closing this window ends it.", wsChild | wsVisible, 16, 286, clientWidth - 32, 44},
 	}
 }
 
@@ -144,6 +145,12 @@ type host struct {
 	// nothing does not repaint the statics, which visibly flickers.
 	lastStatus string
 	lastLabel  string
+
+	// bundle is the last connect bundle that started a session. The edit control
+	// is cleared after a successful Connect so a live connector credential stops
+	// sitting in a window the operator leaves open or records; the value stays
+	// here so a reconnect after Disconnect needs no re-paste.
+	bundle string
 }
 
 func main() {
@@ -413,15 +420,23 @@ func (host *host) render(status connectgui.Status) {
 func (host *host) command(id int) {
 	switch id {
 	case idConnect:
-		bundle, err := host.bundleText()
+		pasted, err := host.bundleText()
+		if err != nil {
+			host.warn(err)
+			return
+		}
+		bundle, err := launchBundle(pasted, host.bundle)
 		if err != nil {
 			host.warn(err)
 			return
 		}
 		// App.Connect records its own failure into the snapshot, so re-rendering
-		// the status is enough to show the reason; the returned error is the same
-		// value the operator would otherwise have to dig out of a log.
-		_ = host.app.Connect(bundle)
+		// the status is enough to show the reason; the returned error is only used
+		// to decide whether the pasted credential is safe to erase from the edit.
+		if err := host.app.Connect(bundle); err == nil {
+			host.bundle = bundle
+			host.setText(idBundle, "")
+		}
 		host.render(host.app.Status())
 	case idDisconnect:
 		if host.disconnecting {
@@ -454,6 +469,28 @@ func (host *host) warn(err error) {
 	user32.NewProc("MessageBoxW").Call(uintptr(host.hwnd), uintptr(unsafe.Pointer(message)), uintptr(unsafe.Pointer(title)), mbIconWarning)
 }
 
+// remoteDesktopSpec is the launch request for the Remote Desktop client,
+// separated from starting it so a test can pin the exact command line and the
+// window behaviour without ever spawning mstsc.
+type remoteDesktopSpec struct {
+	path        string
+	args        []string
+	sysProcAttr *syscall.SysProcAttr
+}
+
+// newRemoteDesktopSpec builds that request. sysProcAttr is deliberately left
+// nil: a value with HideWindow set becomes STARTF_USESHOWWINDOW|SW_HIDE, and
+// mstsc honours it for its main window. The session then connects invisibly —
+// no window, no taskbar button, nothing in Alt+Tab — which reads as "the button
+// did nothing" and pushes the operator to click it again. A second client makes
+// Windows arbitrate its one interactive session away from the first.
+func newRemoteDesktopSpec(root, target string) remoteDesktopSpec {
+	return remoteDesktopSpec{
+		path: filepath.Join(root, "System32", "mstsc.exe"),
+		args: []string{"/v:" + target},
+	}
+}
+
 // launchRemoteDesktop starts mstsc against the tunnel's loopback endpoint. The
 // target comes from connectgui.RDPTarget, which has already proved it is a
 // loopback host:port, so no operator text reaches the command line.
@@ -462,16 +499,34 @@ func launchRemoteDesktop(target string) error {
 	if root == "" {
 		root = `C:\Windows`
 	}
-	path := filepath.Join(root, "System32", "mstsc.exe")
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("remote desktop client is not available at %s: %w", path, err)
+	spec := newRemoteDesktopSpec(root, target)
+	if _, err := os.Stat(spec.path); err != nil {
+		return fmt.Errorf("remote desktop client is not available at %s: %w", spec.path, err)
 	}
-	command := exec.Command(path, "/v:"+target)
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	command := exec.Command(spec.path, spec.args...)
+	command.SysProcAttr = spec.sysProcAttr
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start remote desktop: %w", err)
 	}
+	// Start() without Wait() leaves the child unreaped for as long as this app
+	// runs, which outlives mstsc. Nobody needs its exit status, so reap it in the
+	// background instead of blocking the message loop on a remote session.
+	go func() { _ = command.Wait() }()
 	return nil
+}
+
+// launchBundle chooses the credential for a session: what the edit control holds
+// now, otherwise the last bundle that opened a tunnel. A successful Connect
+// erases the edit so the bearer token stops being visible on screen, and this is
+// what keeps a reconnect after Disconnect from demanding a re-paste.
+func launchBundle(pasted, remembered string) (string, error) {
+	if pasted != "" {
+		return pasted, nil
+	}
+	if remembered != "" {
+		return remembered, nil
+	}
+	return "", errors.New("paste the connect bundle the Panel issued first")
 }
 
 func (host *host) bundleText() (string, error) {

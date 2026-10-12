@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -44,6 +45,13 @@ type Config struct {
 	// never carries it: the bundle says where to connect, the operator decides
 	// what to trust.
 	CAFile string
+	// OnFlow, when set, is told how many local client connections are being
+	// proxied right now. A listener that has never seen a client and one whose
+	// client died mid-handshake are otherwise indistinguishable from outside,
+	// which is exactly the case an operator has to tell apart. It is called
+	// from the accept loop and from every flow goroutine, so a receiver must
+	// be safe to call concurrently and must not block.
+	OnFlow func(active int)
 }
 
 func DefaultConfig() Config {
@@ -144,6 +152,14 @@ func (config Config) withCAClient() (Config, error) {
 	return config, nil
 }
 
+// reportFlows hands the live client-connection count to an observer that asked
+// for one. Observing must never break proxying, so a nil hook is a no-op.
+func (config Config) reportFlows(active int) {
+	if config.OnFlow != nil {
+		config.OnFlow(active)
+	}
+}
+
 func Serve(ctx context.Context, listener net.Listener, config Config, logger *slog.Logger) error {
 	if err := config.Validate(); err != nil {
 		return err
@@ -159,6 +175,7 @@ func Serve(ctx context.Context, listener net.Listener, config Config, logger *sl
 		_ = listener.Close()
 	}()
 	slots := make(chan struct{}, config.MaxConnections)
+	var live atomic.Int64
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -169,8 +186,12 @@ func Serve(ctx context.Context, listener net.Listener, config Config, logger *sl
 		}
 		select {
 		case slots <- struct{}{}:
+			config.reportFlows(int(live.Add(1)))
 			go func() {
-				defer func() { <-slots }()
+				defer func() {
+					config.reportFlows(int(live.Add(-1)))
+					<-slots
+				}()
 				defer conn.Close()
 				if err := proxy(ctx, conn, config); err != nil && ctx.Err() == nil {
 					logger.Warn("connector flow ended", "error", err)
@@ -205,7 +226,17 @@ func proxy(parent context.Context, local net.Conn, config Config) error {
 	remote.SetReadLimit(maxPayload + 1)
 
 	toRemote := make(chan error, 1)
-	go func() { toRemote <- copyToGateway(ctx, remote, local, config.WriteTimeout) }()
+	go func() {
+		err := copyToGateway(ctx, remote, local, config.WriteTimeout)
+		toRemote <- err
+		// A failed write means the gateway leg is unusable, and nothing else
+		// would notice until the read side hit IdleTimeout — five minutes of a
+		// dead client holding a connection slot. End the flow now.
+		if err != nil {
+			cancel()
+			_ = local.Close()
+		}
+	}()
 	fromRemote := copyFromGateway(ctx, remote, local, config)
 	if fromRemote != nil {
 		cancel()
@@ -213,6 +244,13 @@ func proxy(parent context.Context, local net.Conn, config Config) error {
 	}
 	toRemoteErr := <-toRemote
 	_ = remote.Close(websocket.StatusNormalClosure, "connector flow complete")
+	// The write goroutine above cancels the flow when its own write fails, so
+	// the read side then returns context.Canceled. That is a symptom: report
+	// the write error that caused it. A cancel from the parent is a real
+	// teardown, and there the read side's answer is the honest one.
+	if errors.Is(fromRemote, context.Canceled) && parent.Err() == nil && toRemoteErr != nil {
+		return toRemoteErr
+	}
 	if fromRemote != nil {
 		return fromRemote
 	}

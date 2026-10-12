@@ -53,7 +53,7 @@ func TestUDPStreamPreservesDatagramBoundaries(t *testing.T) {
 		logger: quietAgentLogger(), mode: "udp", peerHalfClose: make(chan struct{}),
 	}
 	sess.streams[1] = stream
-	go sess.serveUDPStream(stream)
+	go sess.serveUDPStream(stream, time.Now())
 	for _, packet := range [][]byte{[]byte("a"), []byte("bc")} {
 		if !stream.enqueue(packet) {
 			t.Fatal("failed to queue UDP datagram")

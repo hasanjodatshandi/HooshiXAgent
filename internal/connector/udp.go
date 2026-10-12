@@ -65,6 +65,7 @@ func ServeUDP(ctx context.Context, listener net.PacketConn, config Config, logge
 			flowCtx, cancel := context.WithCancel(runCtx)
 			flow = &udpFlow{packets: make(chan []byte, udpFlowQueue), cancel: cancel}
 			flows[key] = flow
+			config.reportFlows(len(flows))
 			go func() {
 				defer cancel()
 				if err := proxyUDP(flowCtx, listener, peer, flow.packets, config, &writeMu); err != nil && runCtx.Err() == nil {
@@ -73,6 +74,7 @@ func ServeUDP(ctx context.Context, listener net.PacketConn, config Config, logge
 				mu.Lock()
 				if flows[key] == flow {
 					delete(flows, key)
+					config.reportFlows(len(flows))
 				}
 				mu.Unlock()
 			}()

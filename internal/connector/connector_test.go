@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -98,6 +99,123 @@ func TestConnectorCarriesTCPAndPreservesHalfClose(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestFlowFreesItsSlotWhenTheGatewayStopsReading: a stalled gateway leg makes
+// the connector's write fail, and before the write error ended the flow nothing
+// noticed until IdleTimeout — by default five minutes of one dead client holding
+// the only slot, so the tunnel looks alive while refusing every new client.
+func TestFlowFreesItsSlotWhenTheGatewayStopsReading(t *testing.T) {
+	release := make(chan struct{})
+	warnings := make(chan string, 16)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		conn, err := websocket.Accept(response, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-release
+	}))
+	defer close(release)
+	defer server.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flows := make(chan int, 32)
+	config := DefaultConfig()
+	config.GatewayURL = "wss" + strings.TrimPrefix(server.URL, "https") + "/connector/v1/connect"
+	config.GrantID, config.TokenID, config.Token = "grant-1", "token-1", testToken()
+	config.ListenAddress = listener.Addr().String()
+	config.HTTPClient = server.Client()
+	config.MaxConnections = 1
+	config.WriteTimeout = 500 * time.Millisecond
+	config.IdleTimeout = 30 * time.Second
+	config.OnFlow = func(active int) {
+		select {
+		case flows <- active:
+		default:
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- Serve(ctx, listener, config, slog.New(&warningCollector{warnings: warnings})) }()
+
+	local, err := net.Dial("tcp", config.ListenAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitForFlow(t, flows, 1) {
+		t.Fatal("the first client was never counted")
+	}
+	go func() {
+		// Filling the gateway's receive window is what forces the write to fail.
+		_ = local.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		payload := make([]byte, 256<<10)
+		for index := 0; index < 128; index++ {
+			if _, err := local.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	if !waitForFlow(t, flows, 0) {
+		t.Fatal("the stalled flow never released its slot")
+	}
+	select {
+	case message := <-warnings:
+		if message != "connector flow ended" {
+			t.Errorf("unexpected warning: %q", message)
+		}
+	default:
+		t.Error("a stalled flow ended without an error the operator can see")
+	}
+
+	// The released slot must be usable again, which is the whole point.
+	second, err := net.Dial("tcp", config.ListenAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if !waitForFlow(t, flows, 1) {
+		t.Fatal("a new client was refused after the stalled flow ended")
+	}
+	cancel()
+	if err := <-serveDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForFlow(t *testing.T, flows chan int, want int) bool {
+	t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case active := <-flows:
+			if active == want {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// warningCollector keeps Serve's flow warnings observable to a test without a
+// log file.
+type warningCollector struct{ warnings chan string }
+
+func (c *warningCollector) Enabled(context.Context, slog.Level) bool { return true }
+func (c *warningCollector) Handle(_ context.Context, record slog.Record) error {
+	select {
+	case c.warnings <- record.Message:
+	default:
+	}
+	return nil
+}
+func (c *warningCollector) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *warningCollector) WithGroup(string) slog.Handler      { return c }
 
 func TestConfigRejectsPublicListenerAndInsecureGateway(t *testing.T) {
 	config := DefaultConfig()

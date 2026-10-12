@@ -14,9 +14,10 @@ import (
 // splitting a UDP datagram would silently change its meaning.
 const maxUDPDatagram = contractv1.MaxUDPDatagram
 
-func (sess *agentSession) serveUDPStream(stream *agentStream) {
+func (sess *agentSession) serveUDPStream(stream *agentStream, started time.Time) {
 	conn, err := DialLocalUDPTarget(stream.ctx, stream.endpoint.Target, sess.limits.DialTimeout)
 	if err != nil {
+		sess.logger.Warn("stream dial failed", "stream_id", stream.id, "error", err)
 		_ = sess.sendStreamTerminalError(stream, "local_target_unavailable", "approved local UDP target is unavailable", true)
 		sess.finishStream(stream.id)
 		return
@@ -65,12 +66,13 @@ func (sess *agentSession) serveUDPStream(stream *agentStream) {
 	_ = conn.Close()
 	writeErr := <-writerDone
 	if peerClosed {
-		sess.finishStream(stream.id)
+		sess.finishUDPStream(stream, started, "peer_closed")
 		return
 	}
 	if writeErr != nil {
 		readErr = writeErr
 	}
+	outcome := "completed"
 	var networkErr net.Error
 	if errors.As(readErr, &networkErr) && networkErr.Timeout() {
 		readErr = nil // an idle UDP flow expires normally
@@ -78,8 +80,22 @@ func (sess *agentSession) serveUDPStream(stream *agentStream) {
 	if readErr == nil {
 		_ = sess.sendStreamTerminalClose(stream, "completed")
 	} else {
+		outcome = "local_error"
 		_ = sess.sendStreamTerminalError(stream, "local_target_unavailable", "approved local UDP flow failed", true)
 	}
+	sess.finishUDPStream(stream, started, outcome)
+}
+
+// finishUDPStream closes the audit pair that serveStream opened: without a
+// finished line the Agent log cannot say whether a flow was never routed or ran
+// to completion.
+func (sess *agentSession) finishUDPStream(stream *agentStream, started time.Time, outcome string) {
+	sess.logger.Info("stream finished",
+		"stream_id", stream.id,
+		"endpoint_id", stream.endpoint.ID,
+		"outcome", outcome,
+		"duration", time.Since(started).Round(time.Millisecond),
+	)
 	sess.finishStream(stream.id)
 }
 

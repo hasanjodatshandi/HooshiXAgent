@@ -25,6 +25,21 @@ func TestButtonsFor(t *testing.T) {
 			want:   Buttons{Disconnect: true},
 		},
 		{
+			name:   "a second client would steal the one interactive session",
+			status: Status{State: StateListening, Protocol: "tcp", Listen: "127.0.0.1:13389", Flows: 1},
+			want:   Buttons{Disconnect: true},
+		},
+		{
+			name:   "several attached clients still allow only disconnect",
+			status: Status{State: StateListening, Protocol: "tcp", Listen: "127.0.0.1:13389", Flows: 3},
+			want:   Buttons{Disconnect: true},
+		},
+		{
+			name:   "a detached client frees the button again",
+			status: Status{State: StateListening, Protocol: "tcp", Listen: "127.0.0.1:13389", Flows: 0},
+			want:   Buttons{Disconnect: true, OpenClient: true},
+		},
+		{
 			name:   "a failed session can be retried",
 			status: Status{State: StateFailed, Protocol: "tcp"},
 			want:   Buttons{Connect: true},
