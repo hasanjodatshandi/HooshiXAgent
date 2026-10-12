@@ -54,10 +54,15 @@ for file in "${runnable_files[@]}"; do
     # has no runtime on Linux/macOS (Win32 message loop built with
     # -H windowsgui), so it is allowlisted here rather than faked: the state
     # machine it renders is cross-platform and executed by ./internal/connectgui
-    # on every OS, while the shell itself is registered as open gap G2 in
-    # docs/engineering/executable-runtime-gate.md section 7 and must be reported
-    # as `Not run` for automated Windows GUI evidence. Do not read this
-    # allowlist as a statement that no runtime procedure is required.
+    # on every OS, while the shell itself is launched as a real process by
+    # scripts/ci/connect-gui-runtime.ps1 on the windows-distribution-build job
+    # of .github/workflows/ci.yml: that gate drives the window through Win32 and
+    # asserts the status and message lines, the empty and malformed bundle
+    # refusals, the 127.0.0.1:13389 listener appearing and disappearing, the
+    # sealed hooshix-connect.cfg beside the exe, the compact shape and the
+    # reconnect with no re-paste. The gate status is recorded in
+    # docs/engineering/executable-runtime-gate.md section 7 (G2). Do not read
+    # this allowlist as a statement that no runtime procedure is required.
     ./cmd/hooshix-connect/*.go) ;;
     *) unexpected+=("$file") ;;
   esac

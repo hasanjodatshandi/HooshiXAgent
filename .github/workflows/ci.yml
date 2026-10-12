@@ -524,14 +524,16 @@ jobs:
         run: bash scripts/ci/packaging-ops.sh
 
   windows-distribution-build:
-    name: Windows desktop distribution build / service install gate (setup + tray)
+    name: Windows desktop distribution build / service install + connect GUI runtime gates
     runs-on: windows-latest
     # Bounded so a hung step cannot hold a hosted runner (and the
     # release gate chained behind it) indefinitely. Raised from 35 to 60 because
     # this job no longer only builds the distribution: it now also runs the real
     # install/run/restart/uninstall gate below, whose internal waits are bounded
     # at roughly 39 minutes in the pathological case (Setup.exe install 600 s and
-    # uninstall 600 s, plus per-assertion waits of 60-120 s). A job timeout that
+    # uninstall 600 s, plus per-assertion waits of 60-120 s). The connect GUI gate
+    # adds at most a few minutes of its own bounded waits (every window, listener
+    # and dialog assertion is capped at 30 s). A job timeout that
     # fired mid-gate would report as a timeout instead of naming the failing
     # assertion, which is exactly the opaque failure the gate exists to remove.
     timeout-minutes: 60
@@ -612,6 +614,45 @@ jobs:
       - name: Install / run / restart / uninstall the Windows service distribution
         shell: pwsh
         run: ./scripts/ci/windows-service-install-smoke.ps1 -SetupExe "${{ github.workspace }}\dist\HooshiXAgent-Setup.exe"
+
+      # The Panel serves hooshix-connect.exe as the way a connect user reaches a
+      # device, so the artifact the operator downloads has to be built here and
+      # then *run* here. build-connect.ps1 is build integrity: it proves the PE
+      # subsystem is a GUI and the icon/manifest resources were linked.
+      - name: Build hooshix-connect.exe GUI artifact
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-connect.ps1
+
+      - name: Verify the connect GUI artifact
+        shell: pwsh
+        run: |
+          $path = Join-Path "${{ github.workspace }}\dist" 'hooshix-connect.exe'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'missing hooshix-connect.exe' }
+          $info = Get-Item -LiteralPath $path
+          if ($info.Length -lt 1MB) { throw "hooshix-connect.exe suspiciously small: $($info.Length) bytes" }
+          Write-Host "hooshix-connect.exe = $($info.Length) bytes"
+          Get-FileHash -Algorithm SHA256 -LiteralPath $path | ForEach-Object { "sha256: $($_.Hash.ToLowerInvariant())" }
+
+      # Executable Runtime Gate G2 (docs/engineering/executable-runtime-gate.md
+      # section 7), closed by this step. This is the runtime procedure for the
+      # Windows GUI: it launches
+      # the artifact above from a throwaway directory and asserts what the operator
+      # can see, driven through Win32 rather than any internal state. The window and
+      # its status/message text, the empty and malformed bundle refusals, the
+      # 127.0.0.1:13389 listener appearing and disappearing, the dead-client report,
+      # the sealed hooshix-connect.cfg beside the exe (with no plaintext credential in
+      # it), the collapse to the compact shape, the reconnect with no re-paste, the
+      # process exiting when its window closes, the compact start on the next run, and
+      # the fallback to the paste window when the stored file cannot be opened.
+      #
+      # The gate fails closed and never skips: it needs an interactive window station,
+      # it refuses to run while another hooshix-connect instance or another holder of
+      # the loopback tunnel port exists, and it asserts its own DPI context so
+      # geometry it measures describes the app. Its credential is a fixture pointing at
+      # a closed loopback port, so the leg never touches a network or a live grant.
+      - name: Run the HooshiX Connect GUI runtime gate
+        shell: pwsh
+        run: ./scripts/ci/connect-gui-runtime.ps1 -ConnectExe "${{ github.workspace }}\dist\hooshix-connect.exe"
 
   runtime-gate:
     name: Executable runtime gate guard

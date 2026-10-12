@@ -149,8 +149,10 @@ it on the wrong machine. It reaches users through the Panel's
 `/download/hooshix-connect.exe` route, which serves the same file an operator
 builds locally with `powershell -File scripts\build-connect.ps1`.
 
-That script is the gate for this binary. It regenerates the icon resource, builds
-with `-H windowsgui`, and then fails closed unless the produced image has a
+That script is the build gate for this binary; the runtime gate that launches it is
+`scripts/ci/connect-gui-runtime.ps1`, two paragraphs below. The script regenerates the
+icon resource, builds with `-H windowsgui`, and then fails closed unless the produced
+image has a
 `.rsrc` section (icon plus application manifest, which is what makes the window
 DPI-aware and runs `asInvoker`) and a GUI subsystem value of 2. Both checks exist
 because the script deletes the intermediate `.syso`, so a build that silently lost
@@ -162,6 +164,18 @@ The unsigned-binary risk described in "Authenticode signing status (accepted ris
 applies to `hooshix-connect.exe` too. It is not in the release workflow yet, so its
 integrity today is established by the digest the build script prints and by the
 TLS-protected Panel download route.
+
+Beyond the artifact shape, the binary is executed by `scripts/ci/connect-gui-runtime.ps1`
+on the `windows-distribution-build` CI job: it launches the built exe from a throwaway
+directory, drives the real window through Win32 messages, and asserts the status line,
+the empty and malformed bundle refusals, the `127.0.0.1:13389` listener appearing and
+disappearing, the sealed cfg, the compact shape and the reconnect without a re-paste. It
+fails closed on a non-Windows host, on a session without an interactive desktop, and when
+a stray `hooshix-connect` process or an occupied tunnel port would make its observations
+meaningless, and it uses a fixture bundle pointing at `wss://127.0.0.1:1/connector/v1/connect`
+so it needs no Gateway, no grant and no network. It does not prove that a remote desktop
+session reaches a target and it does not read pixels — see
+`docs/engineering/executable-runtime-gate.md` section 7 (G2).
 
 The GUI writes exactly one file of its own: `hooshix-connect.cfg`, beside the
 executable, holding the last bundle that opened a tunnel. A connect bundle carries
@@ -227,6 +241,7 @@ The current packaging/operations gate provides:
 - a blocking packaging/operations CI job;
 - deterministic release archive/checksum construction, including the published Windows `HooshiXAgent-Setup.exe` release subject;
 - the Windows Agent service distribution runtime gate `scripts/ci/windows-service-install-smoke.ps1`, which installs, asserts, restarts and uninstalls the real distribution on an elevated Windows host. It is invoked by the `windows-distribution-build` CI job, which passes the distribution it already built via `-SetupExe`; the gate fails closed rather than skipping, and its CI evidence is pending the next Windows CI run (`docs/engineering/executable-runtime-gate.md` section 7, G1);
+- the Windows Connect GUI runtime gate `scripts/ci/connect-gui-runtime.ps1`, also invoked by `windows-distribution-build`, which launches the real `hooshix-connect.exe` and asserts its observable window, listener, saved-bundle and teardown behaviour against a loopback-only fixture bundle. It fails closed rather than skipping, passed on the operator desktop on 2026-10-13, and its CI evidence is likewise pending the next Windows CI run (section 7, G2);
 - a clean Docker Compose Gateway+Caddy deployment test;
 - RA-4 real Compose/Caddy multi-host acceptance with two simultaneous hostnames, approved-without-route separation and unknown-host TLS denial;
 - real Caddy→Gateway verified TLS;

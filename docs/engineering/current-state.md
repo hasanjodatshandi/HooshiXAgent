@@ -113,6 +113,8 @@ Both Windows distribution channels — `HooshiXAgent-Setup.exe` and the zip's `I
 
 Linux (`systemd --user`) and macOS (LaunchAgent) persistence remain user-scoped under ADR-0010.
 
+The Windows Connect GUI (`hooshix-connect.exe`, `docs/runtime/remote-desktop.md`) is delivered separately: it runs on the machine that *connects in*, never on the paired device, and reaches users through the Panel download route rather than the installer. Its runtime gate is `scripts/ci/connect-gui-runtime.ps1`, invoked by the same `windows-distribution-build` job after the service gate: it launches the built executable from a throwaway directory and asserts the rendered status line, the empty and malformed bundle refusals, the `127.0.0.1:13389` listener appearing and disappearing, the sealed `hooshix-connect.cfg` beside the exe, the collapse to the compact shape, and the reconnect with no re-paste — against a fixture bundle pointing at a port nothing listens on, so the gate needs no Gateway, grant or network. It fails closed rather than skipping, passed on the operator desktop on 2026-10-13, and because no workflow run has been observed since the wiring landed its automated CI evidence is pending the next Windows CI run (`docs/engineering/executable-runtime-gate.md` section 7, G2). Two limits travel with it: it does not prove that a remote desktop session reaches a target, and it does not read pixels.
+
 ## Failure semantics
 
 Current important fail-closed behavior includes:
