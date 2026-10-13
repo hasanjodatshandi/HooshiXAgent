@@ -141,6 +141,8 @@ The AG-8 release-acceptance leaf is considered complete only when:
 4. applicable post-merge runtime, E2E and release gates are rerun successfully;
 5. no required evidence is `Failed`, `Not run`, `Partially verified`, `Inconclusive` or `Not verified` unless the check is genuinely `Not applicable` under the approved scope.
 
+Against the third criterion: hosted run 38361373216 on 2026-10-13 (`d08e171`) is the first run of the whole chain on a `main` SHA to conclude `success` with all 27 jobs completed and none skipped, `AG-8 final security / resilience / release gate` among them, and the two Windows gate steps of `docs/engineering/executable-runtime-gate.md` section 7 (G1, G2) passed inside it. That sentence is an observation about CI, not a release-ready claim: the residual limits recorded in that section (no physical runner reboot, no remote-desktop session reaching a target, no rendered pixels read) and the allowlisted `cmd/hooshix-agent-tray` runtime still travel with it, and the earlier Windows evidence chain stays where it is.
+
 ## R-6 release supply-chain prerequisite
 
 The final CI release gate is now additionally dependency-chained behind `R-6 release / supply-chain gate`. That gate proves immutable third-party Action pins, digest-pinned external container bases, negative exact-commit release-policy behavior, privilege separation between read-only build/test jobs and the privileged publish job, SPDX SBOM generation and vulnerability scanning of the release archives and final Gateway image candidate. Tag publication independently rechecks exact-commit CI evidence before any publish privilege is used.
