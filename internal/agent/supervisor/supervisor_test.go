@@ -433,9 +433,20 @@ func TestWaitForStateChangeIgnoresStatusWrites(t *testing.T) {
 	stateDir := t.TempDir()
 	sup := newSupervisor(t, stateDir, &fakeLoop{}, nil)
 
+	// The writer is joined before the test returns, not merely told to stop:
+	// t.TempDir runs its RemoveAll after the function body, and a WriteStatusFile
+	// still between its temp file and its rename lands a new entry in the
+	// directory while that delete is walking it, which fails the cleanup with
+	// "directory not empty". The defer is registered before the assertions so a
+	// failing wait still drains the goroutine.
 	stop := make(chan struct{})
-	defer close(stop)
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case <-stop:
