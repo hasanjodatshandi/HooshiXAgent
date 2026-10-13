@@ -306,12 +306,23 @@ function Invoke-Click([IntPtr]$Window, [int]$Id) {
 function Set-PastedBundle([IntPtr]$Window, [string]$Bundle) {
     $edit = Get-Control $Window $IdBundle
     Assert-Shown $Window $IdBundle 'the paste area'
-    [HxGate.Win]::ClearText($edit)
-    Assert-Equals '' ([HxGate.Win]::TextOf($edit)) 'the edit control after it was cleared'
-    Set-Clipboard -Value $Bundle
-    [void][HxGate.Win]::SendMessageW($edit, $WmPaste, [IntPtr]::Zero, [IntPtr]::Zero)
-    $read = [HxGate.Win]::TextOf($edit)
-    if ($read -ne $Bundle) { Fail "the bundle did not reach the edit control (it holds '$read')" }
+    # Each attempt re-clips, empties the box and pastes once, then reads the edit
+    # back. A cross-process SendMessageW is not guaranteed to act: if the target
+    # thread is not pumping at that instant the call returns and the control has
+    # done nothing, which reads as an empty box rather than as a lost message.
+    # Bounded retry turns that into either the exact bundle or a named failure,
+    # and re-clipping means a clipboard another process claimed between attempts
+    # cannot make the gate paste something else.
+    $read = ''
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        Set-Clipboard -Value $Bundle
+        [HxGate.Win]::ClearText($edit)
+        [void][HxGate.Win]::SendMessageW($edit, $WmPaste, [IntPtr]::Zero, [IntPtr]::Zero)
+        $read = [HxGate.Win]::TextOf($edit)
+        if ($read -eq $Bundle) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    Fail "the bundle did not reach the edit control after 10 paste attempts (it holds '$read')"
 }
 
 function Get-LoopbackListener([int]$Port) {
