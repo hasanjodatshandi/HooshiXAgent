@@ -3,6 +3,10 @@
 Status: Accepted  
 Date: 2026-09-27
 
+> **Superseded in part by ADR-0020 (2026-10-14).** Three clauses of this ADR's Decision section are superseded by `docs/adr/ADR-0020-credential-lifetimes-and-revocation.md`: that a connector grant is "short-lived", that its lifetime is bounded by the issuer's choice, and that `max_connections` is operator-chosen ("no greater than 16" remains the ceiling and is now always used). Everything else in this ADR remains in force, including the loopback-only Connector binding, the private-by-contract RDP rule, issuing the bearer token exactly once and persisting only its SHA-256 digest, the WSS requirement, the Gateway's constant-time digest comparison and its unexpired/admission checks, and the rejected alternatives. Status remains `Accepted` because this ADR is superseded only in part and the remainder is still current architecture authority.
+>
+> This notice is a supersession pointer only. All text below is preserved unchanged as historical decision provenance; see `docs/governance/authority-and-adr-governance.md` section 2.
+
 ## Context
 
 The existing Agent/Gateway tunnel already carries bounded opaque TCP bytes to

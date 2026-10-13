@@ -191,7 +191,7 @@ func savedAtDate(savedAt string) string {
 }
 
 // singleClientHint is the rule the compact shape shares with the full one.
-const singleClientHint = "One Remote Desktop client at a time: a second window steals the session, and Windows then reconnects the first. The grant's own lifetime controls this tunnel. Closing this window ends it."
+const singleClientHint = "One Remote Desktop client at a time: a second window steals the session, and Windows then reconnects the first. Revoke the grant in the Panel to end this tunnel. Closing this window ends it."
 
 // hintText is the on-screen explanation for the current shape. The compact shape
 // adds where the credential came from, because a window that shows no paste area

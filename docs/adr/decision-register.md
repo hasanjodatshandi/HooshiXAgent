@@ -23,9 +23,10 @@ Normative lifecycle and stable-ID rules are defined in `docs/governance/authorit
 | ADR-0013 | Clean Architecture Layering for the Tunnel Upgrade | Accepted | 2026-09-06 | Yes | — | — | `docs/adr/ADR-0013-clean-architecture-tunnel-upgrade.md` |
 | ADR-0014 | Windows Agent Persistence and Secret Trust Model (LocalSystem Service) | Accepted | 2026-09-16 | Yes | ADR-0010 — Windows Agent persistence/secret trust clauses only | — | `docs/adr/ADR-0014-windows-agent-service-persistence-and-secret-trust.md` |
 | ADR-0016 | Browser-approved One-time Device Enrollment | Accepted | 2026-09-27 | Yes | — | — | `docs/adr/ADR-0016-browser-approved-one-time-enrollment.md` |
-| ADR-0017 | Private Connector Ingress for TCP and RDP | Accepted | 2026-09-27 | Yes | — | — | `docs/adr/ADR-0017-private-connector-tcp-and-rdp.md` |
+| ADR-0017 | Private Connector Ingress for TCP and RDP | Accepted | 2026-09-27 | Yes — except the clauses listed in ADR-0020 | — | ADR-0020 — grant-lifetime and connection-budget clauses only | `docs/adr/ADR-0017-private-connector-tcp-and-rdp.md` |
 | ADR-0018 | Public TCP Ingress with Explicit Port Leases | Accepted | 2026-09-28 | Yes | — | — | `docs/adr/ADR-0018-public-tcp-port-leases.md` |
 | ADR-0019 | UDP Datagram Flows for Private Connector and Public Ingress | Accepted | 2026-09-29 | Yes | — | — | `docs/adr/ADR-0019-udp-datagram-flows.md` |
+| ADR-0020 | Connector Grant and Device Credential Lifetimes | Accepted | 2026-10-14 | Yes | ADR-0017 — grant-lifetime and connection-budget clauses only | — | `docs/adr/ADR-0020-credential-lifetimes-and-revocation.md` |
 
 ADR-0010 is **partially superseded**. It remains `Accepted` and current authority for every clause except the Windows Agent persistence and secret trust clauses listed in ADR-0014's "Rollback/supersession" section (the user-scoped Windows default model, the Windows DPAPI trust-boundary claim, the rejected LocalSystem-service alternative, the "persistence specs do not cross the Windows DPAPI CurrentUser boundary" fitness function, and the future-system-wide-service compatibility sentence). Its Linux/macOS packaging, Gateway deployment, observability, and release/update trust clauses remain in force. Historical ADR-0010 text is preserved unchanged as provenance; ADR-0010 carries a supersession pointer to ADR-0014.
 
@@ -33,4 +34,6 @@ ADR-0014 also recorded an accepted, temporary divergence between the decided Win
 
 ADR-0015 — [Unified Agent/Gateway tunnel subprotocol](ADR-0015-unified-tunnel-subprotocol.md) — Accepted, 2026-09-17; revised 2026-09-27. Requires one protocol with resume proof and TCP half-close; no pre-release legacy fallback.
 
-ADR IDs are stable and monotonic. The next unused ID is `ADR-0020`; allocated IDs must never be reused or renumbered.
+ADR-0017 is **partially superseded**. It remains `Accepted` and current authority for every clause except the three ADR-0020 names: the "short-lived" grant, the issuer-bounded grant lifetime, and operator-chosen `max_connections`. Grant lifetimes are now issued unbounded by default with `ttl_minutes` still available to the operator, and every grant carries the contract maximum of 16 concurrent flows. Device session authorizations follow the same lifetime rule, which makes Revocation the retirement control for both. ADR-0017's Connector binding, RDP privacy rule, digest-only token storage, WSS requirement and Gateway admission checks are untouched, as is ADR-0016's ten-minute enrollment-code window. Historical ADR-0017 text is preserved unchanged as provenance; ADR-0017 carries a supersession pointer to ADR-0020.
+
+ADR IDs are stable and monotonic. The next unused ID is `ADR-0021`; allocated IDs must never be reused or renumbered.

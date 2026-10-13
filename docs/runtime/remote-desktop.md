@@ -66,13 +66,13 @@ The accepted two-machine run is recorded in
    character for character), protocol `TCP`, application protocol
    **RDP (TCP only)**. RDP is private by contract: `public` and `both` are
    rejected by the Panel and the Gateway.
-3. **Panel — issue a grant and copy the bundle.** On that endpoint's row, set
-   `ttl_minutes` (1–60) and `max_connections` (the form defaults to 4 for RDP;
-   do not set it to 1 — an RDP client commonly opens a companion TCP connection
-   while it negotiates, and the Connector opens one grant slot per local
-   connection, so a single-connection grant answers the second one with
-   `HTTP 503 connector capacity reached`)
-   and press *Issue Connector grant*. The page shows `grant_id`, `token_id`, the
+3. **Panel — issue a grant and copy the bundle.** On that endpoint's row press
+   *Issue Connector grant*. Leave `ttl_minutes` empty for a grant that never
+   expires; a whole number of minutes of at least 1 issues exactly that lifetime
+   and has no upper bound, which is what to use for a one-time visit. Either
+   way the grant carries the contract maximum of concurrent flows (16), so an
+   RDP client's companion TCP connection is never refused for capacity. The page shows
+   `grant_id`, `token_id`, the
    raw token **once**, and below them the **connect bundle** — one `hx1.…` string
    that carries the gateway, grant, token and protocol together. Only the token's
    SHA-256 digest is stored and published; the bundle is shown once and never
@@ -108,9 +108,10 @@ The accepted two-machine run is recorded in
    difference between a port nobody dialed and a session that died, which the
    listener state alone cannot show.
    `Status: listening` means the loopback socket is ready — the Gateway checks
-   the grant on the first client connection, so an expired or revoked bundle
-   shows up as `connector flow ended: … HTTP 401` in the message line when you
-   press *Open Remote Desktop*, not at Connect time.
+   the grant on the first client connection, so a bundle whose grant has been
+   revoked (or whose stored expiry has passed) shows up as
+   `connector flow ended: … HTTP 401` in the message line when you press
+   *Open Remote Desktop*, not at Connect time.
 5. **Client — or the command line.** The same bundle works headless; `-bundle`
    replaces `-gateway`, `-grant-id`, `-token-id` and `-token-file`:
 
@@ -272,21 +273,24 @@ proves the full path even if you do not complete a login.
   Remove, then restart the service from the tray.
 - Unpairing the device (`4. Unpair this device`, or `hooshix-agent unpair`)
   drops the session that every flow depends on.
-- Letting the TTL expire ends the grant by itself; grants are short-lived on
-  purpose.
+- Grants carry no expiry unless the operator asks for one. Left empty,
+  `ttl_minutes` issues a lifetime no deployment will outlive, so revoking is the
+  only thing that retires such a grant; a number there issues a grant that does
+  end on its stored date. A bundle saved before this change still ends on its
+  own stored date either way.
 
 ## Failure modes
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | HooshiX Connect: `connect bundle must start with "hx1."` | pasted the raw token or a truncated copy | copy the whole **Connect bundle** block, not the token |
-| HooshiX Connect: `listening` then `connector flow ended: … HTTP 401` on first client connection | grant expired or revoked between Connect and use | issue a new grant; the bundle's lifetime is the grant's lifetime |
+| HooshiX Connect: `listening` then `connector flow ended: … HTTP 401` on first client connection | the grant was revoked, or one issued with a `ttl_minutes` — or saved before an empty field meant unbounded — has passed its stored `expires_at` | issue a new grant and press *Use a different bundle*; revocation is permanent, so the old bundle never works again |
 | HooshiX Connect: `listen on 127.0.0.1:13389: …` | another Connector already holds the port | press Disconnect in the other window, or use the CLI with a different `-listen` |
 | Connector exits with `gateway URL must be wss://<host>/connector/v1/connect without credentials, query, or fragment` | wrong `-gateway` scheme, path, query or userinfo | use exactly `wss://edge.hooshix-agent.ir/connector/v1/connect` |
 | Connector exits with `x509: certificate signed by unknown authority` | the Gateway is served by a private CA that this machine does not trust | pass `-ca-file gateway-ca.pem` (it combines with `-bundle`), or install the CA into the system store |
 | `connector token must be 32..512 non-whitespace characters` | pasted token with a newline or from the wrong grant | re-save the exact token; the token is shown once |
 | `token file must be a regular file no larger than 513 bytes` | token piped through a directory, symlink or oversized file | write a fresh small `token.txt` |
-| `HTTP 401` at connect time | grant revoked, expired, wrong `grant_id`/`token_id`, or endpoint disabled | issue a new grant against the enabled endpoint |
+| `HTTP 401` at connect time | grant revoked, wrong `grant_id`/`token_id`, endpoint disabled, or a grant issued with a `ttl_minutes` whose `expires_at` has passed | issue a new grant against the enabled endpoint |
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
 | Connect succeeds but no Remote Desktop window ever appears — no taskbar button, Alt+Tab does not list it, and it flashes into view only after Disconnect | a `hooshix-connect.exe` built before this fix started `mstsc` with `SW_HIDE`, which the client honours for its main window | rebuild or re-download `hooshix-connect.exe`; the window is now created normally |
