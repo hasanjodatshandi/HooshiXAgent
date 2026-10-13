@@ -385,9 +385,17 @@ function Invoke-TunnelDial([int]$Port) {
 
 function Get-WrittenFiles {
     if (-not (Test-Path -LiteralPath $script:Workspace)) { return @() }
-    return @(Get-ChildItem -Force -Recurse -File -LiteralPath $script:Workspace |
+    # Leaf names, and only from the workspace root. The store's whole contract is that
+    # hooshix-connect.cfg lives beside hooshix-connect.exe, so the root listing is the
+    # complete set, and directories are included because the app must not create any.
+    # Names are never produced by trimming the workspace prefix off FullName: on a
+    # GitHub Windows runner $env:TEMP is the 8.3 form (C:\Users\RUNNER~1\AppData\Local\Temp)
+    # while Get-ChildItem reports long FullName values, so that slice is short by the
+    # width difference and the first hosted run of this gate read a file the app had
+    # just written as '39\hooshix-connect.cfg', then reported it as missing.
+    return @(Get-ChildItem -Force -LiteralPath $script:Workspace |
         Where-Object { $_.Extension -ne '.exe' } |
-        ForEach-Object { $_.FullName.Substring($script:Workspace.Length + 1) })
+        ForEach-Object { if ($_.PSIsContainer) { $_.Name + '\' } else { $_.Name } })
 }
 
 function Assert-FilesAre([string[]]$Expected, [string]$When) {
@@ -470,6 +478,18 @@ function Stop-ConnectApp([string]$When) {
     Write-Host "${When}: process $($process.Id) exited with code $($process.ExitCode)"
 }
 
+function Get-ShownMainWindow([uint32]$ProcessId) {
+    # EnumWindows reports the frame as soon as CreateWindowExW returns, which is
+    # before the app has created a single control: the frame is built without
+    # WS_VISIBLE and shown only after its children exist and the shape is applied.
+    # Taking the first match therefore races the app's own startup, and on the
+    # runner that race read as "the window has no control with id 106" seconds
+    # after a window had supposedly been found. A visible frame is the app saying
+    # it is done building, so the gate only ever returns those.
+    return @([HxGate.Win]::TopWindows($ProcessId, $WindowClass) |
+        Where-Object { [HxGate.Win]::IsWindowVisible($_) })
+}
+
 function Start-ConnectApp([string]$When) {
     Stop-ConnectApp "$When (previous instance)"
     $script:appProcess = Start-Process -FilePath $script:ExePath -PassThru -WorkingDirectory $script:Workspace
@@ -488,9 +508,15 @@ function Start-ConnectApp([string]$When) {
             }
             return 'no window yet'
         }
-        return $true
+        # @() at the call site, not in the function: PowerShell unrolls the array a
+        # function returns, so one visible window arrives as a bare IntPtr with no
+        # Count property and zero arrive as $null.
+        if (@(Get-ShownMainWindow ([uint32]$process.Id)).Count -gt 0) { return $true }
+        return 'the frame exists but the app has not shown it yet'
     }
-    $window = [HxGate.Win]::TopWindows([uint32]$process.Id, $WindowClass)[0]
+    $shown = @(Get-ShownMainWindow ([uint32]$process.Id))
+    Assert-True ($shown.Count -gt 0) "${When}: the window stopped being visible before the gate could read it"
+    $window = $shown[0]
     Assert-DpiContext $window
     return $window
 }
