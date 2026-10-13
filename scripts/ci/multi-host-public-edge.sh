@@ -37,20 +37,58 @@ backend_one_pid=''
 backend_two_pid=''
 compose_started=false
 
-free_port() {
+# Four ports, chosen below the kernel's ephemeral range and each held bound
+# while the list is built. Both halves matter. Two sockets bind the published
+# ports on 0.0.0.0 and the other two the test backends on 127.0.0.1, and every
+# curl and Agent dial this leg makes to 127.0.0.1 sources its own port from the
+# ephemeral range, so a port probed from that range can be taken by one of this
+# leg's own connections in the window between the probe and the bind: on AG-8
+# run 38352326248 `docker compose up` failed with "failed to bind host port for
+# 0.0.0.0:35213:172.18.0.4:80/tcp: address already in use", and 35213 is inside
+# the default ephemeral range. Keeping the four below its lower bound makes them
+# unreachable to that allocation. Binding all four at once, instead of probing
+# one and releasing it before the next, is what guarantees they are distinct,
+# and they bind the wildcard address because that is the address Docker
+# publishes on. If fewer than four are free the gate fails rather than reusing
+# a port.
+allocate_ports() {
   python3 - <<'PY'
 import socket
-s = socket.socket()
-s.bind(('127.0.0.1', 0))
-print(s.getsockname()[1])
-s.close()
+
+try:
+    with open('/proc/sys/net/ipv4/ip_local_port_range') as handle:
+        ephemeral_low = int(handle.read().split()[0])
+except (OSError, ValueError, IndexError):
+    ephemeral_low = 32768
+
+held = []
+for port in range(max(2048, ephemeral_low - 4096), ephemeral_low):
+    if len(held) == 4:
+        break
+    probe = socket.socket()
+    try:
+        probe.bind(('', port))
+    except OSError:
+        probe.close()
+        continue
+    held.append(probe)
+
+for probe in held:
+    print(probe.getsockname()[1])
+for probe in held:
+    probe.close()
 PY
 }
 
-http_port="$(free_port)"
-https_port="$(free_port)"
-backend_one_port="$(free_port)"
-backend_two_port="$(free_port)"
+readarray -t allocated_ports < <(allocate_ports)
+if [[ "${#allocated_ports[@]}" -ne 4 ]]; then
+  echo "RA-4 could not allocate four distinct ports outside the ephemeral range" >&2
+  exit 1
+fi
+http_port="${allocated_ports[0]}"
+https_port="${allocated_ports[1]}"
+backend_one_port="${allocated_ports[2]}"
+backend_two_port="${allocated_ports[3]}"
 metadata_dir="$work/metadata"
 tls_dir="$work/tls"
 state_dir="$work/agent-state"
