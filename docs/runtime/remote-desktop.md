@@ -279,6 +279,13 @@ proves the full path even if you do not complete a login.
   only thing that retires such a grant; a number there issues a grant that does
   end on its stored date. A bundle saved before this change still ends on its
   own stored date either way.
+- **The device side has a lifetime of its own.** A device paired before
+  2026-10-14 keeps the bounded `expires_at` it was issued with, and nothing
+  renews it: the Agent's session token arrives only at a browser-approved
+  enrollment claim. Re-pair such a device before that date passes. Re-pairing
+  preserves the device key and therefore the same `device_id`, so existing
+  endpoint assignments stay valid, and it revokes the previous authorization as
+  it always did.
 
 ## Failure modes
 
@@ -292,6 +299,7 @@ proves the full path even if you do not complete a login.
 | `connector token must be 32..512 non-whitespace characters` | pasted token with a newline or from the wrong grant | re-save the exact token; the token is shown once |
 | `token file must be a regular file no larger than 513 bytes` | token piped through a directory, symlink or oversized file | write a fresh small `token.txt` |
 | `HTTP 401` at connect time | grant revoked, wrong `grant_id`/`token_id`, endpoint disabled, or a grant issued with a `ttl_minutes` whose `expires_at` has passed | issue a new grant against the enabled endpoint |
+| Tray icon turns red with `revoked by gateway` and the supervisor reports `terminal`, so **every** endpoint on that device stops routing | the device's own authorization passed its stored `expires_at`. Authorizations issued before 2026-10-14 are bounded, and nothing renews one: the session token arrives only at a browser-approved enrollment claim | re-pair the device from the pairing page. The new authorization is unbounded, the `device_id` is preserved so endpoint assignments stay valid, and the old authorization is revoked as before |
 | `426` / upgrade required | wrong endpoint path or a non-WebSocket client | the Connector owns `/connector/v1/connect`; Agents own `/agent/v1/connect` |
 | RDP shows "can't connect" while the Connector is healthy | Windows remote connections off, or the target account lacks RDP permission | enable it in Windows; nothing in HooshiX changes this |
 | Connect succeeds but no Remote Desktop window ever appears — no taskbar button, Alt+Tab does not list it, and it flashes into view only after Disconnect | a `hooshix-connect.exe` built before this fix started `mstsc` with `SW_HIDE`, which the client honours for its main window | rebuild or re-download `hooshix-connect.exe`; the window is now created normally |

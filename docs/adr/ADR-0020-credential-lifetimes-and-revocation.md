@@ -100,5 +100,14 @@ Gateway rejects a generation that omits or misorders it.
 Grants and authorizations issued before this decision keep their stored
 `expires_at` and still end on that date; the Panel shows them with their real
 timestamp and shows `never` for unbounded ones. Nothing about the wire format,
-the metadata generation layout or the Agent's stored secret changes, so no
-device has to be re-paired and the deployed Gateway binary is unaffected.
+the metadata generation layout or the Agent's stored secret changes, so the
+decision itself breaks no device and does not touch the deployed Gateway binary.
+
+A device paired before this decision still has to be re-paired eventually,
+because its own authorization ends on the date it was issued with. There is no
+renewal path: the Agent's session token arrives only at the browser-approved
+enrollment claim, a refused authorization puts the supervisor in `terminal`
+with the re-pair hint, and no Panel route re-issues a credential without a
+fresh enrollment code. Re-pairing preserves the device key and so the same
+`device_id`, which keeps existing endpoint assignments valid; it revokes the
+previous authorization as it always did.
