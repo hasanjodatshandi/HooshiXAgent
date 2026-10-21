@@ -178,7 +178,7 @@ component list for a given release.
       libcrypto3/libssl3/openssl (Apache-2.0).
     Role: runtime base for the Gateway image.
 
-  golang:1.27.2-alpine3.24@sha256:f92b6ef8...
+  golang:1.27.3-alpine3.24@sha256:f2c872bc...
     Licence: build-only. The Go toolchain and Alpine components as above.
     Role: build stage; no part of it is copied into the runtime image except the
           statically built Gateway binary.
