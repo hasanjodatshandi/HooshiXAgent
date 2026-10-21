@@ -53,3 +53,8 @@ diag_output.txt
 *.syso
 /cmd/hooshix-setup/hooshix.ico
 /.memory/
+
+# Full offline copy of the production server: deployment CA key, ACME account and
+# domain private keys, SSH host keys, admin tokens and the Panel database. It is
+# restorable from server_backup/MANIFEST.md and must never enter git history.
+/server_backup/
