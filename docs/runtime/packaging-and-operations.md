@@ -139,6 +139,47 @@ The clean-checkout `Windows desktop distribution build / service install gate (s
 
 The archive `hooshix-agent_<version>_windows_<arch>.zip` with `Install-HooshiXAgent.ps1` remains published and is built, SBOM-scanned, checksummed and attested by the same release workflow. It is no longer a divergent channel: since rollout step R1 it installs the same `HooshiXAgent` service model at the same machine-wide paths, and uninstalls it the same way. What the zip still does not provide is the desktop distribution's tray binary, `uninstall.exe` and ARP entry, which is why `HooshiXAgent-Setup.exe` is the supported channel for a Windows desktop device.
 
+### Panel download of the installer
+
+Since 2026-10-21 the Panel serves this installer publicly at
+`/download/HooshiXAgent-Setup.exe`, from the path in `HOOSHIX_AGENT_SETUP_PATH`
+(`/opt/hooshix/dist/HooshiXAgent-Setup.exe` on the production host), and the
+device-approval page links to it. The link is what makes the code-based pairing
+flow walkable from an empty machine: the enrollment code only exists once Setup
+has been run, so a user with no Agent needs the binary before the Panel can
+accept their device. Serving the artifact is not a secret — the grants are — so
+the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
+is absent rather than failing the request.
+
+The bytes served today are `24,731,136` bytes, sha256
+`8de28236e1e2c5a60470bee2453fb03bfd7d93986db5c84129e561d2b4831edb`, built by
+`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.0.0-fb3275f` from a clean
+worktree at `fb3275f`, and confirmed by downloading it back over HTTPS and
+matching that digest. Its embedded payloads are `hooshix-agent.exe`
+`4e760ca013a0550acf3a2e31d0c9396afc3db18fc0e90eb42789d8d881b4555a` and
+`hooshix-agent-tray.exe` `1bec1cacf2d9d28c1a21b280d769c789bb692d046b36db6a7bc318948cf6d0b2`,
+which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
+before it touches `C:\Program Files`. `go version -m` reports
+`vcs.revision=fb3275f…`, `vcs.modified=false` for all three images — the first
+Setup build from this machine that can be pinned to a commit. Every earlier one
+carried `vcs.modified=true` because Go treats any `git status --porcelain` entry,
+including an untracked directory, as uncommitted, and the server backup snapshot
+sat untracked until `fb3275f` ignored it.
+
+What this build does **not** claim: it was not produced by
+`.github/workflows/release.yml`, so it has no release `SHA256SUMS` tie-in, no
+SBOM entry and no Artifact Attestation, and `HOOSHIX_RELEASE_SHA256SUMS` was
+therefore not consulted. It is unsigned, so the accepted Authenticode risk below
+attaches to it. And the two gates that prove a distribution can actually be
+installed — `scripts/ci/packaging-ops.sh` (needs `zip`, absent here) and the
+service install smoke (would rewrite the machine-wide `HooshiXAgent` service on
+this operator desktop) — were not run against these bytes. What was run here is
+`scripts/ci/go-quality.sh` (format, vet, the whole test suite; `govulncheck`
+could not reach `vuln.go.dev` from this network and is covered by CI) and
+`scripts/ci/agent-cross-build.sh`, plus `build-setup.ps1`'s own fail-closed
+resource, manifest and payload-size checks. The hosted
+`windows-distribution-build` job remains the gate that proves installability.
+
 ### Connect client distribution
 
 `hooshix-connect.exe` (from `cmd/hooshix-connect`) is the Windows GUI that turns a

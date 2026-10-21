@@ -56,6 +56,8 @@ Agent persistence is user-scoped on Linux (`systemd --user`) and macOS (LaunchAg
 
 Setup.exe asks for the tunnel and panel addresses it installs with (defaults `wss://edge.hooshix-agent.ir/agent/v1/connect` and `https://panel.hooshix-agent.ir`, overridable with `HOOSHIX_TUNNEL_URL`/`HOOSHIX_PANEL_URL`) and puts the editable settings file beside the program at `C:\Program Files\HooshiXAgent\config.json`, pointing at it from the state directory. `edge` is the published spelling of the public Gateway; the earlier `tunnel.hooshix-agent.ir` name is no longer fronted by Caddy, because some networks drop that literal name from DNS answers, and an Agent still pointing at it fails closed. Gateway address, stream/queue bounds, timeouts and the reconnect backoff all live in that file and are re-read while the service runs, so changing the Agent's behavior is an edit, not a rebuild — see `docs/runtime/agent.md`.
 
+A device with no Agent on it yet gets the installer from the Panel itself: `https://panel.hooshix-agent.ir/download/HooshiXAgent-Setup.exe`, linked from the page that shows the pairing code. The live digest, the commit it is pinned to, and what that build does and does not prove are recorded in `docs/runtime/packaging-and-operations.md`.
+
 The server deployment remains **Docker Compose only**, with exactly Caddy and Tunnel Gateway.
 
 The tested system includes real Agent↔Gateway E2E traffic, Gateway restart recovery, Agent process restart with persisted identity, forced tunnel-network interruption/reconnect, fail-closed offline behavior, package rollback, release checksum tamper rejection, SBOM/vulnerability scanning and OIDC-backed GitHub Artifact Attestations.
