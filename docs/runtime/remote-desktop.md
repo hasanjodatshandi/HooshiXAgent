@@ -45,11 +45,12 @@ The accepted two-machine run is recorded in
   build it with `powershell -File scripts\build-connect.ps1`. The command-line
   Connector (`go build -o dist\hooshix-connector.exe ./cmd/hooshix-connector`)
   does the same job without a window.
-  Since 2026-10-14 the Panel serves `sha256`
-  `6a9df263b00d680db9dc52b66fa60fe5ffa8314ab902a424bde5a7e86aece5b8` (7,836,672
-  bytes), the build whose on-screen hint names Revoke as the way to end the
-  tunnel; like the 2026-10-13 build it saves the bundle beside itself, so a
-  second run needs no re-paste. Verify what you downloaded with
+  Since 2026-10-22 the Panel serves `sha256`
+  `f02cdd9bf52855adcb7819d7c0e0b62122289afb2a3e6cac1af869c9d02913dd` (7,839,232
+  bytes): the same shipped source as the 2026-10-14 build, whose on-screen hint
+  names Revoke as the way to end the tunnel, rebuilt with the `go1.27.3` toolchain
+  that closed `GO-2026-6809`. Like the earlier builds it saves the bundle beside
+  itself, so a second run needs no re-paste. Verify what you downloaded with
   `certutil -hashfile hooshix-connect.exe SHA256`; an older digest still connects,
   but it asks for the bundle on every run.
 

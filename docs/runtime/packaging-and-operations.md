@@ -151,18 +151,32 @@ accept their device. Serving the artifact is not a secret — the grants are —
 the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
-The bytes served today are `24,731,136` bytes, sha256
-`8de28236e1e2c5a60470bee2453fb03bfd7d93986db5c84129e561d2b4831edb`, built by
-`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.0.0-fb3275f` from a clean
-worktree at `fb3275f`, and confirmed by downloading it back over HTTPS and
+The bytes served today are `24,736,768` bytes, sha256
+`e49b493e6fa32e18ecc800e01520ca6fe0256c66400558b8166d2f2c13172f34`, built by
+`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.0.0-5ba29e4` from a clean
+worktree at `5ba29e4`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`4e760ca013a0550acf3a2e31d0c9396afc3db18fc0e90eb42789d8d881b4555a` and
-`hooshix-agent-tray.exe` `1bec1cacf2d9d28c1a21b280d769c789bb692d046b36db6a7bc318948cf6d0b2`,
+`525950402164d8f340354c4f33b589fb369f8bf5af1a73013ad6041d4a6070ef` and
+`hooshix-agent-tray.exe` `c50e20c72520e7685cb76a6827155c34359fe16967ee26f4fad6aeebd0c8a215`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
-before it touches `C:\Program Files`. `go version -m` reports
-`vcs.revision=fb3275f…`, `vcs.modified=false` for all three images — the first
-Setup build from this machine that can be pinned to a commit. Every earlier one
-carried `vcs.modified=true` because Go treats any `git status --porcelain` entry,
+before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
+`vcs.revision=5ba29e4…` and `vcs.modified=false` for all three images.
+
+The patched toolchain is the reason for this rebuild, not cosmetics:
+`GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
+against `go1.27.2`, the version every artifact here had been compiled with, and
+`govulncheck` traces it into the Agent's own TLS paths
+(`internal/agent/webapp/webapp.go` reaches `x509.Certificate.Verify` through
+`http.Server.Serve`). `5ba29e4` raised the pin everywhere at once — the CI jobs,
+the digest-pinned `golang` build stage, `scripts/ci/supply-chain.sh`, ADR-0010
+and `THIRD_PARTY_NOTICES` — and every published artifact was then rebuilt from
+it, including `/opt/hooshix/hooshix-gateway` on the production host and
+`/download/hooshix-connect.exe`.
+
+The first commit-pinnable Setup build was `fb3275f` (sha256
+`8de28236e1e2c5a60470bee2453fb03bfd7d93986db5c84129e561d2b4831edb`, 24,731,136
+bytes), served until 2026-10-22. Every build before it carried
+`vcs.modified=true` because Go treats any `git status --porcelain` entry,
 including an untracked directory, as uncommitted, and the server backup snapshot
 sat untracked until `fb3275f` ignored it.
 
@@ -173,12 +187,13 @@ therefore not consulted. It is unsigned, so the accepted Authenticode risk below
 attaches to it. And the two gates that prove a distribution can actually be
 installed — `scripts/ci/packaging-ops.sh` (needs `zip`, absent here) and the
 service install smoke (would rewrite the machine-wide `HooshiXAgent` service on
-this operator desktop) — were not run against these bytes. What was run here is
-`scripts/ci/go-quality.sh` (format, vet, the whole test suite; `govulncheck`
-could not reach `vuln.go.dev` from this network and is covered by CI) and
-`scripts/ci/agent-cross-build.sh`, plus `build-setup.ps1`'s own fail-closed
-resource, manifest and payload-size checks. The hosted
-`windows-distribution-build` job remains the gate that proves installability.
+this operator desktop) — were not run against these bytes. What was run here,
+against `5ba29e4` under `go1.27.3`, is `gofmt -l`, `go vet ./...`,
+`go test -count=1 ./...` and `scripts/ci/agent-cross-build.sh`; `govulncheck`
+could not reach `vuln.go.dev` from this network (403) and is covered by CI.
+`build-setup.ps1`'s own fail-closed resource, manifest and payload-size checks
+also passed. The hosted `windows-distribution-build` job remains the gate that
+proves installability.
 
 ### Connect client distribution
 
