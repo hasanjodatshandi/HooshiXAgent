@@ -29,4 +29,8 @@ func TestReleaseFinalizationChecksOutVerifiedSource(t *testing.T) {
 	if strings.Contains(workflow, "release_version='${{ inputs.version }}'") {
 		t.Fatal("workflow input interpolated into shell source")
 	}
+	_, publish, ok := strings.Cut(workflow, "\n  publish:")
+	if !ok || !strings.Contains(publish, `--repo "${GITHUB_REPOSITORY}"`) {
+		t.Fatal("publish must identify the repository explicitly without a Git checkout")
+	}
 }
