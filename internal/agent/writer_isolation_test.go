@@ -93,6 +93,32 @@ func TestAgentWriterPrioritizesControlAndPreservesSingleWriter(t *testing.T) {
 	}
 }
 
+func TestAgentWriterExitsWhenIdleSessionCloses(t *testing.T) {
+	sess := &agentSession{
+		limits:        DefaultLimits(),
+		streams:       make(map[uint32]*agentStream),
+		closed:        make(chan struct{}),
+		controlWrites: make(chan agentWriteRequest, 32),
+		dataWrites:    make(chan agentWriteRequest, 2),
+		writeMessage:  func(context.Context, []byte) error { return nil },
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.writeLoop()
+	}()
+	if err := sess.sendControl(context.Background(), 0, map[string]string{"message_type": "pong"}); err != nil {
+		t.Fatal(err)
+	}
+
+	sess.shutdown()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle Agent writer did not exit after session shutdown")
+	}
+}
+
 func waitAgentWriterCondition(t *testing.T, timeout time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

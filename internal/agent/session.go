@@ -780,6 +780,8 @@ func (sess *agentSession) writeLoop() {
 		}
 		if len(pending) == 0 {
 			select {
+			case <-sess.closed:
+				return
 			case request := <-sess.controlWrites:
 				pending = append(pending, request)
 			case request := <-sess.dataWrites:

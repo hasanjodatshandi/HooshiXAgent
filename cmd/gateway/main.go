@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,7 +39,7 @@ func run() error {
 	var trustedProxies stringList
 	var (
 		listenAddr           = flag.String("listen", "127.0.0.1:8443", "HTTPS/WSS listen address")
-		opsListenAddr        = flag.String("ops-listen", "127.0.0.1:9090", "administrative listen address for /healthz, /readyz and /metrics (plaintext; must not be publicly reachable, empty disables the endpoint)")
+		opsListenAddr        = flag.String("ops-listen", "127.0.0.1:9090", "administrative listen address for /healthz, /readyz and /metrics (plaintext; loopback IP required, empty disables the endpoint)")
 		logLevel             = flag.String("log-level", "info", "log level: debug or info")
 		tlsCert              = flag.String("tls-cert", "", "TLS certificate PEM path (required)")
 		tlsKey               = flag.String("tls-key", "", "TLS private key PEM path (required)")
@@ -71,6 +72,9 @@ func run() error {
 	flag.Var(&trustedProxies, "trusted-proxy", "IP or CIDR of the public edge that terminates client TLS and may supply the client address in X-Forwarded-For (repeatable)")
 	flag.Parse()
 
+	if err := validateOpsListenAddress(*opsListenAddr); err != nil {
+		return err
+	}
 	if *tlsCert == "" || *tlsKey == "" {
 		return errors.New("-tls-cert and -tls-key are required; plaintext production mode is not supported")
 	}
@@ -256,6 +260,23 @@ func gracefulShutdown(server *http.Server, opsServer *http.Server, drainTunnels 
 func shutdownResult(serverErr, opsErr, gatewayErr error) error {
 	if gatewayErr != nil {
 		return fmt.Errorf("gateway drain incomplete: %w", errors.Join(serverErr, opsErr, gatewayErr))
+	}
+	return nil
+}
+
+// validateOpsListenAddress keeps the unauthenticated plaintext operations
+// listener off non-loopback interfaces. An empty address disables it.
+func validateOpsListenAddress(address string) error {
+	if address == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid -ops-listen address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("-ops-listen address %q is not a loopback IP; the plaintext administrative listener refuses non-loopback binds", address)
 	}
 	return nil
 }

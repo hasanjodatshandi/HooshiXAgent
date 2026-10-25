@@ -154,13 +154,12 @@ if [[ "$rollback" == true ]]; then
     echo "no previous Agent binary is available for rollback" >&2
     exit 1
   fi
-  tmp="$target.rollback-new"
-  if [[ -f "$target" ]]; then
-    mv "$target" "$tmp"
-  fi
-  mv "$previous" "$target"
-  chmod 755 "$target"
-  rm -f "$tmp"
+  tmp="$(mktemp "$prefix/.hooshix-agent.rollback.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  install -m 0755 "$previous" "$tmp"
+  mv "$tmp" "$target"
+  rm -f "$previous"
+  trap - EXIT
   restart_persistence
   echo "HooshiX Agent rollback restored $target"
   exit 0
@@ -173,11 +172,43 @@ fi
 
 verify_source_binary "$(resolve_checksum_manifest)"
 
+# Stage in the target directory so both publication renames stay on one
+# filesystem and each live target is replaced atomically. If persistence setup
+# fails after publication, restore the prior target (or remove a fresh install)
+# rather than claiming a successful install with a partially configured service.
+staged_target="$(mktemp "$prefix/.hooshix-agent.install.XXXXXX")"
+staged_previous="$(mktemp "$prefix/.hooshix-agent.previous.XXXXXX")"
+had_previous=false
+install_committed=false
+cleanup_install() {
+  status=$?
+  trap - EXIT
+  rm -f "$staged_target" "$staged_previous" || true
+  if [[ "$status" -ne 0 && "$install_committed" == true ]]; then
+    if [[ "$had_previous" == true && -f "$previous" ]]; then
+      if mv "$previous" "$target"; then
+        echo "Agent install failed; restored the previous binary at $target" >&2
+      else
+        echo "Agent install failed and previous binary restoration also failed; backup remains at $previous" >&2
+      fi
+    elif [[ "$had_previous" == false ]]; then
+      if ! rm -f "$target"; then
+        echo "Agent install failed and the new target could not be removed: $target" >&2
+      fi
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_install EXIT
+
 if [[ -f "$target" ]]; then
-  cp "$target" "$previous"
-  chmod 755 "$previous"
+  had_previous=true
+  install -m 0755 "$target" "$staged_previous"
+  mv "$staged_previous" "$previous"
 fi
-install -m 0755 "$source_binary" "$target"
+install -m 0755 "$source_binary" "$staged_target"
+mv "$staged_target" "$target"
+install_committed=true
 
 if [[ "$no_service" != true ]]; then
   mkdir -p "$(dirname "$service_path")"

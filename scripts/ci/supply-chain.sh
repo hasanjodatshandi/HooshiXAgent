@@ -140,6 +140,9 @@ required = [
     'HOOSHIX_RELEASE_SHA256SUMS',
     'HOOSHIX_VERSION',
     'dist/HooshiXAgent-Setup.exe',
+    'scripts/build-connect.ps1',
+    'dist/hooshix-connect.exe',
+    "grep -q 'hooshix-connect.exe$' SHA256SUMS",
     'release-setup-${{ needs.policy.outputs.release_sha }}',
 ]
 for item in required:
@@ -149,6 +152,8 @@ for item in required:
 setup_job = workflow.split('\n  windows-setup:', 1)[1].split('\n  finalize:', 1)[0]
 if '-File scripts/build-setup.ps1' not in setup_job:
     raise SystemExit('the Windows installer job does not invoke scripts/build-setup.ps1')
+if setup_job.count('-File scripts/build-connect.ps1') != 1:
+    raise SystemExit('the Windows release job must build Connect exactly once with scripts/build-connect.ps1')
 
 finalize_job = workflow.split('\n  finalize:', 1)[1].split('\n  attest:', 1)[0]
 if 'supply-chain-artifacts.sh' not in finalize_job:
@@ -174,5 +179,7 @@ docker build --pull=false -t hooshix-gateway:r6-scan -f deploy/gateway/Dockerfil
 docker save hooshix-gateway:r6-scan -o "$work/gateway-image.tar"
 bash scripts/release/supply-chain-artifacts.sh "$release_dir" "$work/gateway-image.tar" v0.0.0-r6
 find "$release_dir" -maxdepth 1 -type f -name '*.spdx.json' | grep -q .
+tar -tf "$release_dir/hooshix-gateway-image_v0.0.0-r6.tar" >/dev/null
+grep -q 'hooshix-gateway-image_v0.0.0-r6.tar$' "$release_dir/SHA256SUMS"
 
 echo "R-6 release/supply-chain gate: PASSED — exact-commit release policy, privilege split, immutable Actions/images, Syft SBOMs and Trivy final artifact/image vulnerability scans passed."

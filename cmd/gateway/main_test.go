@@ -155,6 +155,19 @@ func TestShutdownResultReportsGatewayDrainFailure(t *testing.T) {
 	}
 }
 
+func TestOpsListenAddressRequiresLoopback(t *testing.T) {
+	for _, address := range []string{"", "127.0.0.1:9090", "127.42.5.9:0", "[::1]:9090"} {
+		if err := validateOpsListenAddress(address); err != nil {
+			t.Errorf("loopback or disabled address %q rejected: %v", address, err)
+		}
+	}
+	for _, address := range []string{"0.0.0.0:9090", ":9090", "192.168.1.10:9090", "[::]:9090", "[2001:db8::1]:9090", "localhost:9090", "127.0.0.1"} {
+		if err := validateOpsListenAddress(address); err == nil {
+			t.Errorf("non-loopback or malformed address %q was accepted", address)
+		}
+	}
+}
+
 // TestGatewayLogLevelMapping keeps the documented -log-level values stable.
 func TestGatewayLogLevelMapping(t *testing.T) {
 	if got := gatewayLogLevel("debug"); got.String() != "DEBUG" {

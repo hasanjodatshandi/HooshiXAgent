@@ -88,6 +88,80 @@ func TestUDPConnectorRequiresProtocolHeader(t *testing.T) {
 	}
 }
 
+func TestConnectorUsesEndpointFairnessAndGlobalIngressRate(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		exhaust func(*testing.T, *Gateway)
+	}{
+		{
+			name: "endpoint fairness",
+			exhaust: func(t *testing.T, gateway *Gateway) {
+				t.Helper()
+				if got := gateway.resources.ingressRouteAdmission.TryAcquire("endpoint-1", time.Now()); got != admissionAccepted {
+					t.Fatalf("endpoint admission setup rejected: %v", got)
+				}
+				gateway.resources.ingressRouteAdmission.Release("endpoint-1")
+			},
+		},
+		{
+			name: "global ingress rate",
+			exhaust: func(t *testing.T, gateway *Gateway) {
+				t.Helper()
+				if !gateway.resources.ingressRate.Allow(time.Now()) {
+					t.Fatal("global ingress rate setup was unexpectedly rejected")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			token := "connector-token-with-at-least-32-bytes"
+			digest := sha256.Sum256([]byte(token))
+			source := NewSnapshotMetadata()
+			addV2Record(t, source.addServiceEndpointJSON, contractv2.ServiceEndpoint{
+				Kind: "service_endpoint", ContractVersion: 2, EndpointID: "endpoint-1",
+				OwnerDeviceID: "device-1", Protocol: contractv2.ProtocolTCP,
+				LocalEndpointID: "rdp-1", Exposure: contractv2.ExposurePrivate, Enabled: true,
+				CreatedAt: now.Add(-time.Hour).Format(time.RFC3339), Revision: 1,
+			})
+			addV2Record(t, source.addConnectorGrantJSON, contractv2.ConnectorGrant{
+				Kind: "connector_grant", ContractVersion: 2, GrantID: "grant-1",
+				EndpointID: "endpoint-1", TokenID: "token-1", TokenSHA256: hex.EncodeToString(digest[:]),
+				NotBefore: now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: now.Add(time.Minute).Format(time.RFC3339),
+				MaxConnections: 1,
+			})
+			limits := DefaultLimits()
+			limits.IngressRatePerSecond = 1
+			limits.IngressRateBurst = 1
+			gateway, err := New(source, nil, limits, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = gateway.Close(context.Background()) }()
+			sess := &session{supportsHalfClose: true}
+			sess.authorized.Store(true)
+			gateway.primaries["device-1"] = sess
+
+			test.exhaust(t, gateway)
+			request := httptest.NewRequest(http.MethodGet, connectorPath, nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("X-Hooshix-Grant-ID", "grant-1")
+			request.Header.Set("X-Hooshix-Token-ID", "token-1")
+			response := httptest.NewRecorder()
+			gateway.handleConnector(response, request)
+			if response.Code != http.StatusTooManyRequests {
+				t.Fatalf("connector response=%d want=%d: body=%s", response.Code, http.StatusTooManyRequests, response.Body.String())
+			}
+			if inFlight := gateway.resources.ingressRouteAdmission.InFlight("endpoint-1"); inFlight != 0 {
+				t.Fatalf("rejected connector leaked endpoint admission: in_flight=%d", inFlight)
+			}
+			if inFlight := gateway.resources.ingressDeviceAdmission.InFlight("device-1"); inFlight != 0 {
+				t.Fatalf("rejected connector leaked device admission: in_flight=%d", inFlight)
+			}
+		})
+	}
+}
+
 func TestActiveConnectorFlowIsCancelledAfterGrantRevocation(t *testing.T) {
 	for _, protocol := range []contractv2.Protocol{contractv2.ProtocolTCP, contractv2.ProtocolUDP} {
 		t.Run(string(protocol), func(t *testing.T) { testActiveConnectorRevocation(t, protocol) })

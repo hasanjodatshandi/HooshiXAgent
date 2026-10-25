@@ -110,7 +110,7 @@ Administrative listener (`-ops-listen`, default `127.0.0.1:9090`, empty disables
 - `GET /readyz` — readiness (draining state and external metadata usability);
 - `GET /metrics` — low-cardinality aggregate metrics.
 
-The administrative listener is plaintext and MUST NOT be publicly reachable: it is loopback-bound by default and is not published by the shipped deployment. Operational endpoints are deliberately not registered on the public listener, because a more specific mux pattern such as `GET /healthz` would win over the ingress pattern for *every* Host, so a tenant-hosted `/healthz` could never reach the tenant application.
+The administrative listener is plaintext and MUST NOT be publicly reachable: it is loopback-bound by default and is not published by the shipped deployment. Startup fails closed unless `-ops-listen` is empty or names an explicit loopback IP; wildcard, non-loopback and hostname binds are refused. Operational endpoints are deliberately not registered on the public listener, because a more specific mux pattern such as `GET /healthz` would win over the ingress pattern for *every* Host, so a tenant-hosted `/healthz` could never reach the tenant application.
 
 The public request cannot provide a raw Agent-local target. The Gateway sends only the external `local_endpoint_id` to the Agent.
 
