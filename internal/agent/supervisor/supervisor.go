@@ -485,13 +485,13 @@ func (sup *Supervisor) persistStatus() {
 		return
 	}
 	sup.statusFailures++
-	first := sup.statusFailures == 1
+	failures := sup.statusFailures
 	sup.statusMu.Unlock()
-	if first {
+	if failures == 1 {
 		sup.opts.Logger.Warn("supervisor: write status file failed", "error", err)
 		return
 	}
-	sup.opts.Logger.Debug("supervisor: write status file failed", "error", err, "consecutive_failures", sup.statusFailures)
+	sup.opts.Logger.Debug("supervisor: write status file failed", "error", err, "consecutive_failures", failures)
 }
 
 // runAttempt runs one live tunnel-loop attempt until it ends on its own, the

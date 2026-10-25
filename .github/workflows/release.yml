@@ -204,11 +204,20 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-setup.ps1
           if ($LASTEXITCODE -ne 0) { throw "scripts/build-setup.ps1 failed with exit code $LASTEXITCODE" }
 
+      # Connect is a separate download, not an installer payload. Build it once
+      # in this same Windows job so its existing resource/GUI gates protect the
+      # exact bytes that finalize will scan, checksum, attest and publish.
+      - name: Build hooshix-connect.exe on the verified release commit
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-connect.ps1
+          if ($LASTEXITCODE -ne 0) { throw "scripts/build-connect.ps1 failed with exit code $LASTEXITCODE" }
+
       - name: Verify the distribution artifacts exist
         shell: pwsh
         run: |
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
-          foreach ($name in @('HooshiXAgent-Setup.exe', 'hooshix-agent.exe', 'hooshix-agent-tray.exe')) {
+          foreach ($name in @('HooshiXAgent-Setup.exe', 'hooshix-agent.exe', 'hooshix-agent-tray.exe', 'hooshix-connect.exe')) {
             $path = Join-Path $dist $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing distribution artifact: $name" }
             $info = Get-Item -LiteralPath $path
@@ -216,11 +225,13 @@ jobs:
             Write-Host "$name = $($info.Length) bytes"
           }
 
-      - name: Upload the supported Windows installer
+      - name: Upload the Windows desktop release artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-setup-${{ needs.policy.outputs.release_sha }}
-          path: dist/HooshiXAgent-Setup.exe
+          path: |
+            dist/HooshiXAgent-Setup.exe
+            dist/hooshix-connect.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -248,7 +259,7 @@ jobs:
           name: release-candidate-${{ needs.policy.outputs.release_sha }}
           path: dist
 
-      - name: Download the supported Windows installer
+      - name: Download the Windows desktop release artifacts
         uses: actions/download-artifact@6b208ae046db98e579e8a3aa621ab581ff575935 # v4.1.1
         with:
           name: release-setup-${{ needs.policy.outputs.release_sha }}
@@ -267,6 +278,10 @@ jobs:
           version='${{ needs.policy.outputs.release_version }}'
           if [[ ! -f dist/HooshiXAgent-Setup.exe ]]; then
             echo "the supported Windows installer is missing from the release candidate" >&2
+            exit 1
+          fi
+          if [[ ! -f dist/hooshix-connect.exe ]]; then
+            echo "the HooshiX Connect client is missing from the release candidate" >&2
             exit 1
           fi
           rm -rf "${RUNNER_TEMP}/released-agent"
@@ -303,6 +318,8 @@ jobs:
           cd dist
           sha256sum -c SHA256SUMS
           grep -q 'HooshiXAgent-Setup.exe$' SHA256SUMS
+          grep -q 'hooshix-connect.exe$' SHA256SUMS
+          grep -q 'hooshix-gateway-image_.*\.tar$' SHA256SUMS
 
       - name: Upload finalized release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

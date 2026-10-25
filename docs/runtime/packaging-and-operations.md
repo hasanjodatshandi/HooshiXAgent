@@ -217,9 +217,13 @@ has no stderr, so every start-up failure path in the program ends in a message b
 rather than a silent process exit.
 
 The unsigned-binary risk described in "Authenticode signing status (accepted risk)"
-applies to `hooshix-connect.exe` too. It is not in the release workflow yet, so its
-integrity today is established by the digest the build script prints and by the
-TLS-protected Panel download route.
+applies to `hooshix-connect.exe` too. The release workflow builds it once in the
+Windows desktop job on the exact verified release commit, preserves the script's
+resource and GUI-subsystem gates, and transfers those exact bytes into `finalize`.
+The client is therefore included in the release `SHA256SUMS`, per-artifact SBOM and
+vulnerability scan, Artifact Attestations and published GitHub release assets.
+The Panel download route should serve that attested release asset rather than a
+separate local rebuild.
 
 Beyond the artifact shape, the binary is executed by `scripts/ci/connect-gui-runtime.ps1`
 on the `windows-distribution-build` CI job: it launches the built exe from a throwaway
@@ -259,7 +263,7 @@ The workflow is privilege-separated:
 
 For post-merge verification without publishing a real release, the same workflow exposes `workflow_dispatch` on `main`. The dry-run still requires successful exact-SHA main CI, builds/scans the candidate, executes the OIDC `attest` job and repository-identity verification, while the entire `publish` job is skipped. This gives R-6 actual OIDC verification evidence without granting publication privilege to the dry-run or creating/moving a version tag.
 
-All third-party GitHub Actions in CI/release workflows are pinned to reviewed immutable 40-character commit SHAs with the reviewed semantic version recorded in an inline comment. Release archives include per-artifact SPDX JSON SBOMs and an SPDX JSON SBOM for the built Gateway image candidate; these SBOMs are themselves checksummed and attested.
+All third-party GitHub Actions in CI/release workflows are pinned to reviewed immutable 40-character commit SHAs with the reviewed semantic version recorded in an inline comment. Release archives and executables include per-artifact SPDX JSON SBOMs. The exact scanned Gateway image is also published as `hooshix-gateway-image_<version>.tar`, with its own SPDX JSON SBOM; the image archive and every SBOM are checksummed and attested like the other release subjects.
 
 Operators verify a downloaded release before promotion:
 

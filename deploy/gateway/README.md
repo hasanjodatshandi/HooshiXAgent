@@ -96,7 +96,7 @@ Inspect status:
 
 ## Operations
 
-- `/healthz`, `/readyz` and `/metrics` are served on the Gateway's separate administrative listener (`-ops-listen 127.0.0.1:9090`, plaintext, loopback inside the container, not published). They are never served on the public listener, so they can never shadow a tenant route.
+- `/healthz`, `/readyz` and `/metrics` are served on the Gateway's separate administrative listener (`-ops-listen 127.0.0.1:9090`, plaintext, loopback inside the container, not published). The Gateway refuses non-loopback administrative binds because these endpoints have no authentication or TLS. They are never served on the public listener, so they can never shadow a tenant route.
 - `/readyz` is an internal readiness endpoint and fails closed when live metadata has no fresh validated generation.
 - `/metrics` emits low-cardinality aggregate Prometheus text metrics, including live metadata freshness/refresh health.
 - Caddy refuses `/readyz` and `/metrics` on the public edge for every hostname as defence in depth. It deliberately does **not** refuse `/healthz`: `/healthz` is one of the most common tenant health paths, and the separate ops listener already removed the Gateway-local shadowing, so an edge refusal would only make a tenant's own `/healthz` unreachable. This is the structural fix for the pre-launch finding that a Gateway-local endpoint had made a tenant's `/healthz` unreachable.
@@ -135,6 +135,8 @@ For a source checkout deployment:
 4. run `docker compose up -d`;
 5. run `./diagnose.sh`;
 6. if health/diagnostics fail, checkout the previous attested release and repeat build/up.
+
+To deploy the published image instead of rebuilding it, verify the release checksums and attestations, then run `docker load -i hooshix-gateway-image_<version>.tar` followed by `HOOSHIX_GATEWAY_IMAGE=hooshix-gateway:<version> docker compose up -d --no-build`.
 
 Clean deployment and deterministic previous-version rollback are verified by the packaging gate. AG-8 additionally verifies forced transport interruption/recovery, package rollback, release checksums and deliberate artifact-tamper rejection before a release-ready claim.
 

@@ -151,6 +151,41 @@ func main() { fmt.Println("old-marker") }
 EOF
 go build -o "$prefix/hooshix-agent" "$work/old.go"
 
+# A failure after the atomic target publication (here, service-spec generation)
+# must restore the old live bytes. A fresh-install failure must leave no target.
+failing_stage="$work/failing-package"
+mkdir -p "$failing_stage"
+cp packaging/agent/unix/install.sh "$failing_stage/install.sh"
+cat >"$failing_stage/hooshix-agent" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == service-spec ]]; then
+  exit 42
+fi
+printf '%s\n' new-marker
+EOF
+chmod 755 "$failing_stage/install.sh" "$failing_stage/hooshix-agent"
+(cd "$failing_stage" && sha256sum hooshix-agent >SHA256SUMS)
+failed_prefix="$work/failed-upgrade/bin"
+mkdir -p "$failed_prefix"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" old-marker' >"$failed_prefix/hooshix-agent"
+chmod 755 "$failed_prefix/hooshix-agent"
+if HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$failing_stage/hooshix-agent" \
+  "$failing_stage/install.sh" --prefix "$failed_prefix" --state-dir "$work/failed-upgrade/state" \
+  --service-path "$work/failed-upgrade/service" >/dev/null 2>&1; then
+  echo "Agent installer unexpectedly succeeded after service-spec failure" >&2
+  exit 1
+fi
+[[ "$("$failed_prefix/hooshix-agent")" == old-marker ]]
+[[ ! -e "$failed_prefix/hooshix-agent.previous" ]]
+fresh_failed_prefix="$work/failed-fresh-install/bin"
+if HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$failing_stage/hooshix-agent" \
+  "$failing_stage/install.sh" --prefix "$fresh_failed_prefix" --state-dir "$work/failed-fresh-install/state" \
+  --service-path "$work/failed-fresh-install/service" >/dev/null 2>&1; then
+  echo "fresh Agent installer unexpectedly succeeded after service-spec failure" >&2
+  exit 1
+fi
+[[ ! -e "$fresh_failed_prefix/hooshix-agent" ]]
+
 HOOSHIX_AGENT_OS="$os_name" HOOSHIX_AGENT_BINARY="$stage/hooshix-agent" \
   "$stage/install.sh" --prefix "$prefix" --state-dir "$state" --service-path "$service" --no-service
 [[ -f "$prefix/hooshix-agent.previous" ]]

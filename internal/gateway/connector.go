@@ -63,11 +63,35 @@ func (gateway *Gateway) handleConnector(response http.ResponseWriter, request *h
 	defer gateway.releaseConnectorGrant(grant.GrantID)
 
 	now := time.Now()
-	if gateway.resources.ingressDeviceAdmission.TryAcquire(endpoint.OwnerDeviceID, now) != admissionAccepted {
-		http.Error(response, "connector capacity reached", http.StatusServiceUnavailable)
+	routeAdmission := gateway.resources.ingressRouteAdmission.TryAcquire(endpoint.EndpointID, now)
+	if routeAdmission != admissionAccepted {
+		status := http.StatusServiceUnavailable
+		message := "connector capacity reached"
+		if routeAdmission == admissionRejectedRate {
+			status = http.StatusTooManyRequests
+			message = "connector rate limit exceeded"
+		}
+		http.Error(response, message, status)
+		return
+	}
+	defer gateway.resources.ingressRouteAdmission.Release(endpoint.EndpointID)
+
+	deviceAdmission := gateway.resources.ingressDeviceAdmission.TryAcquire(endpoint.OwnerDeviceID, now)
+	if deviceAdmission != admissionAccepted {
+		status := http.StatusServiceUnavailable
+		message := "connector capacity reached"
+		if deviceAdmission == admissionRejectedRate {
+			status = http.StatusTooManyRequests
+			message = "connector rate limit exceeded"
+		}
+		http.Error(response, message, status)
 		return
 	}
 	defer gateway.resources.ingressDeviceAdmission.Release(endpoint.OwnerDeviceID)
+	if !gateway.resources.ingressRate.Allow(now) {
+		http.Error(response, "connector rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
 	select {
 	case gateway.resources.ingressSlots <- struct{}{}:
 		defer func() { <-gateway.resources.ingressSlots }()
