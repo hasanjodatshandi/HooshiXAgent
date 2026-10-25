@@ -46,7 +46,7 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e TRIVY_CACHE_DIR=/cache \
   -v "$trivy_cache:/cache" \
-  "$TRIVY_IMAGE" image --db-repository public.ecr.aws/aquasecurity/trivy-db:2 --download-db-only --no-progress >/dev/null
+  "$TRIVY_IMAGE" image --db-repository ghcr.io/aquasecurity/trivy-db:2 --download-db-only --no-progress >/dev/null
 
 for artifact in "${primary_artifacts[@]}"; do
   sbom="${artifact}.spdx.json"
