@@ -24,9 +24,9 @@ type enrollmentStartRequest struct {
 // enrollment: everything the page needs to show the code and to poll, and
 // nothing else (the poll token never reaches the page).
 type pendingEnrollmentView struct {
-	UserCode        string
-	VerificationURI string
-	ExpiresAt       time.Time
+	UserCode        string    `json:"user_code"`
+	VerificationURI string    `json:"verification_uri"`
+	ExpiresAt       time.Time `json:"expires_at"`
 }
 
 // pendingEnrollmentSnapshot returns the live pending enrollment for page
