@@ -13,6 +13,11 @@ Dockerfile text eol=lf
 Caddyfile text eol=lf
 Caddyfile.static text eol=lf
 *.caddyfile text eol=lf
+# The Agent embeds the built UI bundle verbatim with go:embed. A CRLF checkout
+# on Windows changes those bytes, so its build no longer matches the Linux-built
+# release binary; force LF across the UI sources and bundle.
+internal/agent/webapp/ui/** text eol=lf
+internal/agent/webapp/ui/**/*.woff2 binary
 # PowerShell is a Windows-first surface whose tooling is most predictable with
 # native CRLF endings.
 *.ps1 text eol=crlf
