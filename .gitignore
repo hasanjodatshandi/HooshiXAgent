@@ -5,7 +5,6 @@
 *.test
 
 /deploy/gateway/runtime/
-dist/
 cmd/hooshix-setup/payload/
 /hooshix-agent-tray.exe
 /hooshix-setup.exe
@@ -29,6 +28,12 @@ bin/fix-perms.*
 
 # Local tool session state (a generated project id), not project content.
 /.freebuff/
+
+# Node dependencies for the Agent setup UI. The compiled bundle in
+# internal/agent/webapp/ui/dist is intentionally COMMITTED: `go build` must
+# embed a working UI from a clean checkout without a Node toolchain, and CI
+# rebuilds it to prove the committed bytes match source.
+node_modules/
 
 # Local gateway debug capture.
 diag_output.txt

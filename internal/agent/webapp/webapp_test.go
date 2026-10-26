@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -152,13 +153,12 @@ func TestServiceOwnedEnrollmentCommitsCredentialsAndRotatesCapability(t *testing
 	if onDisk != rotated {
 		t.Fatalf("in-memory capability %q != on-disk %q", rotated, onDisk)
 	}
-	// The old capability must no longer authenticate.
-	csrf := app.ensureCSRFToken()
-	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if strings.Contains(recorder.Body.String(), csrf) {
-		t.Fatal("the rotated-away capability still authenticated")
+	// The old capability must no longer authenticate against the state API.
+	if stale := getStateResponse(t, app, capability); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("the rotated-away capability still authenticated (status=%d)", stale.Code)
+	}
+	if fresh := getState(t, app, rotated); fresh.CSRF == "" {
+		t.Fatal("the rotated capability did not unlock /api/state")
 	}
 }
 
@@ -267,15 +267,27 @@ func enrollWithPanel(t *testing.T, app *App, capability, csrf, caFile string) *h
 	return postEnrollmentClaim(t, app, capability, csrf)
 }
 
-func getPage(t *testing.T, app *App, capability string) string {
+// getStateResponse fetches the state document the SPA renders from, using the
+// same capability-in-query authentication the page URL carries.
+func getStateResponse(t *testing.T, app *App, capability string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/state?cap="+url.QueryEscape(capability), nil)
 	recorder := httptest.NewRecorder()
 	app.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func getState(t *testing.T, app *App, capability string) uiStateResponse {
+	t.Helper()
+	recorder := getStateResponse(t, app, capability)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("page status=%d want=200", recorder.Code)
+		t.Fatalf("state status=%d want=200: %s", recorder.Code, recorder.Body.String())
 	}
-	return recorder.Body.String()
+	var state uiStateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode state: %v\n%s", err, recorder.Body.String())
+	}
+	return state
 }
 
 // TestPairingRejectsCrossSiteFormPosts proves the LocalSystem pairing UI
@@ -336,8 +348,9 @@ func TestRejectsNonLoopbackRemoteAddress(t *testing.T) {
 }
 
 // TestRootPageRequiresCapability proves an unauthenticated GET / returns the
-// bootstrap page and discloses NEITHER the pairing capability NOR the CSRF
-// token. Before the fix this request returned the real page containing both.
+// capability-free bootstrap page and discloses NEITHER the pairing capability
+// NOR the CSRF token. The authenticated shell is a static build artifact, so
+// the CSRF token comes from the separately gated state endpoint.
 func TestRootPageRequiresCapability(t *testing.T) {
 	app, capability := newTestApp(t)
 	csrf := app.ensureCSRFToken()
@@ -359,24 +372,41 @@ func TestRootPageRequiresCapability(t *testing.T) {
 		t.Fatalf("bootstrap page missing its notice:\n%s", body)
 	}
 
-	// A wrong capability must not fall through to the real page either.
+	// A wrong capability must not fall through to the shell or the state API.
 	request = newLoopbackRequest(http.MethodGet, "/?cap="+strings.Repeat("A", 43), nil)
 	recorder = httptest.NewRecorder()
 	app.Handler().ServeHTTP(recorder, request)
-	if strings.Contains(recorder.Body.String(), csrf) {
-		t.Fatalf("wrong-capability root page disclosed the CSRF token:\n%s", recorder.Body.String())
+	body = recorder.Body.String()
+	if strings.Contains(body, csrf) || strings.Contains(body, `id="root"`) {
+		t.Fatalf("wrong-capability root page disclosed the shell or CSRF token:\n%s", body)
+	}
+	if !strings.Contains(body, "Pairing authorization required") {
+		t.Fatalf("wrong-capability root page is not the bootstrap page:\n%s", body)
 	}
 
-	// With the capability the real page is served (and carries both secrets,
-	// which is now acceptable: the caller already holds them).
+	// Without a capability the state document is refused outright.
+	if rejected := getStateResponse(t, app, ""); rejected.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated state status=%d want=401", rejected.Code)
+	}
+
+	// With the capability the static shell is served. It embeds no secret:
+	// state, including the CSRF token, arrives from /api/state.
 	request = newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
 	recorder = httptest.NewRecorder()
 	app.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("authenticated GET status=%d want=200", recorder.Code)
 	}
-	if !strings.Contains(recorder.Body.String(), csrf) {
-		t.Fatalf("authenticated page must embed the CSRF token:\n%s", recorder.Body.String())
+	shell := recorder.Body.String()
+	if !strings.Contains(shell, `id="root"`) {
+		t.Fatalf("authenticated GET did not serve the SPA shell:\n%s", shell)
+	}
+	if strings.Contains(shell, csrf) || strings.Contains(shell, capability) {
+		t.Fatal("the static shell embeds a state secret")
+	}
+	state := getState(t, app, capability)
+	if state.CSRF != csrf {
+		t.Fatalf("state CSRF token=%q want the live token", state.CSRF)
 	}
 }
 
@@ -405,6 +435,11 @@ func TestRootPageDoesNotCreateState(t *testing.T) {
 	app.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("root GET status=%d want=200", recorder.Code)
+	}
+	// The state endpoint loads the config and public key but must not create
+	// either: a GET is a read, not a provisioning step.
+	if stateResponse := getStateResponse(t, app, capability); stateResponse.Code != http.StatusOK {
+		t.Fatalf("state GET status=%d want=200: %s", stateResponse.Code, stateResponse.Body.String())
 	}
 	after, err := os.ReadDir(dir)
 	if err != nil {
@@ -623,10 +658,11 @@ func TestNullOriginAcceptsOnlyUserInitiatedSameOriginLoopbackNavigation(t *testi
 	}
 }
 
-// TestTunnelHealthRendersStatusSnapshot proves the pairing page surfaces the
+// TestTunnelHealthSnapshotReachesState proves the state endpoint surfaces the
 // service-written status.json fields (connection, reconnects, last error) and
-// escapes error text derived from remote input.
-func TestTunnelHealthRendersStatusSnapshot(t *testing.T) {
+// that remote-derived error text is JSON-encoded rather than embedded as
+// markup.
+func TestTunnelHealthSnapshotReachesState(t *testing.T) {
 	app, capability := newTestApp(t)
 	health := TunnelHealth{
 		Phase:        "running",
@@ -643,41 +679,27 @@ func TestTunnelHealthRendersStatusSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
+	recorder := getStateResponse(t, app, capability)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("root GET status=%d want=200", recorder.Code)
+		t.Fatalf("state GET status=%d want=200", recorder.Code)
 	}
-	body := recorder.Body.String()
-	for _, want := range []string{"Tunnel status", "connected", "7", "Tunnel status"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("page missing %q in body:\n%s", want, body)
-		}
+	if strings.Contains(recorder.Body.String(), "failed dial <script>") {
+		t.Fatalf("last error was emitted as markup:\n%s", recorder.Body.String())
 	}
-	// Error text must be escaped, never rendered as markup. (The page carries
-	// its own legitimate <script> block, so match the error text itself.)
-	if strings.Contains(body, `failed dial <script>`) {
-		t.Fatalf("last error rendered unescaped:\n%s", body)
-	}
-	if !strings.Contains(body, "&lt;script&gt;") {
-		t.Fatalf("expected escaped error text in body:\n%s", body)
+	state := getState(t, app, capability)
+	if state.Tunnel != health {
+		t.Fatalf("tunnel health=%+v want=%+v", state.Tunnel, health)
 	}
 }
 
 // TestTunnelHealthMissingFileShowsNeutralRow proves a missing status.json
-// (service stopped, first boot) renders the neutral "status unavailable"
-// row instead of failing the page.
+// (service stopped, first boot) yields the neutral "status unavailable" state
+// instead of failing the state document.
 func TestTunnelHealthMissingFileShowsNeutralRow(t *testing.T) {
 	app, capability := newTestApp(t)
-	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("root GET status=%d want=200", recorder.Code)
-	}
-	if !strings.Contains(recorder.Body.String(), "status unavailable") {
-		t.Fatalf("missing neutral status row:\n%s", recorder.Body.String())
+	state := getState(t, app, capability)
+	if state.Tunnel.Phase != "unknown" || state.Tunnel.State != "status-unavailable" {
+		t.Fatalf("missing status.json produced %+v", state.Tunnel)
 	}
 }
 
@@ -709,17 +731,22 @@ func TestPairingRequiresInstalledCapability(t *testing.T) {
 	}
 }
 
-func TestPairingNoticeEscapesHTML(t *testing.T) {
+// TestPairingNoticeIsJSONEncoded proves an operator notice containing markup
+// is delivered as a JSON string the SPA renders as text, never as executable
+// markup.
+func TestPairingNoticeIsJSONEncoded(t *testing.T) {
 	app, capability := newTestApp(t)
-	app.setNotice(`<script>alert("xss")</script>`)
-	request := newLoopbackRequest(http.MethodGet, "/?cap="+capability, nil)
-	recorder := httptest.NewRecorder()
-	app.Handler().ServeHTTP(recorder, request)
-	if strings.Contains(recorder.Body.String(), `<script>alert`) {
-		t.Fatal("notice rendered executable HTML")
+	const notice = `<script>alert("xss")</script>`
+	app.setNotice(notice)
+	recorder := getStateResponse(t, app, capability)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("state GET status=%d want=200", recorder.Code)
 	}
-	if !strings.Contains(recorder.Body.String(), `&lt;script&gt;`) {
-		t.Fatal("escaped notice was not rendered")
+	if strings.Contains(recorder.Body.String(), `<script>alert`) {
+		t.Fatal("notice was emitted as executable HTML")
+	}
+	if state := getState(t, app, capability); state.Notice != notice {
+		t.Fatalf("notice=%q want=%q", state.Notice, notice)
 	}
 }
 
@@ -788,9 +815,8 @@ func TestPairingStoresSuppliedCAFile(t *testing.T) {
 	if config.CAFile != caPath {
 		t.Fatalf("configured CA file=%q want=%q", config.CAFile, caPath)
 	}
-	page := getPage(t, app, app.currentCapability())
-	if !strings.Contains(page, caPath) {
-		t.Fatalf("the page does not report the configured CA file %q:\n%s", caPath, page)
+	if state := getState(t, app, app.currentCapability()); state.Config.CAFile != caPath {
+		t.Fatalf("the state document does not report the configured CA file %q: %q", caPath, state.Config.CAFile)
 	}
 }
 
@@ -826,8 +852,8 @@ func TestPairingWithoutCAFilePreservesConfiguredOne(t *testing.T) {
 	if config.CAFile != configuredPath {
 		t.Fatalf("enrollment without a CA file dropped the configured trust anchor: ca_file=%q want=%q", config.CAFile, configuredPath)
 	}
-	if !strings.Contains(getPage(t, app, app.currentCapability()), configuredPath) {
-		t.Fatal("the page does not report the preserved CA file")
+	if state := getState(t, app, app.currentCapability()); state.Config.CAFile != configuredPath {
+		t.Fatalf("the state document does not report the preserved CA file: %q", state.Config.CAFile)
 	}
 
 	// An explicitly supplied value wins over the preserved one. The capability
@@ -919,34 +945,46 @@ func TestPairingRejectsInvalidCAFile(t *testing.T) {
 	}
 }
 
-// TestConnectSectionRendersEnrollmentForm proves the unpaired page offers the
-// device-code enrollment form — not the removed paste-a-pairing-text flow.
-func TestConnectSectionRendersEnrollmentForm(t *testing.T) {
+// TestStateExposesUnpairedEnrollmentDefaults proves an unpaired agent's state
+// document carries everything the enrollment form needs, and nothing that
+// would leak a credential.
+func TestStateExposesUnpairedEnrollmentDefaults(t *testing.T) {
 	app, capability := newTestApp(t)
-	page := getPage(t, app, capability)
-	for _, want := range []string{
-		`id="enroll-form"`,
-		defaultEnrollmentPanelURL,
-		`name="server_url"`,
-		`name="device_name"`,
-		`name="ca_file"`,
-		`action="/enrollment/start?cap=`,
-	} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("unpaired page missing %q:\n%s", want, page)
-		}
+	recorder := getStateResponse(t, app, capability)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("state status=%d want=200: %s", recorder.Code, recorder.Body.String())
 	}
-	for _, gone := range []string{`action="/pair"`, "Paste your pairing text", "Register this device"} {
-		if strings.Contains(page, gone) {
-			t.Fatalf("unpaired page still renders the removed pairing-text flow (%q):\n%s", gone, page)
-		}
+	state := getState(t, app, capability)
+	if state.Paired {
+		t.Fatal("a fresh agent reported itself paired")
+	}
+	if state.Pending != nil {
+		t.Fatalf("a fresh agent reported a pending enrollment: %+v", state.Pending)
+	}
+	if state.DefaultPanelURL != defaultEnrollmentPanelURL {
+		t.Fatalf("default panel URL=%q want=%q", state.DefaultPanelURL, defaultEnrollmentPanelURL)
+	}
+	if strings.TrimSpace(state.Hostname) == "" {
+		t.Fatal("state did not report a hostname for the device-name default")
+	}
+	if state.Config.Endpoints == nil {
+		t.Fatal("endpoints must be an empty array, not null")
+	}
+	if len(state.Config.Endpoints) != 0 {
+		t.Fatalf("a fresh agent reported endpoints: %+v", state.Config.Endpoints)
+	}
+	if state.CSRF == "" {
+		t.Fatal("the state document did not carry the CSRF token")
+	}
+	if strings.Contains(recorder.Body.String(), "test_session_token") {
+		t.Fatal("the state document leaked a session token")
 	}
 }
 
-// TestConnectSectionRendersPendingEnrollment proves a live pending session
-// renders the user code, the verification link and the polling mount instead
-// of the form.
-func TestConnectSectionRendersPendingEnrollment(t *testing.T) {
+// TestStateExposesPendingEnrollment proves a live pending session reaches the
+// SPA as the user code, verification URI and expiry — and that the poll token
+// used to claim it never leaves the service process.
+func TestStateExposesPendingEnrollment(t *testing.T) {
 	app, capability := newTestApp(t)
 	csrf := app.ensureCSRFToken()
 	store := agent.NewPlatformSecretStore(app.StateDir())
@@ -959,71 +997,81 @@ func TestConnectSectionRendersPendingEnrollment(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("enrollment start status=%d want=201: %s", recorder.Code, recorder.Body.String())
 	}
-	page := getPage(t, app, capability)
-	for _, want := range []string{
-		"ABCD-EFGH",
-		`id="pending-block"`,
-		"data-csrf=",
-		"data-expires=",
-		"https://panel.hooshix.test/enroll",
-	} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("pending page missing %q:\n%s", want, page)
-		}
+	stateRecorder := getStateResponse(t, app, capability)
+	if stateRecorder.Code != http.StatusOK {
+		t.Fatalf("state status=%d want=200: %s", stateRecorder.Code, stateRecorder.Body.String())
 	}
-	if strings.Contains(page, `id="enroll-form"`) {
-		t.Fatalf("pending page still renders the enrollment form:\n%s", page)
+	if strings.Contains(stateRecorder.Body.String(), strings.Repeat("p", 43)) {
+		t.Fatal("the state document leaked the enrollment poll token")
 	}
-}
-
-// TestConnectSectionRendersPairedStatus proves a paired agent sees its
-// pairing status instead of any enrollment flow.
-func TestConnectSectionRendersPairedStatus(t *testing.T) {
-	app, capability, _, _ := pairedApp(t)
-	page := getPage(t, app, capability)
-	for _, want := range []string{
-		"Paired with device-unpair-000001",
-		"wss://gateway.example/agent/v1/connect",
-	} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("paired page missing %q:\n%s", want, page)
-		}
+	state := getState(t, app, capability)
+	if state.Pending == nil {
+		t.Fatal("the state document omitted the live pending enrollment")
 	}
-	if strings.Contains(page, `id="enroll-form"`) || strings.Contains(page, `id="pending-block"`) {
-		t.Fatalf("paired page renders an enrollment flow:\n%s", page)
+	if state.Pending.UserCode != "ABCD-EFGH" {
+		t.Fatalf("pending user code=%q", state.Pending.UserCode)
+	}
+	if state.Pending.VerificationURI != "https://panel.hooshix.test/enroll" {
+		t.Fatalf("pending verification URI=%q", state.Pending.VerificationURI)
+	}
+	if !state.Pending.ExpiresAt.After(time.Now()) {
+		t.Fatalf("pending enrollment already expired at %s", state.Pending.ExpiresAt)
 	}
 }
 
-// TestRemoteDesktopPresetIsClientSideOnly proves the Remote Desktop convenience
-// is a pure page-level form prefill: it names the RDP loopback target and the
-// panel-side follow-up, and it never reaches the Agent to change Windows' own
-// remote-connections setting. The pairing page must not grow any enable or
-// disable control, because RDP admission is a Windows + Panel + Connector
-// decision (ADR-0017), not an Agent one.
-func TestRemoteDesktopPresetIsClientSideOnly(t *testing.T) {
-	app, capability := newTestApp(t)
-	page := getPage(t, app, capability)
-	for _, want := range []string{
-		`id="preset-rdp"`,
-		`type="button"`,
-		`"rdp-001"`,
-		`"127.0.0.1:3389"`,
-		`getElementById("expose-id")`,
-	} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("page missing Remote Desktop preset part %q:\n%s", want, page)
+// TestStateExposesPairedStatus proves a paired agent's state document reports
+// the pairing and public key the SPA renders.
+func TestStateExposesPairedStatus(t *testing.T) {
+	app, capability, _, publicKey := pairedApp(t)
+	state := getState(t, app, capability)
+	if !state.Paired {
+		t.Fatal("a paired agent reported itself unpaired")
+	}
+	if state.Config.DeviceID != "device-unpair-000001" {
+		t.Fatalf("device id=%q", state.Config.DeviceID)
+	}
+	if state.Config.GatewayURL != "wss://gateway.example/agent/v1/connect" {
+		t.Fatalf("gateway URL=%q", state.Config.GatewayURL)
+	}
+	if state.PublicKey != agent.PublicKeyBase64(publicKey) {
+		t.Fatalf("public key=%q want=%q", state.PublicKey, agent.PublicKeyBase64(publicKey))
+	}
+	if state.Pending != nil {
+		t.Fatalf("a paired agent reported a pending enrollment: %+v", state.Pending)
+	}
+}
+
+// TestShippedUIBundleHasNoRemoteDesktopControl proves the Remote Desktop
+// convenience shipped in the UI is a pure form prefill: the bundle names the
+// RDP loopback target and the panel-side follow-up, and never grows an
+// Agent-side control for Windows' own remote-connections setting (ADR-0017).
+func TestShippedUIBundleHasNoRemoteDesktopControl(t *testing.T) {
+	entries, err := fs.ReadDir(uiFiles, "assets")
+	if err != nil {
+		t.Fatalf("the embedded UI bundle has no assets: %v", err)
+	}
+	var bundle strings.Builder
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".js") {
+			continue
+		}
+		data, err := fs.ReadFile(uiFiles, "assets/"+entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundle.Write(data)
+	}
+	if bundle.Len() == 0 {
+		t.Fatal("the embedded UI bundle contains no JavaScript")
+	}
+	for _, want := range []string{"rdp-001", "127.0.0.1:3389"} {
+		if !strings.Contains(bundle.String(), want) {
+			t.Fatalf("the shipped UI bundle is missing the Remote Desktop preset value %q", want)
 		}
 	}
-	for _, forbidden := range []string{
-		`action="/rdp`,
-		`name="rdp`,
-		"Enable Remote Desktop",
-		"Disable Remote Desktop",
-		"fDenyTSConnections",
-		"TSEnable",
-	} {
-		if strings.Contains(page, forbidden) {
-			t.Fatalf("page must not offer an Agent-side RDP control %q:\n%s", forbidden, page)
+	for _, forbidden := range []string{"fDenyTSConnections", "TSEnable", "Enable Remote Desktop", "Disable Remote Desktop"} {
+		if strings.Contains(bundle.String(), forbidden) {
+			t.Fatalf("the shipped UI bundle offers an Agent-side RDP control (%q)", forbidden)
 		}
 	}
 }
@@ -1166,12 +1214,12 @@ func TestUnpairFromThePageClearsThePairing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(app.StateDir(), ".state-transaction")); !os.IsNotExist(err) {
 		t.Fatalf("unpair left a state transaction journal behind: %v", err)
 	}
-	page := getPage(t, app, capability)
-	if !strings.Contains(page, "Unpair this device") {
-		t.Fatalf("the page does not offer the clear-pairing action:\n%s", page)
+	state := getState(t, app, capability)
+	if state.Paired {
+		t.Fatalf("the state document still reports a pairing: %+v", state.Config)
 	}
-	if !strings.Contains(page, "unpaired") {
-		t.Fatalf("the page does not report the unpair:\n%s", page)
+	if !strings.Contains(state.Notice, "unpaired") {
+		t.Fatalf("the state document does not report the unpair: %q", state.Notice)
 	}
 }
 
@@ -1234,10 +1282,9 @@ func TestUnpairFromThePageWithResetIdentityReplacesTheKey(t *testing.T) {
 	if config.GatewayURL != "" || config.DeviceID != "" {
 		t.Fatalf("reset_identity unpair left pairing material behind: %+v", config)
 	}
-	// The page shows the new key so the operator can register it.
-	page := getPage(t, app, capability)
-	if !strings.Contains(page, agent.PublicKeyBase64(after)) {
-		t.Fatalf("the page does not show the replacement public key:\n%s", page)
+	// The state document shows the new key so the operator can register it.
+	if state := getState(t, app, capability); state.PublicKey != agent.PublicKeyBase64(after) {
+		t.Fatalf("the state document does not show the replacement public key: %q", state.PublicKey)
 	}
 }
 
@@ -1283,5 +1330,367 @@ func TestUnpairJSONClientReportsTheOutcome(t *testing.T) {
 	second := call()
 	if second["already_unpaired"] != true {
 		t.Fatalf("second unpair did not report an already-unpaired agent: %#v", second)
+	}
+}
+
+// uiAssetNames lists the public build artifacts the capability gate must let
+// through: the two root files and every hashed file under assets/.
+func uiAssetNames(t *testing.T) []string {
+	t.Helper()
+	names := []string{"boot.js", "favicon.svg"}
+	entries, err := fs.ReadDir(uiFiles, "assets")
+	if err != nil {
+		t.Fatalf("the embedded UI bundle has no assets: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		names = append(names, "assets/"+entry.Name())
+	}
+	return names
+}
+
+// TestStateAcceptsQueryOrHeaderCapability pins both credential shapes the SPA
+// and the tray use, and proves a wrong or missing capability is rejected.
+func TestStateAcceptsQueryOrHeaderCapability(t *testing.T) {
+	app, capability := newTestApp(t)
+	if recorder := getStateResponse(t, app, capability); recorder.Code != http.StatusOK {
+		t.Fatalf("query capability status=%d want=200", recorder.Code)
+	}
+	request := newLoopbackRequest(http.MethodGet, "/api/state", nil)
+	request.Header.Set("X-HooshiX-Pairing-Capability", capability)
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("header capability status=%d want=200", recorder.Code)
+	}
+	for name, rejected := range map[string]*httptest.ResponseRecorder{
+		"missing": getStateResponse(t, app, ""),
+		"wrong":   getStateResponse(t, app, strings.Repeat("A", 43)),
+	} {
+		if rejected.Code != http.StatusUnauthorized {
+			t.Fatalf("%s capability status=%d want=401", name, rejected.Code)
+		}
+	}
+	wrongHeader := newLoopbackRequest(http.MethodGet, "/api/state", nil)
+	wrongHeader.Header.Set("X-HooshiX-Pairing-Capability", strings.Repeat("B", 43))
+	recorder = httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, wrongHeader)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong header capability status=%d want=401", recorder.Code)
+	}
+}
+
+// TestStateDisclosesNoCredential proves the state document carries the
+// rendering data and the CSRF token but never the session token, private key
+// or pairing capability.
+func TestStateDisclosesNoCredential(t *testing.T) {
+	app, capability, _, publicKey := pairedApp(t)
+	recorder := getStateResponse(t, app, capability)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("state status=%d want=200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for name, secret := range map[string]string{
+		"session token":      "test_session_token_0123456789ABCDEF",
+		"pairing capability": capability,
+		"private key":        "private_key",
+	} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("the state document disclosed the %s", name)
+		}
+	}
+	state := getState(t, app, capability)
+	if state.PublicKey != agent.PublicKeyBase64(publicKey) {
+		t.Fatal("the state document did not carry the public device key")
+	}
+	if state.CSRF == "" {
+		t.Fatal("the state document did not carry the CSRF token")
+	}
+}
+
+// TestPublicAssetsAreCapabilityExemptAndSecretFree proves the browser can load
+// the SPA's static artifacts without the capability (and without putting it in
+// asset URLs), and that no artifact embeds a state secret.
+func TestPublicAssetsAreCapabilityExemptAndSecretFree(t *testing.T) {
+	app, capability := newTestApp(t)
+	csrf := app.ensureCSRFToken()
+	for _, name := range uiAssetNames(t) {
+		request := newLoopbackRequest(http.MethodGet, "/"+name, nil)
+		recorder := httptest.NewRecorder()
+		app.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status=%d want=200", name, recorder.Code)
+		}
+		if recorder.Body.Len() == 0 {
+			t.Fatalf("%s served an empty body", name)
+		}
+		if contentType := recorder.Header().Get("Content-Type"); contentType == "" {
+			t.Fatalf("%s served no Content-Type", name)
+		}
+		body := recorder.Body.String()
+		if strings.Contains(body, capability) || strings.Contains(body, csrf) {
+			t.Fatalf("%s embeds a state secret", name)
+		}
+		cacheControl := recorder.Header().Get("Cache-Control")
+		if strings.HasPrefix(name, "assets/") {
+			if !strings.Contains(cacheControl, "immutable") {
+				t.Fatalf("%s Cache-Control=%q want immutable", name, cacheControl)
+			}
+		} else if cacheControl != "no-cache" {
+			t.Fatalf("%s Cache-Control=%q want no-cache", name, cacheControl)
+		}
+	}
+}
+
+// TestUIAssetResolutionRejectsNonPublicPaths pins the public-asset rule:
+// only the two root files and flat hashed files under assets/ qualify, so a
+// traversal or nested path can never bypass the capability check.
+func TestUIAssetResolutionRejectsNonPublicPaths(t *testing.T) {
+	for _, requestPath := range []string{
+		"/assets/",
+		"/assets/nested/app.js",
+		"/assets/.hidden.js",
+		"/assets/../index.html",
+		"/assets/%2e%2e/index.html",
+		"/index.html",
+		"/boot.js/extra",
+		"/favicon.svg/extra",
+		"/api/state",
+		"/?cap=ignored",
+	} {
+		if name, ok := uiPublicAssetName(requestPath); ok {
+			t.Fatalf("%q resolved to public asset %q", requestPath, name)
+		}
+	}
+	for _, requestPath := range []string{"/boot.js", "/favicon.svg", "/assets/index-abc123.js"} {
+		if _, ok := uiPublicAssetName(requestPath); !ok {
+			t.Fatalf("%q should be a public asset", requestPath)
+		}
+	}
+}
+
+// TestShellIsServedOnlyAtRoot proves /index.html and unknown paths do not
+// expose the executable shell outside the root route, so HashRouter and the
+// capability gate stay aligned.
+func TestShellIsServedOnlyAtRoot(t *testing.T) {
+	app, capability := newTestApp(t)
+	for _, requestPath := range []string{"/index.html", "/dashboard", "/assets/nested/app.js", "/assets/"} {
+		request := newLoopbackRequest(http.MethodGet, requestPath+"?cap="+url.QueryEscape(capability), nil)
+		recorder := httptest.NewRecorder()
+		app.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d want=404", requestPath, recorder.Code)
+		}
+	}
+}
+
+// TestSecurityHeadersAreAppliedToEveryResponse pins the headers that constrain
+// the SPA: no inline or remote script, no framing, no referrer, no caching of
+// state, and immutable caching only for hashed assets.
+func TestSecurityHeadersAreAppliedToEveryResponse(t *testing.T) {
+	app, capability := newTestApp(t)
+	check := func(name string, recorder *httptest.ResponseRecorder, wantCache string) {
+		t.Helper()
+		header := recorder.Header()
+		if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") ||
+			!strings.Contains(csp, "frame-ancestors 'none'") {
+			t.Fatalf("%s CSP=%q is not restrictive", name, csp)
+		}
+		for key, value := range map[string]string{
+			"X-Content-Type-Options":     "nosniff",
+			"X-Frame-Options":            "DENY",
+			"Referrer-Policy":            "no-referrer",
+			"Cross-Origin-Opener-Policy": "same-origin",
+		} {
+			if got := header.Get(key); got != value {
+				t.Fatalf("%s %s=%q want %q", name, key, got, value)
+			}
+		}
+		if !strings.Contains(header.Get("Permissions-Policy"), "camera=()") {
+			t.Fatalf("%s served no Permissions-Policy", name)
+		}
+		if !strings.Contains(header.Get("Cache-Control"), wantCache) {
+			t.Fatalf("%s Cache-Control=%q want %q", name, header.Get("Cache-Control"), wantCache)
+		}
+	}
+
+	bootstrap := httptest.NewRecorder()
+	app.Handler().ServeHTTP(bootstrap, newLoopbackRequest(http.MethodGet, "/", nil))
+	check("bootstrap", bootstrap, "no-store")
+
+	boot := httptest.NewRecorder()
+	app.Handler().ServeHTTP(boot, newLoopbackRequest(http.MethodGet, "/boot.js", nil))
+	check("boot.js", boot, "no-cache")
+
+	hashed := ""
+	for _, name := range uiAssetNames(t) {
+		if strings.HasPrefix(name, "assets/") {
+			hashed = name
+			break
+		}
+	}
+	if hashed == "" {
+		t.Fatal("the UI bundle has no hashed assets")
+	}
+	asset := httptest.NewRecorder()
+	app.Handler().ServeHTTP(asset, newLoopbackRequest(http.MethodGet, "/"+hashed, nil))
+	check(hashed, asset, "immutable")
+
+	shell := httptest.NewRecorder()
+	app.Handler().ServeHTTP(shell, newLoopbackRequest(http.MethodGet, "/?cap="+url.QueryEscape(capability), nil))
+	check("shell", shell, "no-store")
+
+	state := getStateResponse(t, app, capability)
+	check("/api/state", state, "no-store")
+}
+
+// TestRotateJSONReturnsFreshCapability proves the SPA's rotate action receives
+// the new capability in the response (the page URL embeds it) and that the old
+// value stops authenticating immediately.
+func TestRotateJSONReturnsFreshCapability(t *testing.T) {
+	app, capability := newTestApp(t)
+	csrf := app.ensureCSRFToken()
+	request := newLoopbackRequest(http.MethodPost, "/pairing/rotate", strings.NewReader(""))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-HooshiX-Pairing-Capability", capability)
+	request.Header.Set("X-HooshiX-CSRF", csrf)
+	request.Header.Set("Origin", "http://127.0.0.1:8799")
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("rotate JSON status=%d want=200: %s", recorder.Code, recorder.Body.String())
+	}
+	var result struct {
+		Capability string `json:"capability"`
+		Notice     string `json:"notice"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode rotate response: %v\n%s", err, recorder.Body.String())
+	}
+	if result.Capability == "" || result.Capability == capability {
+		t.Fatalf("rotate did not return a fresh capability: %q", result.Capability)
+	}
+	if result.Capability != app.currentCapability() {
+		t.Fatalf("rotate returned capability %q but the app holds %q", result.Capability, app.currentCapability())
+	}
+	if !strings.Contains(result.Notice, "rotated") {
+		t.Fatalf("rotate notice=%q", result.Notice)
+	}
+	if stale := getStateResponse(t, app, capability); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("the rotated-away capability still authenticated (status=%d)", stale.Code)
+	}
+	if fresh := getStateResponse(t, app, result.Capability); fresh.Code != http.StatusOK {
+		t.Fatalf("the fresh capability did not authenticate (status=%d)", fresh.Code)
+	}
+}
+
+// postJSONForm submits a form-encoded mutation with the headers the SPA sends:
+// CSRF and capability as headers, Accept: application/json.
+func postJSONForm(t *testing.T, app *App, target, form, capability, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := newLoopbackRequest(http.MethodPost, target, strings.NewReader(form))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-HooshiX-Pairing-Capability", capability)
+	request.Header.Set("X-HooshiX-CSRF", csrf)
+	request.Header.Set("Origin", "http://127.0.0.1:8799")
+	recorder := httptest.NewRecorder()
+	app.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+// TestExposeJSONMutationsReportTheNewEndpointList proves the services page can
+// add and remove mappings in one round trip: the response carries the complete
+// endpoint list and the notice, while an unknown id is a client error.
+func TestExposeJSONMutationsReportTheNewEndpointList(t *testing.T) {
+	app, capability, csrf, _ := pairedApp(t)
+	type endpointsResponse struct {
+		Endpoints []agent.Endpoint `json:"endpoints"`
+		Notice    string           `json:"notice"`
+	}
+
+	recorder := postJSONForm(t, app, "/expose/add", "id=web-002&protocol=tcp&target=127.0.0.1%3A4001", capability, csrf)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("add status=%d want=200: %s", recorder.Code, recorder.Body.String())
+	}
+	var added endpointsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &added); err != nil {
+		t.Fatalf("decode add response: %v\n%s", err, recorder.Body.String())
+	}
+	if !strings.Contains(added.Notice, "web-002") {
+		t.Fatalf("add notice=%q", added.Notice)
+	}
+	addedEndpoint := false
+	for _, endpoint := range added.Endpoints {
+		if endpoint.ID != "web-002" {
+			continue
+		}
+		addedEndpoint = true
+		if endpoint.Target != "127.0.0.1:4001" || endpoint.Protocol != "tcp" {
+			t.Fatalf("added endpoint=%+v want 127.0.0.1:4001/tcp", endpoint)
+		}
+	}
+	if !addedEndpoint {
+		t.Fatalf("add response omitted web-002: %+v", added.Endpoints)
+	}
+
+	recorder = postJSONForm(t, app, "/expose/remove", "id=absent", capability, csrf)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unknown remove status=%d want=400: %s", recorder.Code, recorder.Body.String())
+	}
+	var removalError struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &removalError); err != nil || !strings.Contains(removalError.Error, "absent") {
+		t.Fatalf("unknown remove error=%q decode=%v", removalError.Error, err)
+	}
+
+	recorder = postJSONForm(t, app, "/expose/remove", "id=web-002", capability, csrf)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("remove status=%d want=200: %s", recorder.Code, recorder.Body.String())
+	}
+	var removed endpointsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &removed); err != nil {
+		t.Fatalf("decode remove response: %v\n%s", err, recorder.Body.String())
+	}
+	if !strings.Contains(removed.Notice, "removed") {
+		t.Fatalf("remove notice=%q", removed.Notice)
+	}
+	for _, endpoint := range removed.Endpoints {
+		if endpoint.ID == "web-002" {
+			t.Fatalf("removed endpoint still present: %+v", removed.Endpoints)
+		}
+	}
+
+	// The state document and the tooling listing reflect the same mapping.
+	state := getState(t, app, capability)
+	for _, endpoint := range state.Config.Endpoints {
+		if endpoint.ID == "web-002" {
+			t.Fatal("the state document still reports the removed endpoint")
+		}
+	}
+	if unauthorized := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		app.Handler().ServeHTTP(recorder, newLoopbackRequest(http.MethodGet, "/expose", nil))
+		return recorder
+	}(); unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("/expose without capability status=%d want=401", unauthorized.Code)
+	}
+	listing := httptest.NewRecorder()
+	app.Handler().ServeHTTP(listing, newLoopbackRequest(http.MethodGet, "/expose?cap="+url.QueryEscape(capability), nil))
+	if listing.Code != http.StatusOK {
+		t.Fatalf("/expose status=%d want=200", listing.Code)
+	}
+	var endpoints []agent.Endpoint
+	if err := json.Unmarshal(listing.Body.Bytes(), &endpoints); err != nil {
+		t.Fatalf("decode /expose: %v\n%s", err, listing.Body.String())
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.ID == "web-002" {
+			t.Fatal("/expose still lists the removed endpoint")
+		}
 	}
 }

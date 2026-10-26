@@ -23,14 +23,13 @@ const serviceUnpairTimeout = 15 * time.Second
 // whether a service is serving a state directory.
 const serviceProbeTimeout = 3 * time.Second
 
-// maxPairingPageBytes bounds how much of the pairing page is read while
+// maxPairingStateBytes bounds how much of the state document is read while
 // extracting the per-process CSRF token.
-const maxPairingPageBytes = 64 * 1024
+const maxPairingStateBytes = 64 * 1024
 
-// csrfFieldPattern extracts the CSRF token the authenticated pairing page
-// embeds in every mutating form. The token is 256 bits of base64url, so the
-// page's HTML escaping never rewrites it.
-var csrfFieldPattern = regexp.MustCompile(`name="hooshix_csrf" value="([A-Za-z0-9_-]{43})"`)
+// csrfTokenPattern matches the per-process token the authenticated state
+// document reports: 256 bits of base64url.
+var csrfTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 // requestServiceUnpair asks the RUNNING Agent service to clear the pairing and
 // waits for its verdict. It is the coordination half of the unpair design:
@@ -134,16 +133,16 @@ func verifyServiceListener(client *http.Client, address, expectedToken string) e
 	return nil
 }
 
-// fetchPairingCSRFToken reads the CSRF token from the authenticated pairing
-// page. The page is only served to a caller that already holds the capability,
-// and the token is the same per-process value every mutating form carries, so
-// this is the identical gate a browser goes through.
+// fetchPairingCSRFToken reads the per-process CSRF token from the same state
+// document the SPA uses. The endpoint is only served to a caller that already
+// holds the capability, and the token is the same value every mutating request
+// carries, so this is the identical gate a browser goes through.
 func fetchPairingCSRFToken(client *http.Client, address, capability string) (string, error) {
-	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/", nil)
+	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/state", nil)
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Accept", "text/html")
+	request.Header.Set("Accept", "application/json")
 	request.Header.Set("X-HooshiX-Pairing-Capability", capability)
 	response, err := client.Do(request)
 	if err != nil {
@@ -153,13 +152,14 @@ func fetchPairingCSRFToken(client *http.Client, address, capability string) (str
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("pairing authorization rejected with status %d", response.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxPairingPageBytes))
-	if err != nil {
-		return "", fmt.Errorf("read pairing page: %w", err)
+	var state struct {
+		CSRF string `json:"csrf"`
 	}
-	match := csrfFieldPattern.FindSubmatch(body)
-	if match == nil {
-		return "", errors.New("pairing page did not carry a CSRF token")
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxPairingStateBytes)).Decode(&state); err != nil {
+		return "", fmt.Errorf("decode pairing state: %w", err)
 	}
-	return string(match[1]), nil
+	if !csrfTokenPattern.MatchString(state.CSRF) {
+		return "", errors.New("pairing state did not carry a CSRF token")
+	}
+	return state.CSRF, nil
 }

@@ -62,6 +62,10 @@ The server deployment remains **Docker Compose only**, with exactly Caddy and Tu
 
 The tested system includes real Agent↔Gateway E2E traffic, Gateway restart recovery, Agent process restart with persisted identity, forced tunnel-network interruption/reconnect, fail-closed offline behavior, package rollback, release checksum tamper rejection, SBOM/vulnerability scanning and OIDC-backed GitHub Artifact Attestations.
 
+## Local setup UI
+
+Every Agent serves a loopback-only setup UI from `internal/agent/webapp`: a bilingual Persian/English React SPA (Overview, Connect, Services, Device) with responsive navigation, light/dark themes and the same enrollment, exposure and unpair actions as the CLI. The compiled bundle is embedded in the Agent binary and committed under `internal/agent/webapp/ui/dist`; CI rebuilds it and fails on drift. The tray opens it with the installer-written pairing capability, and every state read and mutation stays behind the local-origin, capability and per-process CSRF gates. The state document never contains the session token, private key or capability. Build rules: `internal/agent/webapp/ui/README.md`.
+
 ## Tunnel upgrade capabilities (ADR-0013)
 
 The tunnel implementation plan landed as five phases under the Clean Architecture layering recorded in ADR-0013:

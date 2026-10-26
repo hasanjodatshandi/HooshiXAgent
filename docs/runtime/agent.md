@@ -110,6 +110,12 @@ printf '%s\n' "$SESSION_TOKEN" | hooshix-agent configure \
 
 An optional `--ca-file` adds a locally trusted CA for self-hosted/test deployments without disabling certificate verification. Omitting it preserves an already-configured trust anchor rather than clearing it: an absent option means "this request carries no CA file", not "remove the configured one".
 
+### Local setup UI
+
+`internal/agent/webapp` serves a responsive, bilingual (Persian/English) React SPA embedded in the binary from `internal/agent/webapp/ui/dist`. It has four pages — Overview, Connect, Services and Device — rendered from one capability-gated document at `GET /api/state`. Light/dark and RTL/LTR are local preferences; no account or remote asset is involved.
+
+The page is opened from the tray with the installer-written capability (`?cap=`). Every mutation still passes the local-origin, capability and per-process CSRF gates, and the state document never contains the session token, private key or the capability itself. Only the hashed build artifacts (`/assets/*`, `/boot.js`, `/favicon.svg`) are served before the capability check; the shell and the state endpoint are not. Build and commit rules for the bundle are in `internal/agent/webapp/ui/README.md`.
+
 ### Pairing UI trust anchor
 
 On Windows the service-hosted pairing UI (ADR-0014) is the primary pairing path, so it can set the same trust anchor the CLI does. The enrollment form renders a `CA file (optional)` input; the value rides the start request as the optional `ca_file` field and sits behind the same pairing-capability and per-process CSRF gates as every other pairing field. There is no way to set trust material without them.
