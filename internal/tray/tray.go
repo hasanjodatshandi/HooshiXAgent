@@ -298,6 +298,13 @@ func (app *App) serviceStop() {
 	app.refresh()
 }
 
+func (app *App) serviceRestart() {
+	if err := agentsvc.Restart(); err != nil {
+		app.logger.Warn("service restart failed", "error", err)
+	}
+	app.refresh()
+}
+
 func (app *App) exit() {
 	app.mu.Lock()
 	app.state = TrayState{Phase: "exiting"}
