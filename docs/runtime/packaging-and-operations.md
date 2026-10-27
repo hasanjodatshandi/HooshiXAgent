@@ -151,16 +151,20 @@ accept their device. Serving the artifact is not a secret — the grants are —
 the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
-The bytes served today are `24,736,768` bytes, sha256
-`e49b493e6fa32e18ecc800e01520ca6fe0256c66400558b8166d2f2c13172f34`, built by
-`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.0.0-5ba29e4` from a clean
-worktree at `5ba29e4`, and confirmed by downloading it back over HTTPS and
+The bytes served today are `25,045,504` bytes, sha256
+`b0c102695a22fca9913919ca9f53f4fa3ecabd7f3ec457bbf6e785f35b42f79c`, built by
+`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.2.1` from a clean
+worktree at `4981974`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`525950402164d8f340354c4f33b589fb369f8bf5af1a73013ad6041d4a6070ef` and
-`hooshix-agent-tray.exe` `c50e20c72520e7685cb76a6827155c34359fe16967ee26f4fad6aeebd0c8a215`,
+`2f23f13b69f863060455ca5fa1fbe6e50ee6d6519562a829465131b33526fc68` and
+`hooshix-agent-tray.exe` `63367fa8a5e96dde818e4d8e9685128415051a201d0c7de8280451472d859f35`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
 before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
-`vcs.revision=5ba29e4…` and `vcs.modified=false` for all three images.
+`vcs.revision=4981974…` and `vcs.modified=false` for all three images.
+
+`v0.2.1` is the release that adds the embedded bilingual Agent UI (`#55`),
+with its UI assets normalized to LF in `#56`; the Setup payload digests above
+are the ones it carries.
 
 The patched toolchain is the reason for this rebuild, not cosmetics:
 `GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
