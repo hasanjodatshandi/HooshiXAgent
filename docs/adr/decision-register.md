@@ -27,6 +27,7 @@ Normative lifecycle and stable-ID rules are defined in `docs/governance/authorit
 | ADR-0018 | Public TCP Ingress with Explicit Port Leases | Accepted | 2026-09-28 | Yes | — | — | `docs/adr/ADR-0018-public-tcp-port-leases.md` |
 | ADR-0019 | UDP Datagram Flows for Private Connector and Public Ingress | Accepted | 2026-09-29 | Yes | — | — | `docs/adr/ADR-0019-udp-datagram-flows.md` |
 | ADR-0020 | Connector Grant and Device Credential Lifetimes | Accepted | 2026-10-14 | Yes | ADR-0017 — grant-lifetime and connection-budget clauses only | — | `docs/adr/ADR-0020-credential-lifetimes-and-revocation.md` |
+| ADR-0021 | Credit-based Flow Control for Tunnel Streams (Protocol v2) | Proposed | 2026-10-29 | No | — | — | `docs/adr/ADR-0021-tunnel-credit-flow-control.md` |
 
 ADR-0010 is **partially superseded**. It remains `Accepted` and current authority for every clause except the Windows Agent persistence and secret trust clauses listed in ADR-0014's "Rollback/supersession" section (the user-scoped Windows default model, the Windows DPAPI trust-boundary claim, the rejected LocalSystem-service alternative, the "persistence specs do not cross the Windows DPAPI CurrentUser boundary" fitness function, and the future-system-wide-service compatibility sentence). Its Linux/macOS packaging, Gateway deployment, observability, and release/update trust clauses remain in force. Historical ADR-0010 text is preserved unchanged as provenance; ADR-0010 carries a supersession pointer to ADR-0014.
 
