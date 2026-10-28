@@ -4,6 +4,7 @@ package svc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -484,5 +485,46 @@ func TestAwaitRemovedReportsAStuckRemovalHonestly(t *testing.T) {
 	stillOpen := awaitRemoved(func() error { return nil })
 	if stillOpen == nil || !strings.Contains(stillOpen.Error(), "still registered") {
 		t.Fatalf("a service that stayed openable was not reported as still registered: %v", stillOpen)
+	}
+}
+
+// TestWaitForServiceStatePollsUntilStopped proves a restart waits for the
+// stop to finish instead of starting while SCM is still stopping the service.
+func TestWaitForServiceStatePollsUntilStopped(t *testing.T) {
+	states := []string{"stop-pending", "stop-pending", "stopped"}
+	calls := 0
+	err := waitForServiceState(func() (string, error) {
+		state := states[calls]
+		calls++
+		return state, nil
+	}, "stopped", time.Second)
+	if err != nil {
+		t.Fatalf("waitForServiceState: %v", err)
+	}
+	if calls != len(states) {
+		t.Fatalf("probes=%d want %d", calls, len(states))
+	}
+}
+
+// TestWaitForServiceStateTimesOutHonestly keeps a service that never leaves
+// stop-pending from being reported as restarted, and names the state it is
+// stuck in.
+func TestWaitForServiceStateTimesOutHonestly(t *testing.T) {
+	err := waitForServiceState(func() (string, error) { return "stop-pending", nil }, "stopped", 0)
+	if err == nil {
+		t.Fatal("a service stuck in stop-pending was reported as stopped")
+	}
+	if !strings.Contains(err.Error(), "still stop-pending") {
+		t.Fatalf("error does not name the observed state: %q", err)
+	}
+}
+
+// TestWaitForServiceStateReturnsQueryErrors keeps an SCM failure visible rather
+// than looping until the timeout.
+func TestWaitForServiceStateReturnsQueryErrors(t *testing.T) {
+	sentinel := errors.New("scm unavailable")
+	err := waitForServiceState(func() (string, error) { return "", sentinel }, "stopped", time.Second)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("query error was lost: %v", err)
 	}
 }

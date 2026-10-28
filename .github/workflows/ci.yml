@@ -48,6 +48,46 @@ jobs:
         shell: bash
         run: bash scripts/ci/go-quality.sh
 
+  agent-ui:
+    name: Agent setup UI build / committed bundle drift
+    runs-on: ubuntu-latest
+    # Bounded so a hung npm install cannot hold a hosted runner (and the
+    # release gate chained behind it) indefinitely.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+          cache-dependency-path: internal/agent/webapp/ui/package-lock.json
+
+      # The bundle is embedded into the Agent binary at Go build time and is
+      # committed so a clean checkout needs no Node toolchain. Rebuilding it
+      # here proves the committed bytes still match source: a UI edit that
+      # forgets to commit dist/ fails instead of silently shipping stale assets.
+      - name: Rebuild the Agent setup UI
+        working-directory: internal/agent/webapp/ui
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Verify the committed bundle matches source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git status --porcelain -- internal/agent/webapp/ui/dist)" ]]; then
+            git status --porcelain -- internal/agent/webapp/ui/dist >&2
+            git diff --stat -- internal/agent/webapp/ui/dist >&2
+            echo "the committed Agent UI bundle is stale; run npm run build and commit internal/agent/webapp/ui/dist" >&2
+            exit 1
+          fi
+
   agent-platform:
     name: Agent platform foundations (${{ matrix.os }})
     strategy:
@@ -145,7 +185,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
 
@@ -692,6 +732,7 @@ jobs:
     name: AG-8 final security / resilience / release gate
     needs:
       - go-quality
+      - agent-ui
       - agent-platform
       - architecture
       - security

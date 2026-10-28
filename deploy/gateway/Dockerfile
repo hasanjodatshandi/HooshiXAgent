@@ -1,17 +1,22 @@
 FROM golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
+# git is build-only: Go's VCS stamping shells out to it so the shipped binary
+# reports vcs.revision instead of `mod (devel)`. The runtime stage below does
+# not carry it.
+RUN apk add --no-cache git
 WORKDIR /src
 
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY cmd/gateway ./cmd/gateway
-COPY internal/gateway ./internal/gateway
-COPY internal/contractv1 ./internal/contractv1
-COPY internal/contractv2 ./internal/contractv2
+# The full checkout (including .git) is required for `-buildvcs=true` to stamp
+# the commit: git also compares the worktree, so a partial tree copied file by
+# file would report vcs.modified=true. Only the built binary reaches the runner
+# stage, and .dockerignore keeps ignored build output out of the context.
+COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/hooshix-gateway ./cmd/gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=true -trimpath -ldflags="-s -w" -o /out/hooshix-gateway ./cmd/gateway
 
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache ca-certificates curl libcrypto3=3.5.9-r0 libssl3=3.5.9-r0 \
     && addgroup -S -g 10001 hooshix \
     && adduser -S -D -H -u 10001 -G hooshix hooshix

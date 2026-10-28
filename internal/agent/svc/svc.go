@@ -486,6 +486,57 @@ func Stop() error {
 	})
 }
 
+// restartStopTimeout bounds how long Restart waits for a stop-pending service
+// to reach stopped. The supervisor shuts down gracefully (flushing its state)
+// before SCM reports the transition complete.
+const restartStopTimeout = 30 * time.Second
+
+// Restart stops the registered service, waits for SCM to report it stopped,
+// and starts it again. A service that is already stopped is started directly,
+// and a stop already in progress is waited out rather than reported as a
+// failure. It needs only the rights the tray already holds: QUERY_STATUS,
+// STOP and START.
+func Restart() error {
+	state, err := QueryStatus()
+	if err != nil {
+		return err
+	}
+	if state != "stopped" {
+		if err := Stop(); err != nil &&
+			!errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) &&
+			!errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
+			return fmt.Errorf("stop service: %w", err)
+		}
+		if err := waitForServiceState(QueryStatus, "stopped", restartStopTimeout); err != nil {
+			return err
+		}
+	}
+	if err := Start(); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+	return nil
+}
+
+// waitForServiceState polls query until it reports want or timeout elapses,
+// returning the last observed state in the timeout error so a stuck stop is
+// diagnosable from the tray log.
+func waitForServiceState(query func() (string, error), want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := query()
+		if err != nil {
+			return err
+		}
+		if state == want {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("service did not reach %s within %s (still %s)", want, timeout, state)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // QueryStatus returns the SCM state name for the service.
 func QueryStatus() (string, error) {
 	var status windows.SERVICE_STATUS_PROCESS

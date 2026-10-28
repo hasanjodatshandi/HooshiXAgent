@@ -15,7 +15,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"net"
@@ -120,6 +119,10 @@ func (app *App) StateDir() string { return app.stateDir }
 func (app *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.handleRoot)
+	mux.HandleFunc("/api/state", app.handleState)
+	mux.HandleFunc("/assets/", app.handleUIAsset)
+	mux.HandleFunc("/boot.js", app.handleUIAsset)
+	mux.HandleFunc("/favicon.svg", app.handleUIAsset)
 	mux.HandleFunc("/pairing/rotate", app.handleRotateCapability)
 	mux.HandleFunc("/pairing/identity", app.handlePairingIdentity)
 	mux.HandleFunc("/unpair", app.handleUnpair)
@@ -128,7 +131,7 @@ func (app *App) Handler() http.Handler {
 	mux.HandleFunc("/expose/remove", app.handleExposeRemove)
 	mux.HandleFunc("/enrollment/start", app.handleEnrollmentStart)
 	mux.HandleFunc("/enrollment/claim", app.handleEnrollmentClaim)
-	return app.requireLocalRequest(app.requireCapability(mux))
+	return app.withSecurityHeaders(app.requireLocalRequest(app.requireCapability(mux)))
 }
 
 // requireCapability enforces the installer-written pairing capability on EVERY
@@ -146,6 +149,16 @@ func (app *App) requireCapability(next http.Handler) http.Handler {
 		if r.URL.Path == "/pairing/identity" {
 			next.ServeHTTP(w, r)
 			return
+		}
+		// The SPA's compiled artifacts are public by design: they carry no
+		// state, capability or CSRF token, and the shell that references them
+		// still requires the capability. Serving them before the comparison
+		// keeps the browser from putting the capability in every asset URL.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if _, ok := uiPublicAssetName(r.URL.Path); ok {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		provided := r.URL.Query().Get("cap")
 		if provided == "" {
@@ -332,37 +345,10 @@ func (app *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	capability := app.currentCapability()
-	publicKey, keyErr := app.PublicKey()
-	config, configErr := agent.LoadConfig(app.stateDir)
-	paired := configErr == nil && config.ValidateRuntime() == nil
-	notice := ""
-	csrf := app.ensureCSRFToken()
-	app.mu.Lock()
-	if time.Since(app.noticeAt) < 10*time.Minute {
-		notice = app.notice
-	}
-	app.mu.Unlock()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// The page URL and every form action carry the capability, so it must
-	// never land in a browser or intermediary cache.
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// The notice text may echo attacker-controlled payload fragments from
-	// validation failures, so it is HTML-escaped at the single render site.
-	fmt.Fprintf(w, pageTemplate,
-		htmlEscape(notice),
-		connectSectionHTML(paired, config, app.pendingEnrollmentSnapshot(), csrf, capability),
-		tunnelHealthHTML(loadTunnelHealth(app.stateDir)),
-		htmlEscape(url.QueryEscape(capability)),
-		htmlEscape(csrf),
-		exposeRowsHTML(config.Endpoints, csrf, capability),
-		exposeOptionsHTML(config.Endpoints),
-		unpairSectionHTML(capability, csrf, publicKey, keyErr),
-		htmlEscape(url.QueryEscape(capability)),
-		htmlEscape(csrf),
-	)
+	// The shell is capability-gated by requireCapability. It contains no
+	// secret: the capability travels in the page URL and entitlement data
+	// arrives from /api/state.
+	serveUIFile(w, r, "index.html", "no-store")
 }
 
 // TunnelHealth mirrors the service-written status.json snapshot.
@@ -390,160 +376,9 @@ func loadTunnelHealth(stateDir string) TunnelHealth {
 	return health
 }
 
-// tunnelHealthHTML renders the tunnel health table for the pairing page; the
-// template owns the section heading. Every interpolated value is HTML-escaped:
-// status fields can embed error strings derived from remote input.
-func tunnelHealthHTML(health TunnelHealth) string {
-	var builder strings.Builder
-	builder.WriteString("<table>")
-	builder.WriteString("<tr><th>connection</th><th>reconnects</th><th>last error</th></tr>")
-	connection := htmlEscape(displayConnection(health))
-	lastError := strings.TrimSpace(health.LastError)
-	if lastError == "" {
-		lastError = "—"
-	}
-	fmt.Fprintf(&builder, "<tr><td>%s</td><td>%d</td><td>%s</td></tr></table>\n",
-		connection, health.Reconnects, htmlEscape(lastError))
-	return builder.String()
-}
-
-// displayConnection converts the raw phase/state pair into a short,
-// user-friendly connection description.
-func displayConnection(health TunnelHealth) string {
-	switch {
-	case health.Phase == "unknown":
-		return "status unavailable"
-	case health.Phase == "running" && health.State == "connected":
-		return "connected"
-	case health.Phase == "running":
-		return health.State
-	case health.Phase == "reconnecting":
-		return "reconnecting"
-	case health.Phase == "pending_config":
-		return "waiting for pairing"
-	case health.Phase == "terminal":
-		return "stopped (error)"
-	case health.Phase == "stopped":
-		return "stopped"
-	default:
-		return health.Phase + ": " + health.State
-	}
-}
-
 // defaultEnrollmentPanelURL matches the address the Setup wizard installs
 // with; the operator can point the form at a self-hosted panel instead.
 const defaultEnrollmentPanelURL = "https://panel.hooshix-agent.ir"
-
-// connectSectionHTML renders exactly one of three states: a live pending
-// enrollment (show the code and poll for the claim), a paired agent (status
-// line), or an unpaired agent (the enrollment form). Enrollment never runs
-// concurrently with a pairing, and a paired agent has nothing to enroll.
-func connectSectionHTML(paired bool, config agent.Config, pending *pendingEnrollmentView, csrfToken, capability string) string {
-	switch {
-	case pending != nil:
-		return pendingEnrollmentHTML(pending, csrfToken)
-	case paired:
-		return pairedStatusHTML(config)
-	default:
-		return enrollmentFormHTML(config, csrfToken, capability)
-	}
-}
-
-// pendingEnrollmentHTML renders the code block the operator types into the
-// panel plus the polling mount. The CSRF token and expiry ride data
-// attributes so the script can poll /enrollment/claim without any secret
-// interpolated into JavaScript.
-func pendingEnrollmentHTML(pending *pendingEnrollmentView, csrfToken string) string {
-	expires := pending.ExpiresAt.UTC().Format(time.RFC3339Nano)
-	return "<p class=\"info\">Finish pairing in the panel: open <a href=\"" + htmlEscape(pending.VerificationURI) + "\">" +
-		htmlEscape(pending.VerificationURI) + "</a> and enter this code:</p>\n" +
-		"<div class=\"code\" id=\"enroll-code\">" + htmlEscape(pending.UserCode) + "</div>\n" +
-		"<p class=\"info\">This page claims the enrollment automatically as soon as the panel approves it.</p>\n" +
-		"<div id=\"pending-block\" data-csrf=\"" + htmlEscape(csrfToken) + "\" data-expires=\"" + htmlEscape(expires) + "\"></div>\n"
-}
-
-func pairedStatusHTML(config agent.Config) string {
-	trust := "system trust store"
-	if config.CAFile != "" {
-		trust = "configured CA file " + htmlEscape(config.CAFile)
-	}
-	return "<p class=\"ok\">Paired with " + htmlEscape(config.DeviceID) + " via " + htmlEscape(config.GatewayURL) +
-		". Trust anchor: " + trust + ". This page can be closed.</p>\n"
-}
-
-// enrollmentFormHTML renders the device-code enrollment form shown when the
-// agent is unpaired. The panel address, device name and CA file all sit behind
-// the same capability and CSRF gates as every other pairing field.
-func enrollmentFormHTML(config agent.Config, csrfToken, capability string) string {
-	deviceName, err := os.Hostname()
-	if err != nil || strings.TrimSpace(deviceName) == "" {
-		deviceName = "hooshix-agent"
-	}
-	return "<p class=\"info\">This agent is not paired yet. Enter the panel address to receive a pairing code, approve the code in the panel, and the agent connects by itself.</p>\n" +
-		"<form id=\"enroll-form\" method=\"post\" action=\"/enrollment/start?cap=" + htmlEscape(url.QueryEscape(capability)) + "\">\n" +
-		"<input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\">\n" +
-		"<label for=\"enroll-panel-url\">Panel address:</label>\n" +
-		"<input id=\"enroll-panel-url\" name=\"server_url\" value=\"" + htmlEscape(defaultEnrollmentPanelURL) + "\" autocomplete=\"off\" spellcheck=\"false\" required>\n" +
-		"<br><label for=\"enroll-device-name\">Device name:</label>\n" +
-		"<input id=\"enroll-device-name\" name=\"device_name\" value=\"" + htmlEscape(deviceName) + "\" maxlength=\"64\" required>\n" +
-		"<br><label for=\"enroll-ca-file\">CA file (optional):</label>\n" +
-		"<input id=\"enroll-ca-file\" name=\"ca_file\" value=\"" + htmlEscape(config.CAFile) + "\" placeholder=\"C:\\certs\\private-ca.pem\" autocomplete=\"off\" spellcheck=\"false\">\n" +
-		"<p class=\"info\">Self-hosted/test deployments only. A supplied path must be a readable PEM certificate and replaces the trust anchor; leaving it empty keeps the configured one.</p>\n" +
-		"<br><button type=\"submit\">Get pairing code</button>\n" +
-		"<div id=\"enroll-error\" class=\"error\"></div>\n" +
-		"</form>\n"
-}
-
-func exposeRowsHTML(endpoints []agent.Endpoint, csrfToken, capability string) string {
-	if len(endpoints) == 0 {
-		return "<tr><td colspan=\"4\">no local services exposed yet</td></tr>"
-	}
-	rows := ""
-	for _, endpoint := range endpoints {
-		protocol := endpoint.Protocol
-		if protocol == "" {
-			protocol = "tcp"
-		}
-		rows += "<tr><td><code>" + htmlEscape(endpoint.ID) + "</code></td><td>" + htmlEscape(protocol) + "</td><td>" + htmlEscape(endpoint.Target) +
-			"</td><td><form method=\"post\" action=\"/expose/remove?cap=" + htmlEscape(url.QueryEscape(capability)) +
-			"\"><input type=\"hidden\" name=\"id\" value=\"" + htmlEscape(endpoint.ID) +
-			"\"><input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\"><button>Remove</button></form></td></tr>"
-	}
-	return rows
-}
-
-func exposeOptionsHTML(endpoints []agent.Endpoint) string {
-	options := ""
-	for _, endpoint := range endpoints {
-		options += "<option value=\"" + htmlEscape(endpoint.ID) + "\">"
-	}
-	return options
-}
-
-// unpairSectionHTML renders the device-identity block and the clear-pairing
-// form: the same operation the `unpair` CLI command performs, behind the same
-// capability and CSRF gates as every other mutating form on the page. The key
-// sits next to the action that can replace it, so the operator always has the
-// value the panel must authorize before a re-pairing.
-func unpairSectionHTML(capability, csrfToken, publicKey string, keyErr error) string {
-	var builder strings.Builder
-	builder.WriteString("<h2>4. Unpair this device</h2>\n")
-	builder.WriteString("<p>Copy this public key into your panel (Devices → Register a device) before re-pairing if you replace the identity:</p>\n")
-	builder.WriteString("<div class=\"key\">" + htmlEscape(publicKey) + "</div>\n")
-	if keyErr != nil {
-		builder.WriteString("<p class=\"error\">public key unavailable: " + htmlEscape(keyErr.Error()) + "</p>\n")
-	}
-	builder.WriteString("<p class=\"info\">Clears the pairing record (gateway, device/authorization/token IDs, trust anchor) and the session token, and returns the agent to <em>waiting for pairing</em>. " +
-		"The device identity above and the local service mappings are kept, so this device can be re-paired as itself without re-registering the key.</p>\n")
-	builder.WriteString("<form method=\"post\" action=\"/unpair?cap=" + htmlEscape(url.QueryEscape(capability)) + "\">\n")
-	builder.WriteString("<input type=\"hidden\" name=\"hooshix_csrf\" value=\"" + htmlEscape(csrfToken) + "\">\n")
-	builder.WriteString("<label for=\"reset-identity\" style=\"width:auto\">" +
-		"<input type=\"checkbox\" id=\"reset-identity\" name=\"reset_identity\" value=\"true\" style=\"width:auto\"> " +
-		"Also replace the device identity (mints a NEW public key that must be registered in the panel before re-pairing)</label>\n")
-	builder.WriteString("<br><button type=\"submit\">Unpair</button>\n")
-	builder.WriteString("</form>\n")
-	return builder.String()
-}
 
 // ensureCSRFToken returns the per-process pairing-UI CSRF token, creating
 // it once from OS entropy. Every mutating form carries it; every mutating
@@ -621,11 +456,25 @@ func (app *App) handleRotateCapability(w http.ResponseWriter, r *http.Request) {
 	if !app.requireCSRF(w, r) {
 		return
 	}
+	var notice string
 	if err := app.rotateCapability(); err != nil {
+		notice = "rotate failed: " + err.Error()
+		app.setNotice(notice)
 		app.logger.Warn("rotate pairing capability failed", "error", err)
-		app.setNotice("rotate failed: " + err.Error())
+		if wantsJSON(r) {
+			writeJSONMessage(w, http.StatusInternalServerError, map[string]string{"error": notice})
+			return
+		}
 	} else {
-		app.setNotice("pairing authorization rotated; old links no longer work")
+		notice = "pairing authorization rotated; old links no longer work"
+		app.setNotice(notice)
+		if wantsJSON(r) {
+			writeJSONMessage(w, http.StatusOK, map[string]string{
+				"capability": app.currentCapability(),
+				"notice":     notice,
+			})
+			return
+		}
 	}
 	app.redirectHome(w, r)
 }
@@ -777,11 +626,30 @@ func (app *App) handleExposeAdd(w http.ResponseWriter, r *http.Request) {
 		config.SetEndpoint(agent.Endpoint{ID: id, Target: target, Protocol: protocol})
 		return config.ValidateRuntime()
 	}); err != nil {
-		app.setNotice("expose failed: " + err.Error())
+		message := "expose failed: " + err.Error()
+		app.setNotice(message)
 		app.logger.Warn("expose add failed", "error", err)
-	} else {
-		app.setNotice("exposed " + id + " -> " + target + " (restart the service from the tray to apply)")
-		app.logger.Info("local service exposed via ui", "id", id, "target", target)
+		if wantsJSON(r) {
+			writeJSONMessage(w, http.StatusBadRequest, map[string]string{"error": message})
+			return
+		}
+		app.redirectHome(w, r)
+		return
+	}
+	notice := "exposed " + id + " -> " + target + " (restart the service from the tray to apply)"
+	app.setNotice(notice)
+	app.logger.Info("local service exposed via ui", "id", id, "target", target)
+	if wantsJSON(r) {
+		config, err := agent.LoadConfig(app.stateDir)
+		if err != nil {
+			writeJSONMessage(w, http.StatusInternalServerError, map[string]string{"error": "load config failed"})
+			return
+		}
+		writeJSONMessage(w, http.StatusOK, map[string]any{
+			"endpoints": endpointsOrEmpty(config.Endpoints),
+			"notice":    notice,
+		})
+		return
 	}
 	app.redirectHome(w, r)
 }
@@ -806,9 +674,28 @@ func (app *App) handleExposeRemove(w http.ResponseWriter, r *http.Request) {
 		}
 		return config.ValidateRuntime()
 	}); err != nil {
-		app.setNotice("remove failed: " + err.Error())
-	} else {
-		app.setNotice("removed " + id + " (restart the service from the tray to apply)")
+		message := "remove failed: " + err.Error()
+		app.setNotice(message)
+		if wantsJSON(r) {
+			writeJSONMessage(w, http.StatusBadRequest, map[string]string{"error": message})
+			return
+		}
+		app.redirectHome(w, r)
+		return
+	}
+	notice := "removed " + id + " (restart the service from the tray to apply)"
+	app.setNotice(notice)
+	if wantsJSON(r) {
+		config, err := agent.LoadConfig(app.stateDir)
+		if err != nil {
+			writeJSONMessage(w, http.StatusInternalServerError, map[string]string{"error": "load config failed"})
+			return
+		}
+		writeJSONMessage(w, http.StatusOK, map[string]any{
+			"endpoints": endpointsOrEmpty(config.Endpoints),
+			"notice":    notice,
+		})
+		return
 	}
 	app.redirectHome(w, r)
 }
@@ -824,8 +711,7 @@ func (app *App) handleExpose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load config failed", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(config.Endpoints)
+	writeJSONMessage(w, http.StatusOK, endpointsOrEmpty(config.Endpoints))
 }
 
 // Listen binds the loopback listener and publishes the pairing endpoint
@@ -905,170 +791,6 @@ func (app *App) ServeListener(ctx context.Context, listener net.Listener, logger
 	return nil
 }
 
-func htmlEscape(value string) string {
-	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;")
-	return replacer.Replace(value)
-}
-
-var pageTemplate = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="referrer" content="no-referrer">
-<title>HooshiX Agent</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }
-  .key { background: #f4f4f8; border: 1px solid #ccc; padding: .8rem; font-family: monospace; word-break: break-all; user-select: all; }
-  .code { background: #f4f4f8; border: 1px solid #ccc; padding: .8rem; font-family: monospace; font-size: 1.6rem; letter-spacing: .2rem; text-align: center; user-select: all; }
-  .ok { color: #0a7a2e; } .error { color: #b00020; } .info { color: #555; }
-  button { padding: .5rem 1.2rem; }
-  h1 { font-size: 1.3rem; } h2 { margin-top: 2rem; }
-  table { border-collapse: collapse; width: 100%%; }
-  th, td { border: 1px solid #ddd; padding: .4rem .6rem; font-size: .9rem; }
-  input { font: inherit; padding: .35rem .5rem; width: 200px; }
-  #target { width: 260px; }
-  #enroll-panel-url, #enroll-ca-file { width: 320px; }
-  #enroll-device-name { width: 260px; }
-</style>
-</head>
-<body>
-<h1>HooshiX Agent Setup</h1>
-<p class="info">%s</p>
-<h2>1. Connect this device</h2>
-%s
-<h2>2. Tunnel status</h2>
-%s
-<h2>3. Local services</h2>
-<p class="info">Map a local port, then reserve an endpoint in the panel with the same endpoint id.</p>
-<form method="post" action="/expose/add?cap=%s">
-<input type="hidden" name="hooshix_csrf" value="%s">
-<input id="expose-id" name="id" placeholder="web-001" required pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,63}" title="endpoint id: letters, digits, . _ : -">
-<select id="expose-protocol" name="protocol"><option value="tcp">TCP</option><option value="udp">UDP / QUIC</option></select>
-<input id="target" name="target" placeholder="127.0.0.1:4000" required>
-<button type="submit">Add service</button>
-<button type="button" id="preset-rdp">Remote Desktop</button>
-</form>
-<p class="info" id="preset-rdp-hint"></p>
-<table><tr><th>endpoint id</th><th>protocol</th><th>local target</th><th></th></tr>
-%s
-</table>
-<datalist id="expose-ids">%s</datalist>
-%s
-<h2>5. Pairing authorization</h2>
-<p class="info">The pairing authorization is rotated automatically after a successful enrollment. Rotate it manually if this page's URL may have been seen by someone else; the tray's "Open pairing page" reads the new value.</p>
-<form method="post" action="/pairing/rotate?cap=%s">
-<input type="hidden" name="hooshix_csrf" value="%s">
-<button type="submit">Rotate pairing authorization</button>
-</form>
-<script>
-(function () {
-	var match = /[?&]cap=([^&]*)/.exec(location.search);
-	var cap = match ? decodeURIComponent(match[1].replace(/\+/g, " ")) : "";
-
-	function showError(id, message) {
-		var box = document.getElementById(id);
-		if (box) { box.textContent = message; }
-	}
-
-	var form = document.getElementById("enroll-form");
-	if (form) {
-		form.addEventListener("submit", function (event) {
-			event.preventDefault();
-			var payload = {
-				server_url: form.server_url.value,
-				device_name: form.device_name.value,
-				ca_file: form.ca_file.value
-			};
-			var xhr = new XMLHttpRequest();
-			xhr.open("POST", "/enrollment/start?cap=" + encodeURIComponent(cap));
-			xhr.setRequestHeader("Content-Type", "application/json");
-			xhr.setRequestHeader("X-HooshiX-CSRF", form.hooshix_csrf.value);
-			xhr.onreadystatechange = function () {
-				if (xhr.readyState !== 4) { return; }
-				if (xhr.status === 201 || xhr.status === 409) {
-					// 201 renders the new pending block; 409 means another
-					// enrollment is already pending, which the render picks up.
-					location.reload();
-					return;
-				}
-				if (xhr.status >= 500) {
-					showError("enroll-error", "the enrollment server is unavailable; try again");
-					return;
-				}
-				showError("enroll-error", "could not start the enrollment: " + (xhr.responseText || ("HTTP " + xhr.status)));
-			};
-			xhr.send(JSON.stringify(payload));
-		});
-	}
-
-	var rdpPreset = document.getElementById("preset-rdp");
-	if (rdpPreset) {
-		rdpPreset.addEventListener("click", function () {
-			document.getElementById("expose-id").value = "rdp-001";
-			document.getElementById("expose-protocol").value = "tcp";
-			document.getElementById("target").value = "127.0.0.1:3389";
-			showError("preset-rdp-hint",
-				"Windows itself must allow remote connections first (System Properties → Remote) — this agent never changes that setting. Then create a private TCP endpoint in the panel with local endpoint id rdp-001 and application protocol RDP, issue a Connector grant, and run hooshix-connector on the machine you connect from.");
-		});
-	}
-
-	var pending = document.getElementById("pending-block");
-	if (pending) {
-		var csrf = pending.getAttribute("data-csrf");
-		var deadline = Date.parse(pending.getAttribute("data-expires")) || 0;
-		var delay = 2000;
-		function poll() {
-			if (Date.now() >= deadline) {
-				pending.textContent = "The pairing code expired. Reload this page to request a new one.";
-				pending.className = "error";
-				return;
-			}
-			var xhr = new XMLHttpRequest();
-			xhr.open("POST", "/enrollment/claim?cap=" + encodeURIComponent(cap));
-			xhr.setRequestHeader("X-HooshiX-CSRF", csrf);
-			xhr.onreadystatechange = function () {
-				if (xhr.readyState !== 4) { return; }
-				if (xhr.status === 200) {
-					var data = {};
-					try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
-					if (data.state === "claimed") {
-						// The claim rotated the pairing capability, so the URL
-						// must carry the fresh value: reloading with the old one
-						// would land on the bootstrap page.
-						location.replace("/?cap=" + encodeURIComponent(data.capability || cap));
-						return;
-					}
-					delay = 2000;
-					setTimeout(poll, delay);
-					return;
-				}
-				if (xhr.status === 404) {
-					pending.textContent = "The enrollment is no longer pending (the service restarted or the code expired). Reload this page to start over.";
-					pending.className = "error";
-					return;
-				}
-				if (xhr.status >= 500 && delay <= 16000) {
-					delay = delay * 2;
-					setTimeout(poll, delay);
-					return;
-				}
-				pending.textContent = "Claiming failed (HTTP " + xhr.status + "). Reload this page to retry.";
-				pending.className = "error";
-			};
-			xhr.send(null);
-		}
-		setTimeout(poll, 1500);
-	}
-})();
-</script>
-</body>
-</html>
-`
-
-// bootstrapTemplate is the only page served without the pairing capability. It
-// contains no public key, capability, CSRF token, or state — it is a constant,
-// not a format string — so an unauthenticated read of the loopback port
-// discloses nothing.
 const bootstrapTemplate = `<!doctype html>
 <html lang="en">
 <head>
@@ -1094,9 +816,3 @@ const bootstrapTemplate = `<!doctype html>
 </body>
 </html>
 `
-
-// Compile-time check: template stays parseable with the fmt verbs used.
-var _ = func() error {
-	_, err := template.New("page").Parse(strings.ReplaceAll(pageTemplate, "%%", "%"))
-	return err
-}()

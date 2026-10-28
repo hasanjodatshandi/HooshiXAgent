@@ -1,13 +1,9 @@
-# Build-context hygiene for the Gateway image. The Dockerfile copies only
-# go.mod/go.sum, cmd/gateway, internal/gateway (including its gatewayresources
-# subpackage) and the contractv1/contractv2 trees, so
-# everything else — the desktop payload binaries, local build output, the
-# documentation/test trees and repository metadata — must not be uploaded to
-# the daemon on every build.
+# Build-context hygiene for the Gateway image. The build stage copies the
+# tracked checkout (.git included) so `go build -buildvcs=true` can stamp the
+# commit and report vcs.modified=false; only the built binary reaches the
+# runtime stage. Everything excluded here is untracked/ignored build output,
+# so removing it from the context cannot make git report a dirty worktree.
 
-.git
-.github
-.vscode
 .freebuff
 bin
 dist
@@ -16,18 +12,11 @@ coverage
 *.test
 *.exe
 deploy/gateway/runtime
+internal/agent/webapp/ui/node_modules
 
 # Setup.exe's gitignored embed input (the Agent and tray binaries).
 cmd/hooshix-setup/payload
 
-# Never compiled or executed by the Gateway image.
-docs
-tests
-scripts
-packaging
-assets
+# Local operator scratch and debug output.
+server_backup
 diag_output.txt
-
-# The Control Panel working copy is a separate Node repository: not part of the
-# Gateway image build and never sent to the daemon.
-hooshix-panel
