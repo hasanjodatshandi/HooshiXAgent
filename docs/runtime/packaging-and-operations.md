@@ -69,6 +69,8 @@ Compose exposes `HOOSHIX_METADATA_MODE`, `HOOSHIX_METADATA_REFRESH_INTERVAL` and
 
 No Control Panel service, API, database, durable Gateway datastore, broker or cache is bundled.
 
+The image build copies the tracked checkout, including `.git`, and compiles with `-buildvcs=true`, so the released binary reports its source commit (`vcs.revision`) and `vcs.modified=false` in `go version -m` instead of `mod (devel)`. A build that cannot resolve VCS metadata fails rather than shipping an unstamped binary; the builder's `git` package and the `.git` tree never reach the runtime stage.
+
 ### TLS topology
 
 Caddy owns public TLS/certificate automation. RA-4 makes the production/default edge a dynamic `https://` catch-all with restricted On-Demand TLS. The global `on_demand_tls { ask ... }` permission URL is supplied by the external Control Panel integration boundary and is deny-by-default; HooshiXAgent does not implement domain ownership, endpoint CRUD or the permission service itself. `Caddyfile.static` preserves the old one-host model only as explicit compatibility/test/migration mode.
@@ -151,20 +153,20 @@ accept their device. Serving the artifact is not a secret — the grants are —
 the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
-The bytes served today are `25,049,600` bytes, sha256
-`03cf61f0c4fc96f8a1c7382f5325b168f955835d854847551450456a6b5f1a9b`, built by
-`scripts/build-setup.ps1` with `HOOSHIX_VERSION=v0.0.0-6d975c7` from a clean
-worktree at `6d975c7`, and confirmed by downloading it back over HTTPS and
+The bytes served today are `25,048,576` bytes, sha256
+`5a5d53735725bdb0f7a9699c9acaf55fd1970502410bf0fdb3b21a5d0a5e05fc`, built by
+the release workflow on tag `v0.2.2` (commit `449d4dc`) with
+`HOOSHIX_VERSION=v0.2.2`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`fe13c453e58f7751b65f59c76854846b115e2d98ba12d3989113f4519692da67` and
-`hooshix-agent-tray.exe` `7b6159e52cbbedc3e9c5bb4f19be9c6e7dbd67079b6cad09d6436ed04410edb4`,
+`3a0a14c310c4da6c85b73b2c5130b889b342018e39688835e1a5e8c9f6ccc0fc` and
+`hooshix-agent-tray.exe` `7853571f90dbddcdbc0679cdf24cac8f962fd987886f9363f0e7c1d39dc48f6a`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
 before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
-`vcs.revision=6d975c7…` and `vcs.modified=false` for all three images.
+`vcs.revision=449d4dc…` and `vcs.modified=false` for all three images.
 
-The 2026-10-28 build carries the v0.2.1 embedded bilingual Agent UI (`#55`,
-LF fix `#56`) plus the tray **Restart service** item (`#58`); the service and
-protocol are unchanged.
+`v0.2.2` carries the v0.2.1 embedded bilingual Agent UI (`#55`, LF fix `#56`)
+plus the tray **Restart service** item (`#58`); the service and protocol are
+unchanged.
 
 The patched toolchain is the reason for this rebuild, not cosmetics:
 `GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
