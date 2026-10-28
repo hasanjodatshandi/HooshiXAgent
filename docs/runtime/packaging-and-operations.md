@@ -69,7 +69,7 @@ Compose exposes `HOOSHIX_METADATA_MODE`, `HOOSHIX_METADATA_REFRESH_INTERVAL` and
 
 No Control Panel service, API, database, durable Gateway datastore, broker or cache is bundled.
 
-The image build copies the tracked checkout, including `.git`, and compiles with `-buildvcs=true`, so the released binary reports its source commit (`vcs.revision`) and `vcs.modified=false` in `go version -m` instead of `mod (devel)`. A build that cannot resolve VCS metadata fails rather than shipping an unstamped binary; the builder's `git` package and the `.git` tree never reach the runtime stage.
+The image build copies the tracked checkout, including `.git`, and compiles with `-buildvcs=true`, so the released binary reports its source commit (`vcs.revision`) and `vcs.modified=false` in `go version -m` instead of `mod (devel)`. A build that cannot resolve VCS metadata fails rather than shipping an unstamped binary; the builder's `git` package and the `.git` tree never reach the runtime stage. Since v0.2.3 the runtime base is `alpine:3.24.3`, digest-pinned and disclosed in `THIRD_PARTY_NOTICES`.
 
 ### TLS topology
 
@@ -154,19 +154,19 @@ the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
 The bytes served today are `25,048,576` bytes, sha256
-`5a5d53735725bdb0f7a9699c9acaf55fd1970502410bf0fdb3b21a5d0a5e05fc`, built by
-the release workflow on tag `v0.2.2` (commit `449d4dc`) with
-`HOOSHIX_VERSION=v0.2.2`, and confirmed by downloading it back over HTTPS and
+`214a3096f7b11eaddcd7b09577b6268eb91f323ec601a4ea5a8c654f845da4eb`, built by
+the release workflow on tag `v0.2.3` (commit `15eac3e`) with
+`HOOSHIX_VERSION=v0.2.3`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`3a0a14c310c4da6c85b73b2c5130b889b342018e39688835e1a5e8c9f6ccc0fc` and
-`hooshix-agent-tray.exe` `7853571f90dbddcdbc0679cdf24cac8f962fd987886f9363f0e7c1d39dc48f6a`,
+`32c0dcce4540e3153482588694ae1ca0e1d076acb882c1e0663eaf2ac41d73c2` and
+`hooshix-agent-tray.exe` `95306255592d4884e5485509adea8a674753221a91ddc1e9c9d3429e4fe3b9fe`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
 before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
-`vcs.revision=449d4dc…` and `vcs.modified=false` for all three images.
+`vcs.revision=15eac3e…` and `vcs.modified=false` for all three images.
 
-`v0.2.2` carries the v0.2.1 embedded bilingual Agent UI (`#55`, LF fix `#56`)
-plus the tray **Restart service** item (`#58`); the service and protocol are
-unchanged.
+`v0.2.3` carries the v0.2.1 embedded bilingual Agent UI (`#55`, LF fix `#56`),
+the tray **Restart service** item (`#58`), and the Alpine 3.24.3 Gateway
+runtime base (`#54`); the Agent code is unchanged from v0.2.2.
 
 The patched toolchain is the reason for this rebuild, not cosmetics:
 `GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
