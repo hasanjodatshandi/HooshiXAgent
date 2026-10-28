@@ -190,6 +190,7 @@ var (
 	notificationsLabel = syscall.StringToUTF16Ptr("Show balloon notifications")
 	startLabel         = syscall.StringToUTF16Ptr("Start service")
 	stopLabel          = syscall.StringToUTF16Ptr("Stop service")
+	restartLabel       = syscall.StringToUTF16Ptr("Restart service")
 	exitLabel          = syscall.StringToUTF16Ptr("Exit")
 	menuSepLabel       = syscall.StringToUTF16Ptr("-")
 )
@@ -310,6 +311,7 @@ const (
 	menuStop          = 1003
 	menuExit          = 1004
 	menuNotifications = 1005
+	menuRestart       = 1006
 )
 
 var currentHost *menuHost
@@ -373,7 +375,7 @@ func (host *menuHost) applyNotificationCheck() {
 }
 
 // appendStaticMenuItems adds the fixed items exactly once: pairing,
-// notification toggle, service start/stop, and exit.
+// notification toggle, service start/stop/restart, and exit.
 func (host *menuHost) appendStaticMenuItems(appendMenu *windows.LazyProc) {
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuPairing, uintptr(unsafe.Pointer(pairingLabel)))
@@ -388,6 +390,7 @@ func (host *menuHost) appendStaticMenuItems(appendMenu *windows.LazyProc) {
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuStart, uintptr(unsafe.Pointer(startLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuStop, uintptr(unsafe.Pointer(stopLabel)))
+	appendMenu.Call(uintptr(host.menu), mfString, menuRestart, uintptr(unsafe.Pointer(restartLabel)))
 	appendMenu.Call(uintptr(host.menu), mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
 	appendMenu.Call(uintptr(host.menu), mfString, menuExit, uintptr(unsafe.Pointer(exitLabel)))
 }
@@ -525,6 +528,8 @@ func (host *menuHost) dispatchMenu(id uint32) {
 		host.app.serviceStart()
 	case 1003:
 		host.app.serviceStop()
+	case 1006:
+		host.app.serviceRestart()
 	case 1004:
 		host.app.exit()
 	case 1005:

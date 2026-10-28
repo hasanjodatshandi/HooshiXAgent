@@ -190,14 +190,14 @@ func TestStatusRowsNeverConsumeCommandItems(t *testing.T) {
 	}
 	defer user32.NewProc("DestroyMenu").Call(menu) //nolint:errcheck // best-effort cleanup
 
-	// Mirror appendStaticMenuItems: the leading separator plus five commands.
+	// Mirror appendStaticMenuItems: the leading separator plus six commands.
 	appendMenu := user32.NewProc("AppendMenuW")
 	appendMenu.Call(menu, mfSeparator, 0, uintptr(unsafe.Pointer(menuSepLabel)))
-	commands := []uintptr{menuPairing, menuNotifications, menuStart, menuStop, menuExit}
+	commands := []uintptr{menuPairing, menuNotifications, menuStart, menuStop, menuRestart, menuExit}
 	for _, id := range commands {
 		appendMenu.Call(menu, mfString, id, uintptr(unsafe.Pointer(pairingLabel)))
 	}
-	const staticItems = 6
+	const staticItems = 7
 
 	// Every status-line count the app can produce, cycled so a refresh always
 	// follows a different count than the previous one.

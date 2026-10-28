@@ -69,5 +69,6 @@ func Install(string) error         { return errors.New("service install requires
 func Uninstall() error             { return errors.New("service uninstall requires Windows") }
 func Start() error                 { return errors.New("service start requires Windows") }
 func Stop() error                  { return errors.New("service stop requires Windows") }
+func Restart() error               { return errors.New("service restart requires Windows") }
 func QueryStatus() (string, error) { return "", errors.New("service status requires Windows") }
 func IsWindowsService() bool       { return false }
