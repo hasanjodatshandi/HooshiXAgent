@@ -170,7 +170,7 @@ component list for a given release.
     Role: public TLS edge, On-Demand TLS authority enforcement, reverse proxy to
           the Gateway (see deploy/gateway/README.md).
 
-  alpine:3.24.2@sha256:294b683c...
+  alpine:3.24.3@sha256:be265606...
     Licence: the Alpine base image redistributes multiple components under their
       own licences; the notable ones are musl libc (MIT) and BusyBox
       (GPL-2.0-only). The image additionally installs (see
