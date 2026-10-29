@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -195,6 +196,18 @@ func (sup *Supervisor) Run(ctx context.Context) error {
 					sup.setTerminal(message)
 					sup.opts.Logger.Error("supervisor: state recovery failed", "error", agent.SanitizedError(recoverErr))
 					return fmt.Errorf("recover interrupted Agent state: %w", recoverErr)
+				}
+				continue
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// An operator editing the settings file in place briefly exposes
+				// a truncated document. That is not a terminal product failure:
+				// wait for the write to finish instead of exiting, which SCM
+				// would turn into a restart loop.
+				sup.setLastError("settings file is being written: " + agent.SanitizedError(err))
+				sup.setPhase("pending_config")
+				if err := sup.waitForStateChange(runCtx, 0); err != nil {
+					return nil // cancelled
 				}
 				continue
 			}
