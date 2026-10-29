@@ -70,9 +70,15 @@ function rememberCapability(value: string): void {
 }
 
 export function readInitialCapability(): string {
-  const fromQuery = new URLSearchParams(window.location.search).get("cap") ?? "";
+  const url = new URL(window.location.href);
+  const fromQuery = url.searchParams.get("cap") ?? "";
   if (fromQuery) {
     rememberCapability(fromQuery);
+    // The capability is a full-control credential. Now that it lives in
+    // sessionStorage, keep it out of the address bar and browser history;
+    // reopening the page from the tray always supplies a fresh URL.
+    url.searchParams.delete("cap");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
     return fromQuery;
   }
   try {
@@ -88,11 +94,9 @@ export function currentCapability(): string {
 }
 
 export function replaceCapability(value: string): void {
+  // Persisted for this tab; never written back into the URL (see
+  // readInitialCapability).
   rememberCapability(value);
-  const url = new URL(window.location.href);
-  if (value) url.searchParams.set("cap", value);
-  else url.searchParams.delete("cap");
-  window.history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
