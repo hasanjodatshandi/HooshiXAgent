@@ -153,20 +153,22 @@ accept their device. Serving the artifact is not a secret — the grants are —
 the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
-The bytes served today are `25,048,576` bytes, sha256
-`214a3096f7b11eaddcd7b09577b6268eb91f323ec601a4ea5a8c654f845da4eb`, built by
-the release workflow on tag `v0.2.3` (commit `15eac3e`) with
-`HOOSHIX_VERSION=v0.2.3`, and confirmed by downloading it back over HTTPS and
+The bytes served today are `25,049,600` bytes, sha256
+`473c9f7f88b481e00997f891fa4b79a706a52270e91bafe76aff6e69244ed718`, built by
+the release workflow on tag `v0.2.4` (commit `0611ccb`) with
+`HOOSHIX_VERSION=v0.2.4`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`32c0dcce4540e3153482588694ae1ca0e1d076acb882c1e0663eaf2ac41d73c2` and
-`hooshix-agent-tray.exe` `95306255592d4884e5485509adea8a674753221a91ddc1e9c9d3429e4fe3b9fe`,
+`cadba4f03294bdad8bf55b5d12c03ac8452bf10a1d3495cf07fc460eddd9bfa0` and
+`hooshix-agent-tray.exe` `2764d82f959d7a86eff3dc179a4642bd03bc92a2d3ef9cbc356c8f3c82a4afb4`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
 before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
-`vcs.revision=15eac3e…` and `vcs.modified=false` for all three images.
+`vcs.revision=0611ccb…` and `vcs.modified=false` for all three images.
 
-`v0.2.3` carries the v0.2.1 embedded bilingual Agent UI (`#55`, LF fix `#56`),
-the tray **Restart service** item (`#58`), and the Alpine 3.24.3 Gateway
-runtime base (`#54`); the Agent code is unchanged from v0.2.2.
+`v0.2.4` adds the supervisor fix for a half-written settings file (`#64`): a
+truncated `config.json` now yields `pending_config` and waits for the write to
+finish instead of exiting into an SCM restart loop. It carries the v0.2.1
+embedded bilingual Agent UI (`#55`, LF fix `#56`), the tray **Restart service**
+item (`#58`), and the Alpine 3.24.3 Gateway runtime base (`#54`).
 
 The patched toolchain is the reason for this rebuild, not cosmetics:
 `GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
