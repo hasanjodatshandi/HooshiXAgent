@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/tunnelwindow"
 )
 
 type agentSession struct {
@@ -37,6 +38,10 @@ type agentSession struct {
 	controlWrites chan agentWriteRequest
 	dataWrites    chan agentWriteRequest
 	writeMessage  func(context.Context, []byte) error
+
+	// flowControlled is true on a hooshix.tunnel.v2 session: stream data is
+	// paced by receiver credit (ADR-0021). UDP datagrams keep the v1 path.
+	flowControlled bool
 
 	mu          sync.Mutex
 	streams     map[uint32]*agentStream
@@ -69,6 +74,9 @@ type agentStream struct {
 	mode          string
 	peerHalfClose chan struct{}
 	peerHalfOnce  sync.Once
+	// window is the outbound credit the Gateway granted for this stream. It is
+	// nil on v1 sessions and UDP flows.
+	window *tunnelwindow.Window
 }
 
 func authenticateAgent(
@@ -162,6 +170,7 @@ func authenticateAgent(
 		sessionID:       ready.SessionID,
 		resumeChallenge: ready.ResumeChallenge,
 		inbound:         inbound,
+		flowControlled:  conn != nil && conn.Subprotocol() == contractv1.TunnelSubprotocolV2,
 		streams:         make(map[uint32]*agentStream),
 		queueBudget:     newAgentByteBudget(limits.MaxSessionQueueBytes),
 		closed:          make(chan struct{}),
@@ -190,6 +199,7 @@ func newResumedAgentSession(conn *websocket.Conn, config Config, limits Limits, 
 		sessionID:       sessionID,
 		resumeChallenge: resumeChallenge,
 		inbound:         inbound,
+		flowControlled:  conn != nil && conn.Subprotocol() == contractv1.TunnelSubprotocolV2,
 		streams:         make(map[uint32]*agentStream),
 		queueBudget:     newAgentByteBudget(limits.MaxSessionQueueBytes),
 		closed:          make(chan struct{}),
@@ -322,6 +332,25 @@ func (sess *agentSession) handleControl(parent context.Context, frame contractv1
 		sess.logger.Debug("gateway stream_error", "stream_id", frame.StreamID)
 		sess.finishStreamFromPeer(frame.StreamID)
 		return nil
+	case "stream_window_update":
+		if !sess.flowControlled {
+			return errors.New("stream_window_update outside a v2 session")
+		}
+		var message contractv1.StreamWindowUpdate
+		if err := json.Unmarshal(frame.Payload, &message); err != nil {
+			return err
+		}
+		sess.mu.Lock()
+		stream := sess.streams[frame.StreamID]
+		sess.mu.Unlock()
+		if stream == nil || stream.window == nil {
+			return nil
+		}
+		if err := stream.window.Add(int64(message.CreditBytes)); err != nil {
+			_ = sess.sendStreamTerminalError(stream, "protocol_error", "invalid stream credit", false)
+			sess.finishStream(frame.StreamID)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unexpected Gateway control message %q", envelope.MessageType)
 	}
@@ -370,9 +399,23 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 		mode:          message.Mode,
 		peerHalfClose: make(chan struct{}),
 	}
+	if sess.flowControlled && message.Mode != "udp" {
+		stream.window = tunnelwindow.New(contractv1.MaxWindowCreditBytes)
+	}
 	sess.streams[frame.StreamID] = stream
 	sess.mu.Unlock()
 
+	if stream.window != nil {
+		// The Agent is the receiver of the request body: grant the Gateway its
+		// initial send window before the request can flow. The sender already
+		// holds a local header allowance, so only the remainder is body credit.
+		if bodyCredit := inputBytes - contractv1.HeaderAllowanceBytes; bodyCredit > 0 {
+			if err := sess.sendWindowUpdate(parent, frame.StreamID, tunnelwindow.InitialCredit(bodyCredit)); err != nil {
+				sess.finishStream(frame.StreamID)
+				return err
+			}
+		}
+	}
 	go sess.serveStream(stream)
 	return nil
 }
@@ -647,14 +690,36 @@ func (sess *agentSession) writeLocalPayload(stream *agentStream, conn net.Conn, 
 		}
 		payload = payload[n:]
 	}
+	if stream.window != nil && queued.Size > 0 {
+		// Credit is returned only after the local target accepted the bytes, so
+		// a slow consumer throttles the Gateway instead of filling the queue.
+		if err := sess.sendWindowUpdate(stream.ctx, stream.id, uint32(queued.Size)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (sess *agentSession) sendBytes(parent context.Context, streamID uint32, payload []byte) error {
+	var window *tunnelwindow.Window
+	if sess.flowControlled {
+		sess.mu.Lock()
+		stream := sess.streams[streamID]
+		sess.mu.Unlock()
+		if stream == nil {
+			return errors.New("stream is not open")
+		}
+		window = stream.window
+	}
 	for len(payload) > 0 {
 		size := len(payload)
 		if size > contractv1.MaxDataPayload {
 			size = contractv1.MaxDataPayload
+		}
+		if window != nil {
+			if err := window.Take(parent, int64(size)); err != nil {
+				return err
+			}
 		}
 		if err := sess.sendFrame(parent, contractv1.KindData, streamID, payload[:size]); err != nil {
 			return err
@@ -662,6 +727,14 @@ func (sess *agentSession) sendBytes(parent context.Context, streamID uint32, pay
 		payload = payload[size:]
 	}
 	return nil
+}
+
+func (sess *agentSession) sendWindowUpdate(parent context.Context, streamID uint32, credit uint32) error {
+	return sess.sendControl(parent, streamID, contractv1.StreamWindowUpdate{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "stream_window_update",
+		CreditBytes:     credit,
+	})
 }
 
 func (sess *agentSession) sendControl(parent context.Context, streamID uint32, value any) error {
@@ -870,6 +943,9 @@ func (sess *agentSession) finishStream(streamID uint32) {
 	sess.mu.Unlock()
 	if stream != nil {
 		stream.finishStream()
+		if stream.window != nil {
+			stream.window.Close(errors.New("stream closed"))
+		}
 	}
 }
 

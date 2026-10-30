@@ -31,6 +31,12 @@ const (
 	// (ADR-0021). Credit above this is a protocol error, not a way to inflate
 	// the receiver's memory ceiling.
 	MaxWindowCreditBytes = 8 << 20
+	// HeaderAllowanceBytes is the part of a request header that may be sent
+	// before the receiver grants body credit. Without it a rejected stream
+	// could never deliver its headers, turning an upstream rejection into a
+	// local serialization failure. Receivers subtract it from the initial body
+	// credit so the total outstanding bytes still fit their stream budget.
+	HeaderAllowanceBytes = 64 << 10
 )
 
 var (

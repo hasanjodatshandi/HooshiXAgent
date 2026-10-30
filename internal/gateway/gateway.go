@@ -272,7 +272,7 @@ func (gateway *Gateway) handleAgent(w http.ResponseWriter, request *http.Request
 	defer releaseHandshakeSlot()
 
 	conn, err := websocket.Accept(w, request, &websocket.AcceptOptions{
-		Subprotocols:    []string{contractv1.TunnelSubprotocol},
+		Subprotocols:    []string{contractv1.TunnelSubprotocolV2, contractv1.TunnelSubprotocol},
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -474,7 +474,7 @@ func (gateway *Gateway) completeAuthenticationOrResume(ctx context.Context, conn
 // revocation applies. Any mismatch fails closed to errResumeUnavailable (never
 // to a half-resumed session).
 func (gateway *Gateway) resumeSession(ctx context.Context, conn *websocket.Conn, candidate authorizedHandshake, resume contractv1.ResumeSession) (*session, error) {
-	if conn.Subprotocol() != contractv1.TunnelSubprotocol {
+	if !contractv1.IsTunnelSubprotocol(conn.Subprotocol()) {
 		return nil, errResumeUnavailable
 	}
 	gateway.mu.RLock()
@@ -644,7 +644,7 @@ func (gateway *Gateway) completeAuthentication(ctx context.Context, conn *websoc
 	// transcript, and the Gateway rotates it on every accepted resume, so a
 	// captured resume frame is not replayable for the session lifetime.
 	resumeChallenge := ""
-	if conn.Subprotocol() == contractv1.TunnelSubprotocol {
+	if contractv1.IsTunnelSubprotocol(conn.Subprotocol()) {
 		resumeChallenge, err = gateway.randomBase64URL(32)
 		if err != nil {
 			return nil, fmt.Errorf("generate resume challenge: %w", err)

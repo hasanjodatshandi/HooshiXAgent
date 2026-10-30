@@ -125,7 +125,7 @@ cp go.mod go.sum "$gateway_stage/"
 # ./cmd/gateway`: omitting one produces a bundle whose own Dockerfile cannot
 # resolve.
 cp -R cmd/gateway "$gateway_stage/cmd/"
-cp -R internal/gateway internal/contractv1 internal/contractv2 "$gateway_stage/internal/"
+cp -R internal/gateway internal/contractv1 internal/contractv2 internal/tunnelwindow "$gateway_stage/internal/"
 cp -R deploy/gateway "$gateway_stage/deploy/"
 printf '%s\n' "$version" >"$gateway_stage/VERSION"
 find "$gateway_stage" -type d -name runtime -prune -exec rm -rf {} + 2>/dev/null || true
