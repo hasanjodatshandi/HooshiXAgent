@@ -20,6 +20,7 @@ var domainPackages = []string{
 	"internal/contractv2",
 	"internal/agent/tunnelstates",
 	"internal/agent/agentbudget",
+	"internal/tunnelwindow",
 	"internal/gateway/gatewayresources",
 }
 
