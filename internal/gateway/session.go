@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 	contractv1 "github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/tunnelwindow"
 )
 
 type session struct {
@@ -23,6 +24,9 @@ type session struct {
 	tokenID                string
 	authorizationExpiresAt time.Time
 	supportsHalfClose      bool
+	// flowControlled is true on a hooshix.tunnel.v2 session: stream data is
+	// paced by receiver credit (ADR-0021). UDP datagrams keep the v1 path.
+	flowControlled bool
 
 	inbound    contractv1.SequenceTracker
 	outbound   atomic.Uint64
@@ -109,6 +113,7 @@ func newSession(gateway *Gateway, conn *websocket.Conn, deviceID, sessionID, aut
 		tokenID:                tokenID,
 		authorizationExpiresAt: authorizationExpiresAt,
 		supportsHalfClose:      supportsHalfClose,
+		flowControlled:         conn != nil && conn.Subprotocol() == contractv1.TunnelSubprotocolV2,
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
 		queueBudget:            newByteBudget(gateway.limits.MaxSessionQueueBytes),
@@ -168,6 +173,7 @@ func (sess *session) resumeInto(conn *websocket.Conn, inbound contractv1.Sequenc
 		tokenID:                sess.tokenID,
 		authorizationExpiresAt: sess.authorizationExpiresAt,
 		supportsHalfClose:      sess.supportsHalfClose,
+		flowControlled:         conn.Subprotocol() == contractv1.TunnelSubprotocolV2,
 		inbound:                inbound,
 		streams:                make(map[uint32]*stream),
 		queueBudget:            newByteBudget(sess.gateway.limits.MaxSessionQueueBytes),
@@ -465,6 +471,24 @@ func (sess *session) handleControl(ctx context.Context, frame contractv1.Frame) 
 		return nil
 	case "session_revoked":
 		return errors.New("agent may not originate session_revoked")
+	case "stream_window_update":
+		if !sess.flowControlled {
+			return errors.New("stream_window_update outside a v2 session")
+		}
+		var message contractv1.StreamWindowUpdate
+		if err := json.Unmarshal(frame.Payload, &message); err != nil {
+			return err
+		}
+		sess.mu.Lock()
+		stream := sess.streams[frame.StreamID]
+		sess.mu.Unlock()
+		if stream == nil || stream.window == nil {
+			return nil
+		}
+		if err := stream.window.Add(int64(message.CreditBytes)); err != nil {
+			sess.errorStream(frame.StreamID, "protocol_error", "invalid stream credit", false, err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unexpected agent control message: %q", envelope.MessageType)
 	}
@@ -543,6 +567,17 @@ func (sess *session) openStreamTarget(ctx context.Context, endpointID, authority
 		&sess.gateway.resources.queueRejects,
 	)
 	stream.datagram = mode == "udp"
+	if sess.flowControlled && !stream.datagram {
+		stream.window = tunnelwindow.New(contractv1.MaxWindowCreditBytes)
+		stream.grantCredit = func(size int64) {
+			if size <= 0 {
+				return
+			}
+			if err := sess.sendWindowUpdate(context.Background(), streamID, uint32(size)); err != nil {
+				sess.gateway.logger.Debug("stream credit return failed", "stream_id", streamID, "error", err)
+			}
+		}
+	}
 	sess.streams[streamID] = stream
 	sess.mu.Unlock()
 
@@ -558,6 +593,14 @@ func (sess *session) openStreamTarget(ctx context.Context, endpointID, authority
 	if err := sess.sendControl(ctx, streamID, message); err != nil {
 		sess.finishStream(streamID, err)
 		return nil, err
+	}
+	if stream.window != nil {
+		// The Gateway is the receiver of the response body: grant the Agent its
+		// initial send window as soon as the stream is open.
+		if err := sess.sendWindowUpdate(ctx, streamID, tunnelwindow.InitialCredit(sess.gateway.limits.MaxStreamQueueBytes)); err != nil {
+			sess.finishStream(streamID, err)
+			return nil, err
+		}
 	}
 	return stream, nil
 }
@@ -582,6 +625,11 @@ func (sess *session) detachStream(streamID uint32, err error) *stream {
 	if stream != nil {
 		stream.finish(err)
 		stream.releaseQueuedChunks()
+		if stream.window != nil {
+			// Only a full detach ends the outbound direction; a half-close
+			// leaves the request body free to continue.
+			stream.window.Close(err)
+		}
 	}
 	return stream
 }
@@ -619,14 +667,32 @@ func (sess *session) failAll(err error) {
 	sess.mu.Unlock()
 	for _, stream := range streams {
 		stream.finish(err)
+		if stream.window != nil {
+			stream.window.Close(err)
+		}
 	}
 }
 
 func (sess *session) sendBytes(ctx context.Context, streamID uint32, payload []byte) error {
+	var window *tunnelwindow.Window
+	if sess.flowControlled {
+		sess.mu.Lock()
+		stream := sess.streams[streamID]
+		sess.mu.Unlock()
+		if stream == nil {
+			return errors.New("stream is not open")
+		}
+		window = stream.window
+	}
 	for len(payload) > 0 {
 		size := len(payload)
 		if size > contractv1.MaxDataPayload {
 			size = contractv1.MaxDataPayload
+		}
+		if window != nil {
+			if err := window.Take(ctx, int64(size)); err != nil {
+				return err
+			}
 		}
 		if err := sess.sendFrame(ctx, contractv1.KindData, streamID, payload[:size]); err != nil {
 			return err
@@ -634,6 +700,14 @@ func (sess *session) sendBytes(ctx context.Context, streamID uint32, payload []b
 		payload = payload[size:]
 	}
 	return nil
+}
+
+func (sess *session) sendWindowUpdate(parent context.Context, streamID uint32, credit uint32) error {
+	return sess.sendControl(parent, streamID, contractv1.StreamWindowUpdate{
+		ContractVersion: contractv1.ProtocolVersion,
+		MessageType:     "stream_window_update",
+		CreditBytes:     credit,
+	})
 }
 
 func (sess *session) sendControl(ctx context.Context, streamID uint32, value any) error {
@@ -863,6 +937,12 @@ type stream struct {
 	globalBudget    *byteBudget
 	rejectCounter   *atomic.Uint64
 	finishOnce      sync.Once
+	// window is the outbound credit the Agent granted for this stream. It is
+	// nil on v1 sessions and UDP flows.
+	window *tunnelwindow.Window
+	// grantCredit returns consumed bytes to the Agent sender; nil when the
+	// stream is not flow-controlled.
+	grantCredit func(int64)
 }
 
 func (stream *stream) halfClose() {
@@ -936,6 +1016,12 @@ func (stream *stream) releaseQueued(size int64) {
 	stream.streamBudget.Release(size)
 }
 
+func (stream *stream) grantCredits(size int64) {
+	if stream.grantCredit != nil {
+		stream.grantCredit(size)
+	}
+}
+
 func (stream *stream) Read(data []byte) (int, error) {
 	if stream.datagram {
 		return 0, errors.New("byte-stream read on UDP flow")
@@ -948,6 +1034,7 @@ func (stream *stream) Read(data []byte) (int, error) {
 		case chunk := <-stream.incoming:
 			stream.releaseQueued(chunk.size)
 			stream.buffer = chunk.data
+			stream.grantCredits(chunk.size)
 			continue
 		default:
 		}
@@ -961,6 +1048,7 @@ func (stream *stream) Read(data []byte) (int, error) {
 				stream.queueMu.Unlock()
 				stream.releaseQueued(size)
 				stream.buffer = tail
+				stream.grantCredits(size)
 				continue
 			}
 			err := stream.terminalErr
@@ -975,6 +1063,7 @@ func (stream *stream) Read(data []byte) (int, error) {
 		case chunk := <-stream.incoming:
 			stream.releaseQueued(chunk.size)
 			stream.buffer = chunk.data
+			stream.grantCredits(chunk.size)
 		case <-stream.terminal:
 			// loop: the next pass drains terminalBuffer or returns the error
 		case <-stream.ctx.Done():

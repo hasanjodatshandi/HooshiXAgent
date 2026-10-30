@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 func TestWindowWaitsForReceiverCredit(t *testing.T) {
@@ -107,4 +109,16 @@ func TestWindowConcurrentProducerAndConsumers(t *testing.T) {
 	}
 	wg.Wait()
 	window.Close(nil)
+}
+
+func TestInitialCreditCapsAndFloors(t *testing.T) {
+	if got := InitialCredit(0); got != 1 {
+		t.Fatalf("InitialCredit(0)=%d want 1", got)
+	}
+	if got := InitialCredit(1024); got != 1024 {
+		t.Fatalf("InitialCredit(1024)=%d", got)
+	}
+	if got := InitialCredit(1 << 30); got != contractv1.MaxWindowCreditBytes {
+		t.Fatalf("InitialCredit(1GiB)=%d want %d", got, contractv1.MaxWindowCreditBytes)
+	}
 }

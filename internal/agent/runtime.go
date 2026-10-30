@@ -417,7 +417,7 @@ func (runner *Runner) dialWithFailover(ctx context.Context, config Config, httpC
 		candidate := candidates[index]
 		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
 		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
-			Subprotocols:    []string{contractv1.TunnelSubprotocol},
+			Subprotocols:    []string{contractv1.TunnelSubprotocolV2, contractv1.TunnelSubprotocol},
 			HTTPClient:      httpClient,
 			CompressionMode: websocket.CompressionDisabled,
 		})
@@ -466,7 +466,7 @@ func (runner *Runner) runOncePinned(ctx context.Context, config Config, candidat
 		dialCtx, cancel := context.WithTimeout(ctx, runner.limits.HandshakeTimeout)
 		defer cancel()
 		conn, response, err := websocket.Dial(dialCtx, candidate, &websocket.DialOptions{
-			Subprotocols:    []string{contractv1.TunnelSubprotocol},
+			Subprotocols:    []string{contractv1.TunnelSubprotocolV2, contractv1.TunnelSubprotocol},
 			HTTPClient:      httpClient,
 			CompressionMode: websocket.CompressionDisabled,
 		})
@@ -583,7 +583,7 @@ func (runner *Runner) authenticateOrResume(ctx context.Context, conn *websocket.
 	defer cancel()
 	previous := ""
 	challenge := ""
-	if primary && conn.Subprotocol() == contractv1.TunnelSubprotocol {
+	if primary && contractv1.IsTunnelSubprotocol(conn.Subprotocol()) {
 		previous = runner.ResumableSessionID()
 		challenge = runner.ResumableResumeChallenge()
 	}

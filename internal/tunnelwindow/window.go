@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/hasanjodatshandi/HooshiXAgent/internal/contractv1"
 )
 
 var (
@@ -112,4 +114,18 @@ func (window *Window) Close(err error) {
 func (window *Window) broadcastLocked() {
 	close(window.changed)
 	window.changed = make(chan struct{})
+}
+
+// InitialCredit converts a receiver's per-stream byte budget into the first
+// stream_window_update grant. Credit is capped at the contract ceiling; a
+// tiny budget still grants one byte so a sender cannot be stalled forever by a
+// misconfigured zero.
+func InitialCredit(budget int64) uint32 {
+	if budget < 1 {
+		return 1
+	}
+	if budget > contractv1.MaxWindowCreditBytes {
+		return contractv1.MaxWindowCreditBytes
+	}
+	return uint32(budget)
 }
