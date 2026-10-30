@@ -407,10 +407,13 @@ func (sess *agentSession) handleStreamOpen(parent context.Context, frame contrac
 
 	if stream.window != nil {
 		// The Agent is the receiver of the request body: grant the Gateway its
-		// initial send window before the request can flow.
-		if err := sess.sendWindowUpdate(parent, frame.StreamID, tunnelwindow.InitialCredit(inputBytes)); err != nil {
-			sess.finishStream(frame.StreamID)
-			return err
+		// initial send window before the request can flow. The sender already
+		// holds a local header allowance, so only the remainder is body credit.
+		if bodyCredit := inputBytes - contractv1.HeaderAllowanceBytes; bodyCredit > 0 {
+			if err := sess.sendWindowUpdate(parent, frame.StreamID, tunnelwindow.InitialCredit(bodyCredit)); err != nil {
+				sess.finishStream(frame.StreamID)
+				return err
+			}
 		}
 	}
 	go sess.serveStream(stream)

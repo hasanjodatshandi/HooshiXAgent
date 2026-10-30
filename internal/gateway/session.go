@@ -568,7 +568,10 @@ func (sess *session) openStreamTarget(ctx context.Context, endpointID, authority
 	)
 	stream.datagram = mode == "udp"
 	if sess.flowControlled && !stream.datagram {
-		stream.window = tunnelwindow.New(contractv1.MaxWindowCreditBytes)
+		stream.window = tunnelwindow.New(contractv1.MaxWindowCreditBytes + contractv1.HeaderAllowanceBytes)
+		// Request headers must reach the Agent even when it is about to reject
+		// the stream; body bytes still wait for the Agent's credit.
+		_ = stream.window.Add(contractv1.HeaderAllowanceBytes)
 		stream.grantCredit = func(size int64) {
 			if size <= 0 {
 				return
