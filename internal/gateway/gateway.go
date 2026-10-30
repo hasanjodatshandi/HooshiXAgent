@@ -958,6 +958,8 @@ func (gateway *Gateway) handleIngress(w http.ResponseWriter, request *http.Reque
 			return
 		}
 		terminalCode, terminalMessage = "protocol_error", "request serialization failed"
+		gateway.logger.Warn(terminalMessage, "error", writeErr, "endpoint_id", route.EndpointID, "stream_id", stream.id,
+			"serialized_bytes", streamWriter.Written())
 		http.Error(w, terminalMessage, http.StatusBadRequest)
 		return
 	}
