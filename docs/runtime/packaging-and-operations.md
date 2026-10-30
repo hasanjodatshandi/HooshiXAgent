@@ -153,22 +153,25 @@ accept their device. Serving the artifact is not a secret — the grants are —
 the route is unauthenticated, `GET`/`HEAD` only, and answers 404 when the file
 is absent rather than failing the request.
 
-The bytes served today are `25,049,600` bytes, sha256
-`473c9f7f88b481e00997f891fa4b79a706a52270e91bafe76aff6e69244ed718`, built by
-the release workflow on tag `v0.2.4` (commit `0611ccb`) with
-`HOOSHIX_VERSION=v0.2.4`, and confirmed by downloading it back over HTTPS and
+The bytes served today are `25,059,328` bytes, sha256
+`cbb8cf0430d35a539ed3e46b386a2b2f466325c4720fdae9eb35d21489a516d2`, built by
+the release workflow on tag `v0.3.0` (commit `42aa756`) with
+`HOOSHIX_VERSION=v0.3.0`, and confirmed by downloading it back over HTTPS and
 matching that digest. Its embedded payloads are `hooshix-agent.exe`
-`cadba4f03294bdad8bf55b5d12c03ac8452bf10a1d3495cf07fc460eddd9bfa0` and
-`hooshix-agent-tray.exe` `2764d82f959d7a86eff3dc179a4642bd03bc92a2d3ef9cbc356c8f3c82a4afb4`,
+`4f37cd361a238ba66f4aa23fb4aebf047833f3e6d2007cd6ada4fe5deb7e8cc1` and
+`hooshix-agent-tray.exe` `6187231d9580157c44952ed1b3dd5c3a3c71c36f67edab079fb4781b9feb62bf`,
 which are exactly the two digests in the `SHA256SUMS` manifest Setup verifies
 before it touches `C:\Program Files`. `go version -m` reports `go1.27.3`,
-`vcs.revision=0611ccb…` and `vcs.modified=false` for all three images.
+`vcs.revision=42aa756…` and `vcs.modified=false` for all three images.
 
-`v0.2.4` adds the supervisor fix for a half-written settings file (`#64`): a
-truncated `config.json` now yields `pending_config` and waits for the write to
-finish instead of exiting into an SCM restart loop. It carries the v0.2.1
-embedded bilingual Agent UI (`#55`, LF fix `#56`), the tray **Restart service**
-item (`#58`), and the Alpine 3.24.3 Gateway runtime base (`#54`).
+`v0.3.0` puts ADR-0021 on the wire: peers negotiate `hooshix.tunnel.v2` and fall
+back to v1 when either side is older, v2 streams are paced by receiver credit
+(the sender blocks on `stream_window_update` instead of being reset), and a
+64 KiB header allowance lets a rejected stream still deliver its request
+headers. It also carries the pairing-capability URL cleanup (`#66`) and the
+quic-go 0.64.1 / x/sys 0.49.0 bumps. The embedded bilingual Agent UI (`#55`,
+LF fix `#56`), the tray **Restart service** item (`#58`) and the Alpine 3.24.3
+Gateway runtime base (`#54`) are unchanged.
 
 The patched toolchain is the reason for this rebuild, not cosmetics:
 `GO-2026-6809` / `CVE-2026-111943` in `crypto/x509` was published on 2026-10-21
