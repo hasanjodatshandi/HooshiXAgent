@@ -27,6 +27,10 @@ const (
 	MaxStreamsPerSessionBound = 4096
 	MaxQueuedFramesBound      = 65536
 	MaxHealthReconnectCount   = 1<<31 - 1
+	// MaxWindowCreditBytes bounds one additive credit grant for a stream
+	// (ADR-0021). Credit above this is a protocol error, not a way to inflate
+	// the receiver's memory ceiling.
+	MaxWindowCreditBytes = 8 << 20
 )
 
 var (
@@ -407,6 +411,15 @@ type StreamHalfClose struct {
 	MessageType     string `json:"message_type"`
 }
 
+// StreamWindowUpdate grants additional credit for one stream (ADR-0021 v2).
+// The stream identity is the frame header's StreamID, matching every other
+// stream-scoped control message.
+type StreamWindowUpdate struct {
+	ContractVersion int    `json:"contract_version"`
+	MessageType     string `json:"message_type"`
+	CreditBytes     uint32 `json:"credit_bytes"`
+}
+
 type StreamClose struct {
 	ContractVersion int    `json:"contract_version"`
 	MessageType     string `json:"message_type"`
@@ -662,6 +675,24 @@ func ValidateControlPayload(data []byte, streamID uint32, at time.Time) error {
 		}
 		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_half_close" {
 			return errors.New("invalid stream_half_close envelope")
+		}
+		return nil
+	case "stream_window_update":
+		if err := streamScope(); err != nil {
+			return err
+		}
+		if err := requirePresent(data, "credit_bytes"); err != nil {
+			return err
+		}
+		var message StreamWindowUpdate
+		if err := decodeControlStrict(data, &message); err != nil {
+			return err
+		}
+		if message.ContractVersion != ProtocolVersion || message.MessageType != "stream_window_update" {
+			return errors.New("invalid stream_window_update envelope")
+		}
+		if message.CreditBytes < 1 || message.CreditBytes > MaxWindowCreditBytes {
+			return errors.New("stream_window_update credit_bytes outside contract bounds")
 		}
 		return nil
 	case "stream_close":
