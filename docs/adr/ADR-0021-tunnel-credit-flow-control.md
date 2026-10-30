@@ -1,7 +1,9 @@
 # ADR-0021: Credit-based flow control for tunnel streams (protocol v2)
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-29
+Implementation status: not yet shipped. v1 remains the wire protocol until the
+v2 rollout completes; the increments below are tracked as separate changes.
 
 ## Context
 
