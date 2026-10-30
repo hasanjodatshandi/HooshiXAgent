@@ -732,6 +732,13 @@ type mockAgent struct {
 	suppressResponseClose bool
 }
 
+// mockStreamQueueFrames mirrors the real Agent's per-stream queue sizing:
+// the Agent derives its slot count from the byte budget at the 4 KiB framing
+// that http.Request.Write produces through its bufio writer, so a frame-count
+// queue sized any smaller than the transferred body closes the tunnel while
+// the product would simply buffer (and, in v2, hold credit).
+const mockStreamQueueFrames = (8 << 20) / 4096
+
 type mockStream struct {
 	id       uint32
 	incoming chan []byte
@@ -851,7 +858,7 @@ func (agent *mockAgent) handleControl(frame contractv1.Frame) {
 			agent.close()
 			return
 		}
-		stream := &mockStream{id: frame.StreamID, incoming: make(chan []byte, 64), done: make(chan struct{})}
+		stream := &mockStream{id: frame.StreamID, incoming: make(chan []byte, mockStreamQueueFrames), done: make(chan struct{})}
 		agent.mu.Lock()
 		agent.streams[frame.StreamID] = stream
 		agent.mu.Unlock()
